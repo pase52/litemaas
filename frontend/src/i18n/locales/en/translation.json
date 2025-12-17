@@ -1439,7 +1439,59 @@
   "users": {
     "actions": {
       "edit": "Edit",
-      "view": "View Details"
+      "view": "View Details",
+      "viewUsage": "View Usage Analytics"
+    },
+    "apiKeys": {
+      "createNew": "Create API Key",
+      "loadError": "Failed to load API keys",
+      "models": "Models",
+      "name": "Name",
+      "noKeys": "No API Keys",
+      "noKeysDesc": "This user has no API keys.",
+      "revoke": "Revoke",
+      "revokeConfirmDesc": "Are you sure you want to revoke this API key? This action cannot be undone.",
+      "revokeConfirmTitle": "Revoke API Key",
+      "revokeError": "Revoke Failed",
+      "revokeSuccess": "API Key Revoked",
+      "revokeSuccessDesc": "The API key has been revoked successfully.",
+      "status": "Status",
+      "tableLabel": "User API Keys",
+      "lastUsed": "Last Used",
+      "viewUsage": "View Usage"
+    },
+    "budget": {
+      "budgetUtilization": "Budget utilization",
+      "currentSpend": "Current Spend",
+      "loadError": "Failed to load budget information",
+      "maxBudget": "Max Budget",
+      "maxBudgetHelp": "Maximum spending limit in USD. Set to 0 for unlimited.",
+      "readOnlyNote": "You have read-only access to these settings.",
+      "rpmLimit": "RPM Limit",
+      "rpmLimitHelp": "Requests per minute. Set to 0 for unlimited.",
+      "tpmLimit": "TPM Limit",
+      "tpmLimitHelp": "Tokens per minute. Set to 0 for unlimited.",
+      "unlimited": "Unlimited",
+      "updateError": "Update Failed",
+      "updateSuccess": "Budget Updated",
+      "updateSuccessDesc": "User budget and limits have been updated successfully."
+    },
+    "subscriptions": {
+      "createdAt": "Created",
+      "loadError": "Failed to load subscriptions",
+      "model": "Model",
+      "noSubscriptions": "No Subscriptions",
+      "noSubscriptionsDesc": "This user has no subscriptions.",
+      "provider": "Provider",
+      "status": "Status",
+      "tableLabel": "User Subscriptions"
+    },
+    "tabs": {
+      "apiKeys": "API Keys",
+      "ariaLabel": "User details tabs",
+      "budgetLimits": "Budget & Limits",
+      "profile": "Profile",
+      "subscriptions": "Subscriptions"
     },
     "alerts": {
       "admin": {

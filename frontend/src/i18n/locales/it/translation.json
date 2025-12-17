@@ -1440,7 +1440,59 @@
   "users": {
     "actions": {
       "edit": "Modifica",
-      "view": "Visualizza dettagli"
+      "view": "Visualizza dettagli",
+      "viewUsage": "Visualizza Analisi Utilizzo"
+    },
+    "apiKeys": {
+      "createNew": "Crea Chiave API",
+      "loadError": "Impossibile caricare le chiavi API",
+      "models": "Modelli",
+      "name": "Nome",
+      "noKeys": "Nessuna Chiave API",
+      "noKeysDesc": "Questo utente non ha chiavi API.",
+      "revoke": "Revoca",
+      "revokeConfirmDesc": "Sei sicuro di voler revocare questa chiave API? Questa azione non può essere annullata.",
+      "revokeConfirmTitle": "Revoca Chiave API",
+      "revokeError": "Revoca Fallita",
+      "revokeSuccess": "Chiave API Revocata",
+      "revokeSuccessDesc": "La chiave API è stata revocata con successo.",
+      "status": "Stato",
+      "tableLabel": "Chiavi API Utente",
+      "lastUsed": "Ultimo Utilizzo",
+      "viewUsage": "Visualizza Utilizzo"
+    },
+    "budget": {
+      "budgetUtilization": "Utilizzo del budget",
+      "currentSpend": "Spesa Attuale",
+      "loadError": "Impossibile caricare le informazioni sul budget",
+      "maxBudget": "Budget Massimo",
+      "maxBudgetHelp": "Limite massimo di spesa in USD. Imposta a 0 per illimitato.",
+      "readOnlyNote": "Hai accesso in sola lettura a queste impostazioni.",
+      "rpmLimit": "Limite RPM",
+      "rpmLimitHelp": "Richieste al minuto. Imposta a 0 per illimitato.",
+      "tpmLimit": "Limite TPM",
+      "tpmLimitHelp": "Token al minuto. Imposta a 0 per illimitato.",
+      "unlimited": "Illimitato",
+      "updateError": "Aggiornamento Fallito",
+      "updateSuccess": "Budget Aggiornato",
+      "updateSuccessDesc": "Il budget e i limiti dell'utente sono stati aggiornati con successo."
+    },
+    "subscriptions": {
+      "createdAt": "Creato",
+      "loadError": "Impossibile caricare le sottoscrizioni",
+      "model": "Modello",
+      "noSubscriptions": "Nessuna Sottoscrizione",
+      "noSubscriptionsDesc": "Questo utente non ha sottoscrizioni.",
+      "provider": "Provider",
+      "status": "Stato",
+      "tableLabel": "Sottoscrizioni Utente"
+    },
+    "tabs": {
+      "apiKeys": "Chiavi API",
+      "ariaLabel": "Schede dettagli utente",
+      "budgetLimits": "Budget e Limiti",
+      "profile": "Profilo",
+      "subscriptions": "Sottoscrizioni"
     },
     "alerts": {
       "admin": {

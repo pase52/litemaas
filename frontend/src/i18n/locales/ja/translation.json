@@ -1440,7 +1440,59 @@
   "users": {
     "actions": {
       "edit": "編集",
-      "view": "詳細を表示"
+      "view": "詳細を表示",
+      "viewUsage": "使用状況分析を表示"
+    },
+    "apiKeys": {
+      "createNew": "APIキーを作成",
+      "loadError": "APIキーの読み込みに失敗しました",
+      "models": "モデル",
+      "name": "名前",
+      "noKeys": "APIキーなし",
+      "noKeysDesc": "このユーザーにはAPIキーがありません。",
+      "revoke": "取り消し",
+      "revokeConfirmDesc": "このAPIキーを取り消しますか？この操作は元に戻せません。",
+      "revokeConfirmTitle": "APIキーを取り消し",
+      "revokeError": "取り消しに失敗しました",
+      "revokeSuccess": "APIキーが取り消されました",
+      "revokeSuccessDesc": "APIキーが正常に取り消されました。",
+      "status": "ステータス",
+      "tableLabel": "ユーザーAPIキー",
+      "lastUsed": "最終使用日",
+      "viewUsage": "使用状況を表示"
+    },
+    "budget": {
+      "budgetUtilization": "予算使用率",
+      "currentSpend": "現在の支出",
+      "loadError": "予算情報の読み込みに失敗しました",
+      "maxBudget": "最大予算",
+      "maxBudgetHelp": "USD での最大支出制限。無制限の場合は0に設定。",
+      "readOnlyNote": "これらの設定は読み取り専用アクセスです。",
+      "rpmLimit": "RPM制限",
+      "rpmLimitHelp": "1分あたりのリクエスト数。無制限の場合は0に設定。",
+      "tpmLimit": "TPM制限",
+      "tpmLimitHelp": "1分あたりのトークン数。無制限の場合は0に設定。",
+      "unlimited": "無制限",
+      "updateError": "更新に失敗しました",
+      "updateSuccess": "予算が更新されました",
+      "updateSuccessDesc": "ユーザーの予算と制限が正常に更新されました。"
+    },
+    "subscriptions": {
+      "createdAt": "作成日",
+      "loadError": "サブスクリプションの読み込みに失敗しました",
+      "model": "モデル",
+      "noSubscriptions": "サブスクリプションなし",
+      "noSubscriptionsDesc": "このユーザーにはサブスクリプションがありません。",
+      "provider": "プロバイダー",
+      "status": "ステータス",
+      "tableLabel": "ユーザーサブスクリプション"
+    },
+    "tabs": {
+      "apiKeys": "APIキー",
+      "ariaLabel": "ユーザー詳細タブ",
+      "budgetLimits": "予算と制限",
+      "profile": "プロフィール",
+      "subscriptions": "サブスクリプション"
     },
     "alerts": {
       "admin": {
