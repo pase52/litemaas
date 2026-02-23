@@ -270,8 +270,48 @@ export class ApiKeyService extends BaseService {
         }
       }
 
-      // Ensure team exists in LiteLLM if team_id is provided
+      // Validate group membership and allowed models if teamId is provided
       if (request.teamId) {
+        // Check that user is a member of the group
+        const membership = await this.fastify.dbUtils.queryOne(
+          `SELECT tm.role FROM team_members tm
+           JOIN teams t ON tm.team_id = t.id
+           WHERE tm.team_id = $1 AND tm.user_id = $2 AND t.is_active = true`,
+          [request.teamId, userId],
+        );
+
+        if (!membership) {
+          throw this.createValidationError(
+            'You are not a member of the specified group or the group is inactive',
+            'teamId',
+            request.teamId,
+            'Please select a group you belong to',
+          );
+        }
+
+        // Check that the requested models are within the group's allowed models
+        const team = await this.fastify.dbUtils.queryOne(
+          `SELECT allowed_models FROM teams WHERE id = $1`,
+          [request.teamId],
+        );
+
+        if (team?.allowed_models && team.allowed_models.length > 0) {
+          const groupAllowedModels: string[] = team.allowed_models;
+          const disallowedModels = modelIds.filter(
+            (id) => !groupAllowedModels.includes(id),
+          );
+
+          if (disallowedModels.length > 0) {
+            throw this.createValidationError(
+              `The following models are not allowed by the selected group: ${disallowedModels.join(', ')}`,
+              'modelIds',
+              disallowedModels,
+              'Please only select models that are allowed by the group',
+            );
+          }
+        }
+
+        // Ensure team exists in LiteLLM
         await LiteLLMSyncUtils.ensureTeamExistsInLiteLLM(
           request.teamId,
           this.fastify,
@@ -420,9 +460,9 @@ export class ApiKeyService extends BaseService {
             max_parallel_requests,
             budget_duration, soft_budget,
             model_max_budget, model_rpm_limit, model_tpm_limit,
-            last_sync_at, sync_status, metadata
+            last_sync_at, sync_status, metadata, team_id
             ${isLegacyRequest ? ', subscription_id' : ''}
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21${isLegacyRequest ? ', $22' : ''})
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22${isLegacyRequest ? ', $23' : ''})
           RETURNING *`,
           [
             userId,
@@ -446,6 +486,7 @@ export class ApiKeyService extends BaseService {
             new Date(),
             'synced',
             request.metadata || {},
+            request.teamId || null,
             ...(isLegacyRequest ? [(request as LegacyCreateApiKeyRequest).subscriptionId] : []),
           ],
         );
@@ -473,6 +514,7 @@ export class ApiKeyService extends BaseService {
               liteLLMKeyId: liteLLMResponse.key,
               models: modelIds,
               modelCount: modelIds.length,
+              teamId: request.teamId || null,
               legacy: isLegacyRequest,
             }),
           ],
@@ -488,6 +530,7 @@ export class ApiKeyService extends BaseService {
             liteLLMKeyId: liteLLMResponse.key,
             models: modelIds,
             modelCount: modelIds.length,
+            teamId: request.teamId || null,
             keyAlias: liteLLMRequest.key_alias,
             originalName: request.name,
           },

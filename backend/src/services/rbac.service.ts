@@ -201,6 +201,27 @@ export class RBACService {
       resource: 'admin',
       action: 'backup',
     },
+    {
+      id: 'admin:groups:read',
+      name: 'View Groups',
+      description: 'View all groups',
+      resource: 'groups',
+      action: 'read',
+    },
+    {
+      id: 'admin:groups:write',
+      name: 'Manage Groups',
+      description: 'Create, update, delete groups',
+      resource: 'groups',
+      action: 'write',
+    },
+    {
+      id: 'groups:read',
+      name: 'View Own Groups',
+      description: 'View groups user belongs to',
+      resource: 'groups',
+      action: 'read',
+    },
   ];
 
   // System roles
@@ -219,6 +240,9 @@ export class RBACService {
         'admin:banners:write',
         'admin:subscriptions:read',
         'admin:subscriptions:write',
+        'admin:groups:read',
+        'admin:groups:write',
+        'groups:read',
         'users:read',
         'users:write',
         'users:delete',
@@ -240,6 +264,7 @@ export class RBACService {
       name: 'User',
       description: 'Standard user access',
       permissions: [
+        'groups:read',
         'models:read',
         'subscriptions:read',
         'subscriptions:write',
@@ -262,6 +287,8 @@ export class RBACService {
         'admin:audit', // View audit logs
         'admin:banners:read', // View banners in admin
         'admin:subscriptions:read', // View subscription requests (no write permission)
+        'admin:groups:read', // View all groups
+        'groups:read', // View own groups
         'users:read', // List and view users
         'models:read',
         'subscriptions:read',

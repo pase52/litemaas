@@ -43,7 +43,7 @@ export class DefaultTeamService {
             'monthly', // budget_duration
             50000, // tpm_limit
             1000, // rpm_limit
-            JSON.stringify([]), // allowed_models - empty array enables all models
+            [], // allowed_models - empty array enables all models (TEXT[] column)
             JSON.stringify({ auto_created: true, default_team: true, created_by: 'system' }), // metadata
             true, // is_active
           ],

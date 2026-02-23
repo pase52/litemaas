@@ -295,6 +295,11 @@ ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS max_parallel_requests INTEGER;
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS model_max_budget JSONB;
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS model_rpm_limit JSONB;
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS model_tpm_limit JSONB;
+
+-- Group/Team association for API keys
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS team_id UUID REFERENCES teams(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_api_keys_team_id ON api_keys(team_id);
+COMMENT ON COLUMN api_keys.team_id IS 'Optional group/team association for this API key';
 `;
 
 // API Key Models junction table

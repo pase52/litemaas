@@ -242,6 +242,14 @@ export interface LiteLLMTeamRequest {
   admins?: string[];
 }
 
+export interface LiteLLMTeamMemberRequest {
+  team_id: string;
+  member?: { user_id?: string; user_email?: string; role: 'admin' | 'user' };
+  user_id?: string;
+  user_email?: string;
+  max_budget_in_team?: number;
+}
+
 export interface LiteLLMTeamResponse {
   team_id: string;
   team_alias: string;

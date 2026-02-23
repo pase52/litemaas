@@ -298,7 +298,7 @@ export class TeamService extends BaseService {
       // Create team locally
       const teamResult = await this.fastify.dbUtils.queryOne(
         `INSERT INTO teams (
-          name, alias, description, litellm_team_id, max_budget, 
+          name, alias, description, lite_llm_team_id, max_budget, 
           current_spend, budget_duration, tpm_limit, rpm_limit, 
           allowed_models, metadata, is_active, created_by
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
@@ -313,7 +313,7 @@ export class TeamService extends BaseService {
           budgetDuration,
           tpmLimit ?? null,
           rpmLimit ?? null,
-          allowedModels ? JSON.stringify(allowedModels) : null,
+          allowedModels ?? null,
           JSON.stringify(metadata ?? {}),
           true,
           userId,
@@ -328,7 +328,7 @@ export class TeamService extends BaseService {
         );
       }
 
-      // Add creator as admin
+      // Add creator as admin (skip access check since team was just created)
       await this.addTeamMember(
         String(teamResult.id),
         {
@@ -337,9 +337,10 @@ export class TeamService extends BaseService {
           role: 'admin',
         },
         userId,
+        true, // skipAccessCheck - creator bootstraps their own membership
       );
 
-      // Add additional admins
+      // Add additional admins (skip access check - creator has implicit authority)
       for (const adminId of adminIds) {
         if (adminId !== userId) {
           await this.addTeamMember(
@@ -350,6 +351,7 @@ export class TeamService extends BaseService {
               role: 'admin',
             },
             userId,
+            true, // skipAccessCheck - during team creation
           );
         }
       }
@@ -580,16 +582,19 @@ export class TeamService extends BaseService {
     teamId: string,
     userId: string,
     updates: UpdateTeamDto,
+    skipAccessCheck = false,
   ): Promise<TeamWithMembers> {
     try {
-      // Verify user has admin access
-      const hasAccess = await this.checkTeamAccess(teamId, userId, 'admin');
-      if (!hasAccess) {
-        throw this.createForbiddenError(
-          'Insufficient permissions to update team',
-          'team:admin',
-          'Only team administrators can update team details',
-        );
+      // Verify user has admin access (skip for platform admins)
+      if (!skipAccessCheck) {
+        const hasAccess = await this.checkTeamAccess(teamId, userId, 'admin');
+        if (!hasAccess) {
+          throw this.createForbiddenError(
+            'Insufficient permissions to update team',
+            'team:admin',
+            'Only team administrators can update team details',
+          );
+        }
       }
 
       const {
@@ -660,7 +665,7 @@ export class TeamService extends BaseService {
 
       if (allowedModels !== undefined) {
         updateFields.push(`allowed_models = $${paramIndex++}`);
-        params.push(JSON.stringify(allowedModels));
+        params.push(allowedModels);
       }
 
       if (metadata !== undefined) {
@@ -695,18 +700,18 @@ export class TeamService extends BaseService {
         params,
       );
 
-      // Update in LiteLLM if integrated
-      if (updatedTeam && updatedTeam.litellm_team_id && !this.shouldUseMockData()) {
+      // Sync update to LiteLLM
+      if (updatedTeam && updatedTeam.lite_llm_team_id && !this.shouldUseMockData()) {
         try {
-          // Note: LiteLLM doesn't have a direct team update endpoint in the current API
-          // This would be implemented when the API supports it
-          this.fastify.log.debug(
-            {
-              teamId,
-              liteLLMTeamId: updatedTeam?.litellm_team_id,
-            },
-            'Team update - LiteLLM sync would be implemented here',
-          );
+          await this.liteLLMService.updateTeam({
+            team_id: updatedTeam.lite_llm_team_id as string,
+            ...(name !== undefined && { team_alias: alias || name }),
+            ...(maxBudget !== undefined && { max_budget: maxBudget }),
+            ...(allowedModels !== undefined && { models: allowedModels }),
+            ...(tpmLimit !== undefined && { tpm_limit: tpmLimit }),
+            ...(rpmLimit !== undefined && { rpm_limit: rpmLimit }),
+            ...(budgetDuration !== undefined && { budget_duration: budgetDuration }),
+          });
         } catch (error) {
           this.fastify.log.warn(error, 'Failed to sync team update with LiteLLM');
         }
@@ -747,16 +752,19 @@ export class TeamService extends BaseService {
     teamId: string,
     assignment: CreateUserTeamAssignmentDto,
     adminUserId: string,
+    skipAccessCheck = false,
   ): Promise<TeamMember & { user: Pick<User, 'id' | 'username' | 'email' | 'fullName'> }> {
     try {
-      // Verify admin has access
-      const hasAccess = await this.checkTeamAccess(teamId, adminUserId, 'admin');
-      if (!hasAccess) {
-        throw this.createForbiddenError(
-          'Insufficient permissions to add team members',
-          'team:admin',
-          'Only team administrators can add members',
-        );
+      // Verify admin has access (skip for platform admins)
+      if (!skipAccessCheck) {
+        const hasAccess = await this.checkTeamAccess(teamId, adminUserId, 'admin');
+        if (!hasAccess) {
+          throw this.createForbiddenError(
+            'Insufficient permissions to add team members',
+            'team:admin',
+            'Only team administrators can add members',
+          );
+        }
       }
 
       const { userId, role } = assignment;
@@ -806,6 +814,24 @@ export class TeamService extends BaseService {
         );
       }
 
+      // Sync non-viewer members to LiteLLM
+      if (role !== 'viewer') {
+        const team = await this.fastify.dbUtils.queryOne(
+          'SELECT lite_llm_team_id FROM teams WHERE id = $1',
+          [teamId],
+        );
+        if (team?.lite_llm_team_id && !this.shouldUseMockData()) {
+          try {
+            await this.liteLLMService.addTeamMember(team.lite_llm_team_id as string, {
+              user_id: userId,
+              role: role === 'admin' ? 'admin' : 'user',
+            });
+          } catch (error) {
+            this.fastify.log.warn(error, 'Failed to sync member add to LiteLLM');
+          }
+        }
+      }
+
       // Create audit log
       await this.fastify.dbUtils.query(
         `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, metadata)
@@ -849,16 +875,23 @@ export class TeamService extends BaseService {
     }
   }
 
-  async removeTeamMember(teamId: string, userId: string, adminUserId: string): Promise<void> {
+  async removeTeamMember(
+    teamId: string,
+    userId: string,
+    adminUserId: string,
+    skipAccessCheck = false,
+  ): Promise<void> {
     try {
-      // Verify admin has access
-      const hasAccess = await this.checkTeamAccess(teamId, adminUserId, 'admin');
-      if (!hasAccess) {
-        throw this.createForbiddenError(
-          'Insufficient permissions to remove team members',
-          'team:admin',
-          'Only team administrators can remove members',
-        );
+      // Verify admin has access (skip for platform admins)
+      if (!skipAccessCheck) {
+        const hasAccess = await this.checkTeamAccess(teamId, adminUserId, 'admin');
+        if (!hasAccess) {
+          throw this.createForbiddenError(
+            'Insufficient permissions to remove team members',
+            'team:admin',
+            'Only team administrators can remove members',
+          );
+        }
       }
 
       // Check if member exists
@@ -898,6 +931,24 @@ export class TeamService extends BaseService {
         [teamId, userId],
       );
 
+      // Sync removal to LiteLLM (only if member was synced, i.e., not a viewer)
+      if (member.role !== 'viewer') {
+        const team = await this.fastify.dbUtils.queryOne(
+          'SELECT lite_llm_team_id FROM teams WHERE id = $1',
+          [teamId],
+        );
+        if (team?.lite_llm_team_id && !this.shouldUseMockData()) {
+          try {
+            await this.liteLLMService.removeTeamMember(
+              team.lite_llm_team_id as string,
+              userId,
+            );
+          } catch (error) {
+            this.fastify.log.warn(error, 'Failed to sync member removal to LiteLLM');
+          }
+        }
+      }
+
       // Create audit log
       await this.fastify.dbUtils.query(
         `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, metadata)
@@ -930,16 +981,19 @@ export class TeamService extends BaseService {
     userId: string,
     newRole: 'admin' | 'member' | 'viewer',
     adminUserId: string,
+    skipAccessCheck = false,
   ): Promise<TeamMember & { user: Pick<User, 'id' | 'username' | 'email' | 'fullName'> }> {
     try {
-      // Verify admin has access
-      const hasAccess = await this.checkTeamAccess(teamId, adminUserId, 'admin');
-      if (!hasAccess) {
-        throw this.createForbiddenError(
-          'Insufficient permissions to update member roles',
-          'team:admin',
-          'Only team administrators can change member roles',
-        );
+      // Verify admin has access (skip for platform admins)
+      if (!skipAccessCheck) {
+        const hasAccess = await this.checkTeamAccess(teamId, adminUserId, 'admin');
+        if (!hasAccess) {
+          throw this.createForbiddenError(
+            'Insufficient permissions to update member roles',
+            'team:admin',
+            'Only team administrators can change member roles',
+          );
+        }
       }
 
       // Get current member info
@@ -959,8 +1013,10 @@ export class TeamService extends BaseService {
         );
       }
 
+      const previousRole = member.role as string;
+
       // If changing from admin, ensure not the last admin
-      if (member.role === 'admin' && newRole !== 'admin') {
+      if (previousRole === 'admin' && newRole !== 'admin') {
         const adminCount = await this.fastify.dbUtils.queryOne(
           `SELECT COUNT(*) FROM team_members WHERE team_id = $1 AND role = 'admin'`,
           [teamId],
@@ -991,6 +1047,38 @@ export class TeamService extends BaseService {
         );
       }
 
+      // Sync role change to LiteLLM
+      const team = await this.fastify.dbUtils.queryOne(
+        'SELECT lite_llm_team_id FROM teams WHERE id = $1',
+        [teamId],
+      );
+      if (team?.lite_llm_team_id && !this.shouldUseMockData()) {
+        try {
+          if (previousRole === 'viewer' && newRole !== 'viewer') {
+            // viewer → member/admin: add to LiteLLM
+            await this.liteLLMService.addTeamMember(team.lite_llm_team_id as string, {
+              user_id: userId,
+              role: newRole === 'admin' ? 'admin' : 'user',
+            });
+          } else if (previousRole !== 'viewer' && newRole === 'viewer') {
+            // member/admin → viewer: remove from LiteLLM
+            await this.liteLLMService.removeTeamMember(
+              team.lite_llm_team_id as string,
+              userId,
+            );
+          } else if (previousRole !== 'viewer' && newRole !== 'viewer') {
+            // admin ↔ member: update in LiteLLM
+            await this.liteLLMService.updateTeamMember(
+              team.lite_llm_team_id as string,
+              userId,
+              { role: newRole === 'admin' ? 'admin' : 'user' },
+            );
+          }
+        } catch (error) {
+          this.fastify.log.warn(error, 'Failed to sync member role change to LiteLLM');
+        }
+      }
+
       // Create audit log
       await this.fastify.dbUtils.query(
         `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, metadata)
@@ -1000,7 +1088,7 @@ export class TeamService extends BaseService {
           'TEAM_MEMBER_ROLE_UPDATE',
           'TEAM',
           teamId,
-          JSON.stringify({ targetUserId: userId, previousRole: member.role, newRole }),
+          JSON.stringify({ targetUserId: userId, previousRole, newRole }),
         ],
       );
 
@@ -1009,7 +1097,7 @@ export class TeamService extends BaseService {
           adminUserId,
           teamId,
           targetUserId: userId,
-          previousRole: member.role,
+          previousRole,
           newRole,
         },
         'Team member role updated',
@@ -1023,7 +1111,7 @@ export class TeamService extends BaseService {
         joinedAt: new Date(updatedMember.joined_at as string | Date),
         addedBy: updatedMember.added_by as string,
         user: {
-          id: member.id as string,
+          id: member.user_id as string,
           username: member.username as string,
           email: member.email as string,
           fullName: member.full_name as string,
@@ -1031,6 +1119,116 @@ export class TeamService extends BaseService {
       };
     } catch (error) {
       this.fastify.log.error(error, 'Failed to update team member role');
+      throw error;
+    }
+  }
+
+  /**
+   * Get all teams for platform admins (excludes default team).
+   */
+  async getAllTeams(
+    params: TeamListParams = {},
+  ): Promise<{ data: TeamWithMembers[]; total: number }> {
+    const { page = 1, limit = 20, search, isActive } = params;
+    const offset = (page - 1) * limit;
+
+    const DEFAULT_TEAM_ID = 'a0000000-0000-4000-8000-000000000001';
+
+    if (this.shouldUseMockData()) {
+      let filteredTeams = this.MOCK_TEAMS.filter((t) => t.id !== DEFAULT_TEAM_ID);
+
+      if (search) {
+        filteredTeams = filteredTeams.filter(
+          (team) =>
+            team.name.toLowerCase().includes(search.toLowerCase()) ||
+            (team.alias && team.alias.toLowerCase().includes(search.toLowerCase())),
+        );
+      }
+
+      if (typeof isActive === 'boolean') {
+        filteredTeams = filteredTeams.filter((team) => team.isActive === isActive);
+      }
+
+      const total = filteredTeams.length;
+      const paginatedData = filteredTeams.slice(offset, offset + limit);
+
+      return this.createMockResponse({ data: paginatedData, total });
+    }
+
+    try {
+      let query = `
+        SELECT t.*, COUNT(tm.id) as member_count
+        FROM teams t
+        LEFT JOIN team_members tm ON t.id = tm.team_id
+        WHERE t.id != $1
+      `;
+      const queryParams: any[] = [DEFAULT_TEAM_ID];
+      let paramIndex = 2;
+
+      if (search) {
+        query += ` AND (t.name ILIKE $${paramIndex} OR t.alias ILIKE $${paramIndex} OR t.description ILIKE $${paramIndex})`;
+        queryParams.push(`%${search}%`);
+        paramIndex++;
+      }
+
+      if (typeof isActive === 'boolean') {
+        query += ` AND t.is_active = $${paramIndex}`;
+        queryParams.push(isActive);
+        paramIndex++;
+      }
+
+      query += ` GROUP BY t.id ORDER BY t.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+      queryParams.push(limit, offset);
+
+      // Count query
+      let countQuery = `
+        SELECT COUNT(DISTINCT t.id)
+        FROM teams t
+        WHERE t.id != $1
+      `;
+      const countParams: any[] = [DEFAULT_TEAM_ID];
+      let countParamIndex = 2;
+
+      if (search) {
+        countQuery += ` AND (t.name ILIKE $${countParamIndex} OR t.alias ILIKE $${countParamIndex} OR t.description ILIKE $${countParamIndex})`;
+        countParams.push(`%${search}%`);
+        countParamIndex++;
+      }
+
+      if (typeof isActive === 'boolean') {
+        countQuery += ` AND t.is_active = $${countParamIndex}`;
+        countParams.push(isActive);
+        countParamIndex++;
+      }
+
+      const [teams, countResult] = await Promise.all([
+        this.fastify.dbUtils.queryMany(query, queryParams),
+        this.fastify.dbUtils.queryOne(countQuery, countParams),
+      ]);
+
+      const teamsWithMembers = await Promise.all(
+        teams.map(async (team) => {
+          const members = await this.fastify.dbUtils.queryMany(
+            `
+            SELECT tm.*, u.username, u.email, u.full_name
+            FROM team_members tm
+            JOIN users u ON tm.user_id = u.id
+            WHERE tm.team_id = $1
+            ORDER BY tm.joined_at ASC
+          `,
+            [team.id as string],
+          );
+
+          return this.mapToTeamWithMembers(team, members);
+        }),
+      );
+
+      return {
+        data: teamsWithMembers,
+        total: countResult ? parseInt(String(countResult.count)) : 0,
+      };
+    } catch (error) {
+      this.fastify.log.error(error, 'Failed to get all teams');
       throw error;
     }
   }
@@ -1198,19 +1396,22 @@ export class TeamService extends BaseService {
     }
   }
 
-  async deleteTeam(teamId: string, userId: string): Promise<void> {
+  async deleteTeam(teamId: string, userId: string, skipAccessCheck = false): Promise<void> {
     try {
-      // Verify user has admin access
-      const hasAccess = await this.checkTeamAccess(teamId, userId, 'admin');
-      if (!hasAccess) {
-        throw this.createForbiddenError(
-          'Insufficient permissions to delete team',
-          'team:admin',
-          'Only team administrators can delete teams',
-        );
+      // Verify user has admin access (skip for platform admins)
+      if (!skipAccessCheck) {
+        const hasAccess = await this.checkTeamAccess(teamId, userId, 'admin');
+        if (!hasAccess) {
+          throw this.createForbiddenError(
+            'Insufficient permissions to delete team',
+            'team:admin',
+            'Only team administrators can delete teams',
+          );
+        }
       }
 
-      const team = await this.getTeam(teamId, userId);
+      // When skipAccessCheck, don't filter by userId
+      const team = skipAccessCheck ? await this.getTeam(teamId) : await this.getTeam(teamId, userId);
       if (!team) {
         throw this.createNotFoundError(
           'Team',
@@ -1239,6 +1440,15 @@ export class TeamService extends BaseService {
         `UPDATE teams SET is_active = false, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
         [teamId],
       );
+
+      // Delete from LiteLLM
+      if (team.liteLLMTeamId && !this.shouldUseMockData()) {
+        try {
+          await this.liteLLMService.deleteTeams([team.liteLLMTeamId]);
+        } catch (error) {
+          this.fastify.log.warn(error, 'Failed to sync team deletion to LiteLLM');
+        }
+      }
 
       // Create audit log
       await this.fastify.dbUtils.query(
@@ -1269,7 +1479,7 @@ export class TeamService extends BaseService {
 
   // Helper methods
 
-  private async checkTeamAccess(
+  async checkTeamAccess(
     teamId: string,
     userId: string,
     requiredRole: 'admin' | 'member' | 'viewer' = 'viewer',
@@ -1299,13 +1509,13 @@ export class TeamService extends BaseService {
       name: team.name,
       alias: team.alias,
       description: team.description,
-      liteLLMTeamId: team.litellm_team_id,
+      liteLLMTeamId: team.lite_llm_team_id,
       maxBudget: team.max_budget,
       currentSpend: team.current_spend || 0,
       budgetDuration: team.budget_duration,
       tpmLimit: team.tpm_limit,
       rpmLimit: team.rpm_limit,
-      allowedModels: team.allowed_models ? JSON.parse(team.allowed_models) : undefined,
+      allowedModels: team.allowed_models || undefined,
       metadata: team.metadata || {},
       isActive: team.is_active,
       createdAt: new Date(team.created_at),

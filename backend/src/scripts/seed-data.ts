@@ -68,8 +68,10 @@ async function seedData() {
     const app = await createApp({ logger: false });
     await app.ready();
 
-    // Check if data already exists
-    const existingUsers = await app.dbUtils.query('SELECT COUNT(*) as count FROM users');
+    // Check if data already exists (excluding the system user created by migrations)
+    const existingUsers = await app.dbUtils.query(
+      "SELECT COUNT(*) as count FROM users WHERE id != '00000000-0000-0000-0000-000000000001'",
+    );
     if (Number(existingUsers.rows[0].count) > 0) {
       console.log('⚠️  Database already contains data. Skipping seed.');
       await app.close();

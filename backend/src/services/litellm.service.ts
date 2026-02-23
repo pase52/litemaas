@@ -1189,6 +1189,133 @@ export class LiteLLMService extends BaseService {
     }
   }
 
+  async updateTeam(request: {
+    team_id: string;
+    team_alias?: string;
+    max_budget?: number;
+    models?: string[];
+    tpm_limit?: number;
+    rpm_limit?: number;
+    budget_duration?: string;
+    metadata?: Record<string, any>;
+  }): Promise<LiteLLMTeamResponse> {
+    if (this.config.enableMocking) {
+      const mockResponse: LiteLLMTeamResponse = {
+        team_id: request.team_id,
+        team_alias: request.team_alias || `Team ${request.team_id}`,
+        max_budget: request.max_budget,
+        spend: 0,
+        models: request.models || [],
+        tpm_limit: request.tpm_limit,
+        rpm_limit: request.rpm_limit,
+        created_at: new Date().toISOString(),
+      };
+      return this.createMockResponse(mockResponse);
+    }
+
+    try {
+      return await this.makeRequest<LiteLLMTeamResponse>('/team/update', {
+        method: 'POST',
+        body: request,
+      });
+    } catch (error) {
+      this.fastify.log.error(error, 'Failed to update team in LiteLLM');
+      throw error;
+    }
+  }
+
+  async deleteTeams(teamIds: string[]): Promise<void> {
+    if (this.config.enableMocking) {
+      this.fastify.log.info({ teamIds }, 'LiteLLM mock: deleteTeams');
+      return;
+    }
+
+    try {
+      await this.makeRequest('/team/delete', {
+        method: 'POST',
+        body: { team_ids: teamIds },
+      });
+    } catch (error) {
+      this.fastify.log.error(error, 'Failed to delete teams in LiteLLM');
+      throw error;
+    }
+  }
+
+  async addTeamMember(
+    teamId: string,
+    member: { user_id: string; role: 'admin' | 'user' },
+  ): Promise<any> {
+    if (this.config.enableMocking) {
+      this.fastify.log.info({ teamId, member }, 'LiteLLM mock: addTeamMember');
+      return this.createMockResponse({ success: true });
+    }
+
+    try {
+      return await this.makeRequest('/team/member_add', {
+        method: 'POST',
+        body: {
+          team_id: teamId,
+          member: { user_id: member.user_id, role: member.role },
+        },
+      });
+    } catch (error) {
+      this.fastify.log.error(error, 'Failed to add team member in LiteLLM');
+      throw error;
+    }
+  }
+
+  async removeTeamMember(teamId: string, userId: string): Promise<void> {
+    if (this.config.enableMocking) {
+      this.fastify.log.info({ teamId, userId }, 'LiteLLM mock: removeTeamMember');
+      return;
+    }
+
+    try {
+      await this.makeRequest('/team/member_delete', {
+        method: 'POST',
+        body: { team_id: teamId, user_id: userId },
+      });
+    } catch (error) {
+      this.fastify.log.error(error, 'Failed to remove team member in LiteLLM');
+      throw error;
+    }
+  }
+
+  async updateTeamMember(
+    teamId: string,
+    userId: string,
+    updates: { role?: 'admin' | 'user'; max_budget_in_team?: number },
+  ): Promise<any> {
+    if (this.config.enableMocking) {
+      this.fastify.log.info({ teamId, userId, updates }, 'LiteLLM mock: updateTeamMember');
+      return this.createMockResponse({ success: true });
+    }
+
+    try {
+      return await this.makeRequest('/team/member_update', {
+        method: 'POST',
+        body: { team_id: teamId, user_id: userId, ...updates },
+      });
+    } catch (error) {
+      this.fastify.log.error(error, 'Failed to update team member in LiteLLM');
+      throw error;
+    }
+  }
+
+  async listTeams(params?: { user_id?: string }): Promise<LiteLLMTeamResponse[]> {
+    if (this.config.enableMocking) {
+      return this.createMockResponse([]);
+    }
+
+    try {
+      const queryParams = params?.user_id ? `?user_id=${params.user_id}` : '';
+      return await this.makeRequest<LiteLLMTeamResponse[]>(`/v2/team/list${queryParams}`);
+    } catch (error) {
+      this.fastify.log.error(error, 'Failed to list teams from LiteLLM');
+      throw error;
+    }
+  }
+
   async validateApiKey(apiKey: string): Promise<boolean> {
     if (this.config.enableMocking) {
       return apiKey.startsWith('sk-litellm-') || apiKey === 'test-key';
