@@ -3,11 +3,13 @@ import {
   GroupWithMembers,
   CreateGroupRequest,
   UpdateGroupRequest,
+  UpdateGroupDetailsRequest,
   AddGroupMemberRequest,
   UpdateGroupMemberRoleRequest,
   GroupListParams,
   GroupBudgetInfo,
   GroupMember,
+  GroupUserSearchResult,
   PaginatedGroupResponse,
 } from '../types/groups';
 
@@ -170,6 +172,35 @@ export class GroupsService {
    */
   async removeGroupMember(groupId: string, userId: string): Promise<void> {
     await apiClient.delete(`/groups/${groupId}/members/${userId}`);
+  }
+
+  /**
+   * Update group details (name, alias, description)
+   * User must be a group admin
+   */
+  async updateMyGroupDetails(
+    groupId: string,
+    data: UpdateGroupDetailsRequest,
+  ): Promise<GroupWithMembers> {
+    return apiClient.patch<GroupWithMembers>(`/groups/${groupId}`, data);
+  }
+
+  /**
+   * Search for users to add to a group
+   * User must be a group admin. Returns users not already in the group.
+   */
+  async searchGroupUsers(
+    groupId: string,
+    search: string,
+    limit = 10,
+  ): Promise<GroupUserSearchResult> {
+    const params = new URLSearchParams({ search });
+    if (limit !== 10) {
+      params.append('limit', limit.toString());
+    }
+    return apiClient.get<GroupUserSearchResult>(
+      `/groups/${groupId}/users/search?${params.toString()}`,
+    );
   }
 
   // ============================================

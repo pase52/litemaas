@@ -96,6 +96,15 @@ export const UpdateGroupSchema = Type.Object({
 
 export type UpdateGroup = Static<typeof UpdateGroupSchema>;
 
+/** Body schema for updating group details (group admin - limited fields) */
+export const UpdateGroupDetailsSchema = Type.Object({
+  name: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
+  alias: Type.Optional(Type.String({ maxLength: 50 })),
+  description: Type.Optional(Type.String({ maxLength: 500 })),
+});
+
+export type UpdateGroupDetails = Static<typeof UpdateGroupDetailsSchema>;
+
 /** Body schema for adding a member to a group */
 export const AddGroupMemberSchema = Type.Object({
   userId: Type.String(),
@@ -149,6 +158,43 @@ export type GroupMemberParam = Static<typeof GroupMemberParamSchema>;
 
 /** Paginated response schema for group listings */
 export const GroupListResponseSchema = createPaginatedResponse(GroupSchema);
+
+/** Group schema with the current user's role included */
+export const GroupWithMyRoleSchema = Type.Intersect([
+  GroupSchema,
+  Type.Object({
+    myRole: Type.Optional(GroupMemberRoleEnum),
+  }),
+]);
+
+export type GroupWithMyRole = Static<typeof GroupWithMyRoleSchema>;
+
+/** Paginated response for user's groups with role info */
+export const MyGroupListResponseSchema = createPaginatedResponse(GroupWithMyRoleSchema);
+
+// ─── User Search Schema ──────────────────────────────────────────────────────
+
+/** Query schema for searching users within a group context */
+export const GroupUserSearchQuerySchema = Type.Object({
+  search: Type.String({ minLength: 2, maxLength: 100 }),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, default: 10 })),
+});
+
+export type GroupUserSearchQuery = Static<typeof GroupUserSearchQuerySchema>;
+
+/** Response for user search within group context */
+export const GroupUserSearchResponseSchema = Type.Object({
+  users: Type.Array(
+    Type.Object({
+      userId: Type.String(),
+      username: Type.String(),
+      email: Type.String(),
+    }),
+  ),
+  total: Type.Integer(),
+});
+
+export type GroupUserSearchResponse = Static<typeof GroupUserSearchResponseSchema>;
 
 // ─── Budget Info Schema ──────────────────────────────────────────────────────
 

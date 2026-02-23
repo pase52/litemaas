@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from 'react-query';
 import {
@@ -7,6 +7,7 @@ import {
   Content,
   ContentVariants,
   Label,
+  Badge,
   Spinner,
   EmptyState,
   EmptyStateVariant,
@@ -24,10 +25,11 @@ import {
   FlexItem,
 } from '@patternfly/react-core';
 import { UsersIcon } from '@patternfly/react-icons';
-import { Table, Thead, Tbody, Tr, Th, Td } from '@patternfly/react-table';
+import { Table, Thead, Tbody, Tr, Th, Td, ActionsColumn } from '@patternfly/react-table';
 import { groupsService } from '../services/groups.service';
 import { Group, GroupListParams } from '../types/groups';
 import { useNotifications } from '../contexts/NotificationContext';
+import MyGroupEditModal from '../components/groups/MyGroupEditModal';
 
 const GroupsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -37,6 +39,11 @@ const GroupsPage: React.FC = () => {
   const [searchValue, setSearchValue] = useState('');
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(10);
+
+  // Edit modal state
+  const [selectedGroup, setSelectedGroup] = useState<Group | null>(null);
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const editModalTriggerRef = useRef<HTMLElement | null>(null);
 
   // Build query parameters
   const queryParams: GroupListParams = {
@@ -106,6 +113,38 @@ const GroupsPage: React.FC = () => {
   const handleSearch = (value: string) => {
     setSearchValue(value);
     setPage(1);
+  };
+
+  const getRoleBadge = (role?: string) => {
+    if (!role) return null;
+    const colorMap: Record<string, string> = {
+      admin: 'var(--pf-t--global--color--status--info--default)',
+      member: 'var(--pf-t--global--color--status--success--default)',
+      viewer: 'var(--pf-t--global--color--status--default--default)',
+    };
+    const labelMap: Record<string, string> = {
+      admin: t('groups.members.roleAdmin', 'Admin'),
+      member: t('groups.members.roleMember', 'Member'),
+      viewer: t('groups.members.roleViewer', 'Viewer'),
+    };
+    return (
+      <Badge
+        style={{
+          backgroundColor: colorMap[role] || colorMap.viewer,
+          color: 'var(--pf-t--global--text--color--inverse)',
+        }}
+      >
+        {labelMap[role] || role}
+      </Badge>
+    );
+  };
+
+  const handleManageGroup = (group: Group, triggerElement?: HTMLElement) => {
+    setSelectedGroup(group);
+    if (triggerElement) {
+      editModalTriggerRef.current = triggerElement;
+    }
+    setIsEditModalOpen(true);
   };
 
   // Loading state
@@ -230,35 +269,94 @@ const GroupsPage: React.FC = () => {
                   </caption>
                   <Thead>
                     <Tr>
-                      <Th width={25}>{t('groups.table.name', 'Name')}</Th>
-                      <Th width={30}>{t('groups.table.description', 'Description')}</Th>
-                      <Th width={15}>{t('groups.table.members', 'Members')}</Th>
-                      <Th width={15}>{t('groups.table.models', 'Models')}</Th>
-                      <Th width={15}>{t('groups.table.status', 'Status')}</Th>
+                      <Th width={20}>{t('groups.table.name', 'Name')}</Th>
+                      <Th width={25}>{t('groups.table.description', 'Description')}</Th>
+                      <Th width={10}>{t('groups.table.myRole', 'My Role')}</Th>
+                      <Th width={10}>{t('groups.table.members', 'Members')}</Th>
+                      <Th width={10}>{t('groups.table.models', 'Models')}</Th>
+                      <Th width={10}>{t('groups.table.status', 'Status')}</Th>
+                      <Th screenReaderText={t('groups.table.actions', 'Actions')}></Th>
                     </Tr>
                   </Thead>
                   <Tbody>
-                    {groups.map((group: Group) => (
-                      <Tr key={group.id}>
-                        <Th scope="row">
-                          <strong>{group.name}</strong>
-                        </Th>
-                        <Td>{truncateDescription(group.description)}</Td>
-                        <Td>
-                          <Flex
-                            alignItems={{ default: 'alignItemsCenter' }}
-                            spaceItems={{ default: 'spaceItemsSm' }}
+                    {groups.map((group: Group) => {
+                      const isGroupAdmin = group.myRole === 'admin';
+
+                      const actions = isGroupAdmin
+                        ? [
+                            {
+                              title: t('groups.actions.manage', 'Manage'),
+                              onClick: (event: React.MouseEvent) =>
+                                handleManageGroup(
+                                  group,
+                                  event.currentTarget as HTMLElement,
+                                ),
+                            },
+                          ]
+                        : [
+                            {
+                              title: t('groups.actions.view', 'View'),
+                              onClick: (event: React.MouseEvent) =>
+                                handleManageGroup(
+                                  group,
+                                  event.currentTarget as HTMLElement,
+                                ),
+                            },
+                          ];
+
+                      return (
+                        <Tr
+                          key={group.id}
+                          isClickable
+                          onRowClick={() => handleManageGroup(group)}
+                        >
+                          <Th scope="row">
+                            <Flex
+                              alignItems={{ default: 'alignItemsCenter' }}
+                              spaceItems={{ default: 'spaceItemsSm' }}
+                            >
+                              <FlexItem>
+                                <UsersIcon />
+                              </FlexItem>
+                              <FlexItem>
+                                <strong>{group.name}</strong>
+                                {group.alias && (
+                                  <Content
+                                    component={ContentVariants.small}
+                                    style={{
+                                      color: 'var(--pf-t--global--text--color--subtle)',
+                                    }}
+                                  >
+                                    {group.alias}
+                                  </Content>
+                                )}
+                              </FlexItem>
+                            </Flex>
+                          </Th>
+                          <Td>{truncateDescription(group.description)}</Td>
+                          <Td>{getRoleBadge(group.myRole)}</Td>
+                          <Td>
+                            <Flex
+                              alignItems={{ default: 'alignItemsCenter' }}
+                              spaceItems={{ default: 'spaceItemsSm' }}
+                            >
+                              <FlexItem>
+                                <UsersIcon />
+                              </FlexItem>
+                              <FlexItem>{group.memberCount}</FlexItem>
+                            </Flex>
+                          </Td>
+                          <Td>{getModelsDisplay(group)}</Td>
+                          <Td>{getStatusBadge(group.isActive)}</Td>
+                          <Td
+                            isActionCell
+                            onClick={(e: React.MouseEvent) => e.stopPropagation()}
                           >
-                            <FlexItem>
-                              <UsersIcon />
-                            </FlexItem>
-                            <FlexItem>{group.memberCount}</FlexItem>
-                          </Flex>
-                        </Td>
-                        <Td>{getModelsDisplay(group)}</Td>
-                        <Td>{getStatusBadge(group.isActive)}</Td>
-                      </Tr>
-                    ))}
+                            <ActionsColumn items={actions} />
+                          </Td>
+                        </Tr>
+                      );
+                    })}
                   </Tbody>
                 </Table>
 
@@ -283,6 +381,28 @@ const GroupsPage: React.FC = () => {
           </div>
         )}
       </PageSection>
+
+      {/* Group Edit/View Modal */}
+      <MyGroupEditModal
+        group={selectedGroup}
+        isOpen={isEditModalOpen}
+        canEdit={selectedGroup?.myRole === 'admin'}
+        onClose={() => {
+          setIsEditModalOpen(false);
+          setSelectedGroup(null);
+          setTimeout(() => {
+            editModalTriggerRef.current?.focus();
+          }, 100);
+        }}
+        onSave={() => {
+          setIsEditModalOpen(false);
+          setSelectedGroup(null);
+          refetch();
+          setTimeout(() => {
+            editModalTriggerRef.current?.focus();
+          }, 100);
+        }}
+      />
     </>
   );
 };

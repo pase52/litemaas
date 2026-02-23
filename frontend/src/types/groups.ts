@@ -13,6 +13,7 @@ export interface Group {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+  myRole?: 'admin' | 'member' | 'viewer';
 }
 
 export interface GroupMember {
@@ -63,6 +64,23 @@ export interface AddGroupMemberRequest {
 
 export interface UpdateGroupMemberRoleRequest {
   role: 'admin' | 'member' | 'viewer';
+}
+
+/** Limited update request for group admins (non-RBAC) */
+export interface UpdateGroupDetailsRequest {
+  name?: string;
+  alias?: string;
+  description?: string;
+}
+
+/** Search result for users in group context */
+export interface GroupUserSearchResult {
+  users: Array<{
+    userId: string;
+    username: string;
+    email: string;
+  }>;
+  total: number;
 }
 
 export interface GroupListParams {

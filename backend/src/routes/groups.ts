@@ -8,9 +8,12 @@ import {
   GroupListQuerySchema,
   AddGroupMemberSchema,
   UpdateGroupMemberRoleSchema,
+  UpdateGroupDetailsSchema,
   GroupWithMembersSchema,
-  GroupListResponseSchema,
+  MyGroupListResponseSchema,
   GroupBudgetInfoSchema,
+  GroupUserSearchQuerySchema,
+  GroupUserSearchResponseSchema,
 } from '../schemas/groups';
 import { ErrorResponseSchema } from '../schemas/common';
 import { ApplicationError } from '../utils/errors';
@@ -62,11 +65,11 @@ const groupsRoutes: FastifyPluginAsync = async (fastify) => {
       tags: ['Groups'],
       summary: 'List my groups',
       description:
-        'Retrieve a paginated list of groups that the current user belongs to',
+        'Retrieve a paginated list of groups that the current user belongs to, including the user\'s role in each group',
       security: [{ bearerAuth: [] }],
       querystring: GroupListQuerySchema,
       response: {
-        200: GroupListResponseSchema,
+        200: MyGroupListResponseSchema,
         403: ErrorResponseSchema,
         500: ErrorResponseSchema,
       },
@@ -93,22 +96,28 @@ const groupsRoutes: FastifyPluginAsync = async (fastify) => {
         const filtered = result.data.filter((t) => t.id !== DEFAULT_TEAM_ID);
 
         return {
-          data: filtered.map((t) => ({
-            id: t.id,
-            name: t.name,
-            alias: t.alias,
-            description: t.description,
-            maxBudget: t.maxBudget,
-            currentSpend: t.currentSpend,
-            budgetDuration: t.budgetDuration,
-            tpmLimit: t.tpmLimit,
-            rpmLimit: t.rpmLimit,
-            allowedModels: t.allowedModels,
-            memberCount: t.memberCount,
-            isActive: t.isActive,
-            createdAt: String(t.createdAt),
-            updatedAt: String(t.updatedAt),
-          })),
+          data: filtered.map((t) => {
+            // Find current user's role in this group
+            const currentMember = t.members?.find((m) => m.userId === currentUser.userId);
+
+            return {
+              id: t.id,
+              name: t.name,
+              alias: t.alias,
+              description: t.description,
+              maxBudget: t.maxBudget,
+              currentSpend: t.currentSpend,
+              budgetDuration: t.budgetDuration,
+              tpmLimit: t.tpmLimit,
+              rpmLimit: t.rpmLimit,
+              allowedModels: t.allowedModels,
+              memberCount: t.memberCount,
+              isActive: t.isActive,
+              createdAt: String(t.createdAt),
+              updatedAt: String(t.updatedAt),
+              myRole: currentMember?.role,
+            };
+          }),
           pagination: {
             page,
             limit,
@@ -167,6 +176,134 @@ const groupsRoutes: FastifyPluginAsync = async (fastify) => {
 
         const errorMessage = error instanceof Error ? error.message : String(error);
         throw fastify.createError(500, `Failed to get group details: ${errorMessage}`);
+      }
+    },
+  });
+
+  // PATCH /:groupId - Update group details (team admin check in service)
+  fastify.patch('/:groupId', {
+    schema: {
+      tags: ['Groups'],
+      summary: 'Update group details',
+      description:
+        'Update group name, alias, and description. The current user must be a team admin.',
+      security: [{ bearerAuth: [] }],
+      params: GroupIdParamSchema,
+      body: UpdateGroupDetailsSchema,
+      response: {
+        200: GroupWithMembersSchema,
+        400: ErrorResponseSchema,
+        403: ErrorResponseSchema,
+        404: ErrorResponseSchema,
+        409: ErrorResponseSchema,
+        500: ErrorResponseSchema,
+      },
+    },
+    preHandler: [fastify.authenticate],
+    handler: async (request, _reply) => {
+      try {
+        const currentUser = (request as AuthenticatedRequest).user;
+        const { groupId } = request.params as { groupId: string };
+        const body = request.body as { name?: string; alias?: string; description?: string };
+
+        // updateTeam checks team admin access internally
+        const team = await teamService.updateTeam(groupId, currentUser.userId, {
+          name: body.name,
+          alias: body.alias,
+          description: body.description,
+        });
+
+        return mapTeamToGroup(team);
+      } catch (error) {
+        fastify.log.error({ error }, 'Failed to update group details');
+
+        if (error instanceof ApplicationError) {
+          throw error;
+        }
+
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        throw fastify.createError(500, `Failed to update group details: ${errorMessage}`);
+      }
+    },
+  });
+
+  // GET /:groupId/users/search - Search users for adding to group (team admin only)
+  fastify.get('/:groupId/users/search', {
+    schema: {
+      tags: ['Groups'],
+      summary: 'Search users for group member addition',
+      description:
+        'Search for users by username or email for adding to a group. The current user must be a team admin. Returns users not already in the group.',
+      security: [{ bearerAuth: [] }],
+      params: GroupIdParamSchema,
+      querystring: GroupUserSearchQuerySchema,
+      response: {
+        200: GroupUserSearchResponseSchema,
+        403: ErrorResponseSchema,
+        404: ErrorResponseSchema,
+        500: ErrorResponseSchema,
+      },
+    },
+    preHandler: [fastify.authenticate],
+    handler: async (request, _reply) => {
+      try {
+        const currentUser = (request as AuthenticatedRequest).user;
+        const { groupId } = request.params as { groupId: string };
+        const { search, limit = 10 } = request.query as { search: string; limit?: number };
+
+        // Verify user is a team admin
+        const hasAccess = await teamService.checkTeamAccess(groupId, currentUser.userId, 'admin');
+        if (!hasAccess) {
+          throw fastify.createForbiddenError(
+            'Only group admins can search for users to add',
+          );
+        }
+
+        // Get current members to exclude them
+        const team = await teamService.getTeam(groupId, currentUser.userId);
+        if (!team) {
+          throw fastify.createNotFoundError('Group');
+        }
+        const existingUserIds = team.members?.map((m) => m.userId) || [];
+
+        // Search for users not already in the group
+        let query = `
+          SELECT id, username, email
+          FROM users
+          WHERE (username ILIKE $1 OR email ILIKE $1)
+        `;
+        const params: any[] = [`%${search}%`];
+        let paramIndex = 2;
+
+        if (existingUserIds.length > 0) {
+          const placeholders = existingUserIds.map((_, i) => `$${paramIndex + i}`).join(', ');
+          query += ` AND id NOT IN (${placeholders})`;
+          params.push(...existingUserIds);
+          paramIndex += existingUserIds.length;
+        }
+
+        query += ` ORDER BY username ASC LIMIT $${paramIndex}`;
+        params.push(limit);
+
+        const users = await fastify.dbUtils.queryMany(query, params);
+
+        return {
+          users: users.map((u) => ({
+            userId: String(u.id),
+            username: String(u.username),
+            email: String(u.email),
+          })),
+          total: users.length,
+        };
+      } catch (error) {
+        fastify.log.error({ error }, 'Failed to search users for group');
+
+        if (error instanceof ApplicationError) {
+          throw error;
+        }
+
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        throw fastify.createError(500, `Failed to search users: ${errorMessage}`);
       }
     },
   });
