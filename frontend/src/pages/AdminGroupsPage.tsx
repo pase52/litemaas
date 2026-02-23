@@ -322,11 +322,11 @@ const AdminGroupsPage: React.FC = () => {
               <ToolbarContent>
                 <ToolbarItem>
                   <SearchInput
-                    placeholder={t('groups.search', 'Search groups...')}
+                    placeholder={t('groups.search.placeholder', 'Search groups...')}
                     value={searchValue}
                     onChange={(_, value) => setSearchValue(value)}
                     onClear={() => handleSearch('')}
-                    aria-label={t('groups.searchAriaLabel', 'Search groups')}
+                    aria-label={t('groups.search.ariaLabel', 'Search groups')}
                   />
                 </ToolbarItem>
                 <ToolbarItem>

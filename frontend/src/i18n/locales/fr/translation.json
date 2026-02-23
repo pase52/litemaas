@@ -380,13 +380,52 @@
     "noGroupsUser": "You are not a member of any groups yet.",
     "noGroupsUserDesc": "Contact an administrator to be added to a group.",
     "noResults": "No groups match your search",
-    "search": "Search groups...",
+    "search": {
+      "placeholder": "Search groups by name...",
+      "ariaLabel": "Search groups",
+      "noResults": "No groups match your search",
+      "adjustSearch": "Try adjusting your search criteria.",
+      "clearSearch": "Clear search"
+    },
     "showing": "Showing {{start}}-{{end}} of {{total}} groups",
     "createSuccess": "Group created successfully",
     "createError": "Failed to create group",
     "updateSuccess": "Group updated successfully",
     "updateError": "Failed to update group",
     "loadError": "Failed to load groups",
+    "pageDescription": "View the groups you belong to and their details.",
+    "pagination": {
+      "of": "of",
+      "groups": "groups"
+    },
+    "loading": {
+      "title": "Loading groups",
+      "description": "Please wait while your groups are loaded."
+    },
+    "error": {
+      "load": "Failed to load groups",
+      "loadTitle": "Unable to load groups",
+      "loadDescription": "An error occurred while loading your groups. Please try again.",
+      "tryAgain": "Try again"
+    },
+    "empty": {
+      "title": "No groups yet",
+      "description": "You are not a member of any groups yet. Contact an administrator to be added to a group."
+    },
+    "table": {
+      "allModels": "All",
+      "noDescription": "No description",
+      "ariaLabel": "Groups table",
+      "caption": "List of {{count}} groups",
+      "name": "Name",
+      "description": "Description",
+      "members": "Members",
+      "models": "Models",
+      "status": "Status",
+      "budget": "Budget",
+      "actions": "Actions",
+      "noGroupsForSearch": "No groups match your search"
+    },
     "tabs": {
       "details": "Details",
       "models": "Models",
