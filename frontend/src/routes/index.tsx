@@ -18,6 +18,8 @@ import AdminUsagePage from '../pages/AdminUsagePage';
 import AdminSubscriptionsPage from '../pages/AdminSubscriptionsPage';
 import UsersPage from '../pages/UsersPage';
 import AuditPage from '../pages/AuditPage';
+import GroupsPage from '../pages/GroupsPage';
+import AdminGroupsPage from '../pages/AdminGroupsPage';
 import LoginPage from '../pages/LoginPage';
 import AuthCallbackPage from '../pages/AuthCallbackPage';
 import NotFoundPage from '../pages/NotFoundPage';
@@ -119,6 +121,10 @@ export const router = createBrowserRouter(
               element: <UsagePage />,
             },
             {
+              path: 'groups',
+              element: <GroupsPage />,
+            },
+            {
               path: 'admin/models',
               element: <AdminModelsPage />,
             },
@@ -129,6 +135,10 @@ export const router = createBrowserRouter(
             {
               path: 'admin/users',
               element: <UsersPage />,
+            },
+            {
+              path: 'admin/groups',
+              element: <AdminGroupsPage />,
             },
             {
               path: 'admin/tools',

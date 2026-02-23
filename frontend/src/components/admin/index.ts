@@ -9,6 +9,12 @@ export { StatusFilterSelect } from './StatusFilterSelect';
 export { UserBreakdownTable } from './UserBreakdownTable';
 export { ModelBreakdownTable } from './ModelBreakdownTable';
 
+// Group management components
+export { default as GroupDetailsTab } from './GroupDetailsTab';
+export { default as GroupModelsTab } from './GroupModelsTab';
+export { default as GroupMembersTab } from './GroupMembersTab';
+export { default as GroupBudgetTab } from './GroupBudgetTab';
+
 // Re-export types for convenience
 export type { MetricsOverviewProps, GlobalMetrics } from './MetricsOverview';
 export type { TopUsersTableProps, UserSummary } from './TopUsersTable';

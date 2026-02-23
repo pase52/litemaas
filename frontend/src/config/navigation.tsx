@@ -10,6 +10,7 @@ import {
   ChartBarIcon,
   ClipboardCheckIcon,
   ListIcon,
+  ServerGroupIcon,
 } from '@patternfly/react-icons';
 
 import HomePage from '../pages/HomePage';
@@ -18,12 +19,14 @@ import SubscriptionsPage from '../pages/SubscriptionsPage';
 import ApiKeysPage from '../pages/ApiKeysPage';
 import ChatbotPage from '../pages/ChatbotPage';
 import UsagePage from '../pages/UsagePage';
+import GroupsPage from '../pages/GroupsPage';
 import ToolsPage from '../pages/ToolsPage';
 import AdminModelsPage from '../pages/AdminModelsPage';
 import AdminUsagePage from '../pages/AdminUsagePage';
 import AdminSubscriptionsPage from '../pages/AdminSubscriptionsPage';
 import UsersPage from '../pages/UsersPage';
 import AuditPage from '../pages/AuditPage';
+import AdminGroupsPage from '../pages/AdminGroupsPage';
 
 import { AppConfig } from '../types/navigation';
 
@@ -77,6 +80,13 @@ export const appConfig: AppConfig = {
           label: 'nav.usage',
           icon: ChartLineIcon,
         },
+        {
+          id: 'groups',
+          path: '/groups',
+          element: GroupsPage,
+          label: 'nav.groups',
+          icon: ServerGroupIcon,
+        },
       ],
     },
     {
@@ -121,6 +131,14 @@ export const appConfig: AppConfig = {
           element: AuditPage,
           label: 'nav.admin.audit',
           icon: ListIcon,
+          requiredRoles: ['admin', 'admin-readonly'],
+        },
+        {
+          id: 'admin-groups',
+          path: '/admin/groups',
+          element: AdminGroupsPage,
+          label: 'nav.admin.groups',
+          icon: ServerGroupIcon,
           requiredRoles: ['admin', 'admin-readonly'],
         },
         {
@@ -171,6 +189,12 @@ export const appConfig: AppConfig = {
       path: '/usage',
       icon: ChartLineIcon,
     },
+    {
+      id: 'groups',
+      label: 'nav.groups',
+      path: '/groups',
+      icon: ServerGroupIcon,
+    },
     // Admin separator
     {
       id: 'admin-separator',
@@ -211,6 +235,13 @@ export const appConfig: AppConfig = {
       label: 'nav.admin.audit',
       path: '/admin/audit',
       icon: ListIcon,
+      requiredRoles: ['admin', 'admin-readonly'],
+    },
+    {
+      id: 'admin-groups',
+      label: 'nav.admin.groups',
+      path: '/admin/groups',
+      icon: ServerGroupIcon,
       requiredRoles: ['admin', 'admin-readonly'],
     },
     {

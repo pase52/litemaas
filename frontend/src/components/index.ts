@@ -8,6 +8,7 @@ export { NotificationDrawer, NotificationBadgeButton } from './NotificationDrawe
 export { ProtectedRoute } from './ProtectedRoute';
 export { ScreenReaderAnnouncement, useScreenReaderAnnouncement } from './ScreenReaderAnnouncement';
 export { default as UserEditModal } from './UserEditModal';
+export { default as GroupEditModal } from './GroupEditModal';
 
 // Error components
 export * from './errors';
