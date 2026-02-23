@@ -68,6 +68,8 @@ import { configService } from '../services/config.service';
 import type { ApiKeyQuotaDefaults } from '../types/users';
 import { extractErrorDetails } from '../utils/error.utils';
 import { formatDate } from '../utils/formatters';
+import { groupsService } from '../services/groups.service';
+import { Group } from '../types/groups';
 
 interface ModelLimits {
   budget?: number;
@@ -130,6 +132,14 @@ const ApiKeysPage: React.FC = () => {
   const [newKeyBudgetDuration, setNewKeyBudgetDuration] = useState<string>('');
   const [quotaDefaults, setQuotaDefaults] = useState<ApiKeyQuotaDefaults | null>(null);
   const [newKeyModelLimits, setNewKeyModelLimits] = useState<Record<string, ModelLimits>>({});
+
+  // ✅ Group support state
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [loadingGroups, setLoadingGroups] = useState(false);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [isGroupSelectOpen, setIsGroupSelectOpen] = useState(false);
+  const [groupModels, setGroupModels] = useState<Model[]>([]); // Models loaded from group's allowedModels
+  const [loadingGroupModels, setLoadingGroupModels] = useState(false);
 
   // Configuration state
   const [litellmApiUrl, setLitellmApiUrl] = useState<string>('https://api.litemaas.com');
@@ -197,9 +207,24 @@ const ApiKeysPage: React.FC = () => {
     }
   };
 
+  // Load user groups for optional group-linked API key creation
+  const loadGroups = async () => {
+    try {
+      setLoadingGroups(true);
+      const response = await groupsService.getMyGroups({ limit: 100 });
+      setGroups(response.data);
+    } catch (err: any) {
+      console.error('Failed to load groups:', err);
+      // Non-blocking: groups are optional for API key creation
+    } finally {
+      setLoadingGroups(false);
+    }
+  };
+
   useEffect(() => {
     loadApiKeys();
     loadModels(); // ✅ Load models on component mount
+    loadGroups(); // ✅ Load user groups on component mount
     loadConfig(); // Load configuration including LiteLLM API URL
     // Load quota defaults for create key modal
     configService
@@ -219,6 +244,55 @@ const ApiKeysPage: React.FC = () => {
       window.removeEventListener('focus', handleFocus);
     };
   }, []);
+
+  // Load group-allowed models when a group is selected
+  // This fetches model details for models the group allows but the user may not have subscriptions for
+  useEffect(() => {
+    if (!selectedGroupId) {
+      setGroupModels([]);
+      return;
+    }
+
+    const selectedGroup = groups.find((g) => g.id === selectedGroupId);
+    if (!selectedGroup?.allowedModels || selectedGroup.allowedModels.length === 0) {
+      setGroupModels([]);
+      return;
+    }
+
+    const loadGroupModels = async () => {
+      try {
+        setLoadingGroupModels(true);
+        // Find models in the group's allowedModels that are NOT already in the subscription-based models
+        const existingModelIds = new Set(models.map((m) => m.id));
+        const missingModelIds = selectedGroup.allowedModels!.filter(
+          (id) => !existingModelIds.has(id),
+        );
+
+        if (missingModelIds.length === 0) {
+          setGroupModels([]);
+          return;
+        }
+
+        // Fetch model details for each missing model
+        const modelPromises = missingModelIds.map((modelId) =>
+          modelsService.getModel(modelId).catch((err) => {
+            console.warn(`Failed to load group model ${modelId}:`, err);
+            return null;
+          }),
+        );
+
+        const modelResults = await Promise.all(modelPromises);
+        const validGroupModels = modelResults.filter((model) => model !== null) as Model[];
+        setGroupModels(validGroupModels);
+      } catch (err: any) {
+        console.error('Failed to load group models:', err);
+      } finally {
+        setLoadingGroupModels(false);
+      }
+    };
+
+    loadGroupModels();
+  }, [selectedGroupId, groups, models]);
 
   // Sync selectedApiKey with updated apiKeys state to reflect key visibility changes in modal
   useEffect(() => {
@@ -446,6 +520,7 @@ const ApiKeysPage: React.FC = () => {
     setNewKeyCustomExpiration('');
     setSelectedModelIds([]); // ✅ Reset model selection
     setNewKeyModelLimits({}); // Reset per-model limits
+    setSelectedGroupId(null); // ✅ Reset group selection
     setFormErrors({}); // Clear any previous validation errors
     // Pre-fill quota fields with admin-configured defaults
     setNewKeyMaxBudget(quotaDefaults?.defaults?.maxBudget ?? undefined);
@@ -459,6 +534,8 @@ const ApiKeysPage: React.FC = () => {
 
     // ✅ Refresh models list to ensure newly subscribed models appear
     loadModels();
+    // ✅ Refresh groups list
+    loadGroups();
 
     setIsCreateModalOpen(true);
   };
@@ -663,6 +740,7 @@ const ApiKeysPage: React.FC = () => {
         const request: CreateApiKeyRequest = {
           modelIds: selectedModelIds, // ✅ Use modelIds for multi-model support
           name: newKeyName,
+          teamId: selectedGroupId || undefined, // ✅ Optional group association
           expiresAt:
             newKeyExpiration === 'never'
               ? undefined
@@ -1292,60 +1370,128 @@ const ApiKeysPage: React.FC = () => {
               />
             </FormGroup>
 
+            {/* ✅ Optional group selection */}
+            {!isEditMode && groups.length > 0 && (
+              <FormGroup
+                label={t('pages.apiKeys.forms.group')}
+                fieldId="key-group"
+              >
+                <Select
+                  role="listbox"
+                  id="key-group"
+                  isOpen={isGroupSelectOpen}
+                  onOpenChange={setIsGroupSelectOpen}
+                  aria-label={t('pages.apiKeys.forms.groupAriaLabel')}
+                  toggle={(toggleRef: React.Ref<MenuToggleElement>) => (
+                    <MenuToggle
+                      ref={toggleRef}
+                      onClick={() => setIsGroupSelectOpen(!isGroupSelectOpen)}
+                      isExpanded={isGroupSelectOpen}
+                      aria-expanded={isGroupSelectOpen}
+                      aria-haspopup="listbox"
+                    >
+                      {selectedGroupId
+                        ? groups.find((g) => g.id === selectedGroupId)?.name ||
+                          t('pages.apiKeys.selectGroup')
+                        : t('pages.apiKeys.selectGroup')}
+                    </MenuToggle>
+                  )}
+                  onSelect={(_event, selection) => {
+                    const selectionString = selection as string;
+                    if (selectionString === 'none') {
+                      setSelectedGroupId(null);
+                      // Keep current model selection when removing group
+                    } else {
+                      setSelectedGroupId(selectionString);
+                      // Clear model selection when changing groups to avoid invalid models
+                      setSelectedModelIds([]);
+                    }
+                    setIsGroupSelectOpen(false);
+                  }}
+                  selected={selectedGroupId || 'none'}
+                >
+                  <SelectList>
+                    {loadingGroups ? (
+                      <SelectOption isDisabled>
+                        {t('pages.apiKeys.messages.loadingGroups')}
+                      </SelectOption>
+                    ) : (
+                      <>
+                        <SelectOption key="none" value="none">
+                          {t('pages.apiKeys.noGroup')}
+                        </SelectOption>
+                        <Divider />
+                        {groups.map((group) => (
+                          <SelectOption key={group.id} value={group.id}>
+                            {group.name}
+                            {group.allowedModels && group.allowedModels.length > 0 && (
+                              <Badge isRead className="pf-v6-u-ml-sm">
+                                {group.allowedModels.length} {t('pages.apiKeys.forms.models').toLowerCase()}
+                              </Badge>
+                            )}
+                          </SelectOption>
+                        ))}
+                      </>
+                    )}
+                  </SelectList>
+                </Select>
+                <HelperText id="key-group-helper">
+                  <HelperTextItem>
+                    {t('pages.apiKeys.forms.groupHelperText')}
+                  </HelperTextItem>
+                </HelperText>
+              </FormGroup>
+            )}
+
             {/* ✅ Multi-model selection */}
             <FormGroup label={t('pages.apiKeys.forms.models')} isRequired fieldId="key-models">
-              {loadingModels ? (
-                <Skeleton height="40px" />
-              ) : models.length === 0 ? (
-                <Alert
-                  variant="warning"
-                  isInline
-                  isPlain
-                  title={t('pages.apiKeys.messages.noSubscribedModels')}
-                />
-              ) : (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                  <Label
-                    color="purple"
-                    onClick={() => {
-                      if (selectedModelIds.length === models.length) {
-                        setSelectedModelIds([]);
-                        setNewKeyModelLimits({});
-                      } else {
-                        setSelectedModelIds(models.map((m) => m.id));
-                      }
-                      // Clear validation error if selecting all
-                      if (formErrors.models) {
-                        const newErrors = { ...formErrors };
-                        delete newErrors.models;
-                        setFormErrors(newErrors);
-                      }
-                    }}
-                    style={{ cursor: 'pointer' }}
-                  >
-                    {selectedModelIds.length === models.length
-                      ? t('pages.apiKeys.deselectAll', 'Deselect All')
-                      : t('pages.apiKeys.selectAll', 'Select All')}
-                  </Label>
-                  {models.map((model) => (
+              {(() => {
+                // Compute available models: filter by group's allowedModels if a group is selected
+                const selectedGroup = selectedGroupId
+                  ? groups.find((g) => g.id === selectedGroupId)
+                  : null;
+                let availableModels: Model[];
+                if (selectedGroup?.allowedModels && selectedGroup.allowedModels.length > 0) {
+                  const allModels = [...models, ...groupModels];
+                  const modelMap = new Map(allModels.map((m) => [m.id, m]));
+                  availableModels = Array.from(modelMap.values()).filter((m) =>
+                    selectedGroup.allowedModels!.includes(m.id),
+                  );
+                } else {
+                  availableModels = models;
+                }
+
+                const isLoadingAnyModels = loadingModels || loadingGroupModels;
+
+                if (isLoadingAnyModels) {
+                  return <Skeleton height="40px" />;
+                }
+
+                if (availableModels.length === 0) {
+                  return (
+                    <Alert
+                      variant="warning"
+                      isInline
+                      isPlain
+                      title={selectedGroupId
+                        ? t('pages.apiKeys.messages.noGroupModels')
+                        : t('pages.apiKeys.messages.noSubscribedModels')}
+                    />
+                  );
+                }
+
+                return (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
                     <Label
-                      key={model.id}
-                      color={selectedModelIds.includes(model.id) ? 'blue' : 'grey'}
+                      color="purple"
                       onClick={() => {
-                        const isDeselecting = selectedModelIds.includes(model.id);
-                        const newSelection = isDeselecting
-                          ? selectedModelIds.filter((id) => id !== model.id)
-                          : [...selectedModelIds, model.id];
-                        setSelectedModelIds(newSelection);
-                        // Clean up per-model limits when deselecting
-                        if (isDeselecting) {
-                          setNewKeyModelLimits((prev) => {
-                            const updated = { ...prev };
-                            delete updated[model.id];
-                            return updated;
-                          });
+                        if (selectedModelIds.length === availableModels.length) {
+                          setSelectedModelIds([]);
+                          setNewKeyModelLimits({});
+                        } else {
+                          setSelectedModelIds(availableModels.map((m) => m.id));
                         }
-                        if (formErrors.models && newSelection.length > 0) {
+                        if (formErrors.models) {
                           const newErrors = { ...formErrors };
                           delete newErrors.models;
                           setFormErrors(newErrors);
@@ -1353,11 +1499,41 @@ const ApiKeysPage: React.FC = () => {
                       }}
                       style={{ cursor: 'pointer' }}
                     >
-                      {model.name}
+                      {selectedModelIds.length === availableModels.length
+                        ? t('pages.apiKeys.deselectAll', 'Deselect All')
+                        : t('pages.apiKeys.selectAll', 'Select All')}
                     </Label>
-                  ))}
-                </div>
-              )}
+                    {availableModels.map((model) => (
+                      <Label
+                        key={model.id}
+                        color={selectedModelIds.includes(model.id) ? 'blue' : 'grey'}
+                        onClick={() => {
+                          const isDeselecting = selectedModelIds.includes(model.id);
+                          const newSelection = isDeselecting
+                            ? selectedModelIds.filter((id) => id !== model.id)
+                            : [...selectedModelIds, model.id];
+                          setSelectedModelIds(newSelection);
+                          if (isDeselecting) {
+                            setNewKeyModelLimits((prev) => {
+                              const updated = { ...prev };
+                              delete updated[model.id];
+                              return updated;
+                            });
+                          }
+                          if (formErrors.models && newSelection.length > 0) {
+                            const newErrors = { ...formErrors };
+                            delete newErrors.models;
+                            setFormErrors(newErrors);
+                          }
+                        }}
+                        style={{ cursor: 'pointer' }}
+                      >
+                        {model.name}
+                      </Label>
+                    ))}
+                  </div>
+                );
+              })()}
               {formErrors.models && (
                 <HelperText id="key-models-error">
                   <HelperTextItem variant="error">{formErrors.models}</HelperTextItem>

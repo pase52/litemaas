@@ -270,6 +270,9 @@ export class ApiKeyService extends BaseService {
         }
       }
 
+      // Track group's allowed models for subscription bypass later
+      let groupAllowedModelIds: string[] = [];
+
       // Validate group membership and allowed models if teamId is provided
       if (request.teamId) {
         // Check that user is a member of the group
@@ -295,10 +298,11 @@ export class ApiKeyService extends BaseService {
           [request.teamId],
         );
 
-        if (team?.allowed_models && team.allowed_models.length > 0) {
-          const groupAllowedModels: string[] = team.allowed_models;
+        const allowedModels = team?.allowed_models as string[] | null | undefined;
+        if (allowedModels && allowedModels.length > 0) {
+          groupAllowedModelIds = allowedModels;
           const disallowedModels = modelIds.filter(
-            (id) => !groupAllowedModels.includes(id),
+            (id) => !allowedModels.includes(id),
           );
 
           if (disallowedModels.length > 0) {
@@ -351,6 +355,8 @@ export class ApiKeyService extends BaseService {
       }
 
       // Validate user has active subscriptions for all requested models
+      // When a group (teamId) is provided, models in the group's allowedModels
+      // are accepted without requiring individual subscriptions (the group grants access)
       const validModels = await this.fastify.dbUtils.queryMany(
         `SELECT DISTINCT s.model_id, s.id as subscription_id, 
                 m.name as model_name, m.provider
@@ -363,15 +369,40 @@ export class ApiKeyService extends BaseService {
       );
 
       const validModelIds = validModels.map((m) => m.model_id);
-      const invalidModels = modelIds.filter((id) => !validModelIds.includes(id));
+
+      // Models allowed by the group don't need individual subscriptions
+      const invalidModels = modelIds.filter(
+        (id) => !validModelIds.includes(id) && !groupAllowedModelIds.includes(id),
+      );
 
       if (invalidModels.length > 0) {
         throw this.createValidationError(
           `You do not have active subscriptions for the following models: ${invalidModels.join(', ')}`,
           'modelIds',
           invalidModels,
-          'Please ensure you have active subscriptions for all selected models',
+          'Please ensure you have active subscriptions for all selected models, or select a group that allows access',
         );
+      }
+
+      // Validate that group-granted models actually exist in the models table
+      const groupOnlyModels = modelIds.filter(
+        (id) => !validModelIds.includes(id) && groupAllowedModelIds.includes(id),
+      );
+      if (groupOnlyModels.length > 0) {
+        const existingModels = await this.fastify.dbUtils.queryMany(
+          `SELECT id FROM models WHERE id = ANY($1::text[])`,
+          [`{${groupOnlyModels.join(',')}}`],
+        );
+        const existingModelIds = existingModels.map((m) => m.id);
+        const nonExistentModels = groupOnlyModels.filter((id) => !existingModelIds.includes(id));
+        if (nonExistentModels.length > 0) {
+          throw this.createValidationError(
+            `The following models do not exist: ${nonExistentModels.join(', ')}`,
+            'modelIds',
+            nonExistentModels,
+            'Some models allowed by the group no longer exist in the system',
+          );
+        }
       }
 
       // Check API key limits per user
@@ -404,20 +435,20 @@ export class ApiKeyService extends BaseService {
         budget_duration: request.budgetDuration,
         model_max_budget: request.modelMaxBudget
           ? Object.fromEntries(
-              Object.entries(request.modelMaxBudget).map(([model, config]) => [
-                model,
-                { budget_limit: config.budgetLimit, time_period: config.timePeriod },
-              ]),
-            )
+            Object.entries(request.modelMaxBudget).map(([model, config]) => [
+              model,
+              { budget_limit: config.budgetLimit, time_period: config.timePeriod },
+            ]),
+          )
           : undefined,
         model_rpm_limit: request.modelRpmLimit,
         model_tpm_limit: request.modelTpmLimit,
         permissions: request.permissions
           ? {
-              allow_chat_completions: request.permissions.allowChatCompletions,
-              allow_embeddings: request.permissions.allowEmbeddings,
-              allow_completions: request.permissions.allowCompletions,
-            }
+            allow_chat_completions: request.permissions.allowChatCompletions,
+            allow_embeddings: request.permissions.allowEmbeddings,
+            allow_completions: request.permissions.allowCompletions,
+          }
           : undefined,
         tags: request.tags,
         soft_budget: request.softBudget,
@@ -1165,11 +1196,11 @@ export class ApiKeyService extends BaseService {
           max_parallel_requests: updates.maxParallelRequests ?? undefined,
           model_max_budget: updates.modelMaxBudget
             ? Object.fromEntries(
-                Object.entries(updates.modelMaxBudget).map(([model, config]) => [
-                  model,
-                  { budget_limit: config.budgetLimit, time_period: config.timePeriod },
-                ]),
-              )
+              Object.entries(updates.modelMaxBudget).map(([model, config]) => [
+                model,
+                { budget_limit: config.budgetLimit, time_period: config.timePeriod },
+              ]),
+            )
             : undefined,
           model_rpm_limit: updates.modelRpmLimit ?? undefined,
           model_tpm_limit: updates.modelTpmLimit ?? undefined,
@@ -2097,23 +2128,23 @@ export class ApiKeyService extends BaseService {
       // Include model details if available
       modelDetails: apiKey.model_details as
         | Array<{
-            id: string;
-            name: string;
-            provider: string;
-            contextLength?: number;
-          }>
+          id: string;
+          name: string;
+          provider: string;
+          contextLength?: number;
+        }>
         | undefined,
       // Keep subscription info for backward compatibility
       subscriptionDetails: apiKey.subscription_id
         ? [
-            {
-              subscriptionId: apiKey.subscription_id,
-              modelId: apiKey.models?.[0] || '',
-              status: 'active',
-              quotaRequests: 0,
-              usedRequests: 0,
-            },
-          ]
+          {
+            subscriptionId: apiKey.subscription_id,
+            modelId: apiKey.models?.[0] || '',
+            status: 'active',
+            quotaRequests: 0,
+            usedRequests: 0,
+          },
+        ]
         : undefined,
     };
   }

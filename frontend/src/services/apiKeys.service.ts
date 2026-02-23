@@ -79,6 +79,8 @@ export interface CreateApiKeyRequest {
   modelIds?: string[];
   // Legacy support - deprecated
   subscriptionId?: string;
+  // Optional group/team association
+  teamId?: string;
   name?: string;
   expiresAt?: string | null;
   // Quota fields
