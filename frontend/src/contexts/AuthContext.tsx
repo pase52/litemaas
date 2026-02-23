@@ -16,6 +16,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   login: () => void;
   loginAsAdmin: () => void;
+  loginAsUser: (devUser: { id: string; username: string; email: string; name: string; roles: string[] }) => void;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
@@ -152,6 +153,20 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     navigate('/');
   }, [navigate]);
 
+  const loginAsUser = useCallback((devUser: { id: string; username: string; email: string; name: string; roles: string[] }) => {
+    const userObj: User = {
+      id: devUser.id,
+      username: devUser.username,
+      email: devUser.email,
+      name: devUser.name,
+      roles: devUser.roles,
+    };
+
+    setUser(userObj);
+    localStorage.setItem('litemaas_admin_user', JSON.stringify(userObj));
+    navigate('/');
+  }, [navigate]);
+
   const logout = useCallback(async () => {
     try {
       // Check if this is an admin bypass session
@@ -186,10 +201,11 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       isAuthenticated,
       login,
       loginAsAdmin,
+      loginAsUser,
       logout,
       refreshUser,
     }),
-    [user, loading, isAuthenticated, login, loginAsAdmin, logout, refreshUser],
+    [user, loading, isAuthenticated, login, loginAsAdmin, loginAsUser, logout, refreshUser],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

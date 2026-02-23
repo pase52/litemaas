@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -13,17 +13,33 @@ import {
   DropdownItem,
   DropdownList,
   MenuToggle,
+  TextInput,
+  Menu,
+  MenuContent,
+  MenuList,
+  MenuItem,
+  Label,
+  Flex,
+  FlexItem,
 } from '@patternfly/react-core';
-import { ExternalLinkAltIcon, UserIcon, GlobeIcon } from '@patternfly/react-icons';
+import { ExternalLinkAltIcon, UserIcon, GlobeIcon, SearchIcon } from '@patternfly/react-icons';
 import { Octobean } from '../assets';
 import { useAuth } from '../contexts/AuthContext';
 import { useBranding } from '../contexts/BrandingContext';
 import { brandingService } from '../services/branding.service';
 import { configService } from '../services/config.service';
 
+interface DevUser {
+  id: string;
+  username: string;
+  email: string;
+  name: string;
+  roles: string[];
+}
+
 const LoginPage: React.FC = () => {
   const { t, i18n } = useTranslation();
-  const { login, loginAsAdmin } = useAuth();
+  const { login, loginAsAdmin, loginAsUser } = useAuth();
   const { brandingSettings } = useBranding();
   const [searchParams, setSearchParams] = useSearchParams();
   const sessionExpired = searchParams.get('session') === 'expired';
@@ -47,6 +63,89 @@ const LoginPage: React.FC = () => {
     brandingSettings?.loginSubtitleEnabled && brandingSettings?.loginSubtitle
       ? brandingSettings.loginSubtitle
       : t('pages.login.subtitle');
+
+  // Dev user search state
+  const [userSearch, setUserSearch] = useState('');
+  const [searchResults, setSearchResults] = useState<DevUser[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [showResults, setShowResults] = useState(false);
+  const [selectedUser, setSelectedUser] = useState<DevUser | null>(null);
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchContainerRef = useRef<HTMLDivElement>(null);
+
+  const searchUsers = useCallback(async (query: string) => {
+    setIsSearching(true);
+    try {
+      const params = new URLSearchParams({ limit: '20' });
+      if (query.trim()) {
+        params.set('search', query.trim());
+      }
+      const response = await fetch(`/api/auth/dev-users?${params}`);
+      if (response.ok) {
+        const data = await response.json();
+        setSearchResults(data.users || []);
+        setShowResults(true);
+      }
+    } catch (error) {
+      console.error('Failed to search users:', error);
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  }, []);
+
+  const handleSearchChange = useCallback((_event: React.FormEvent<HTMLInputElement>, value: string) => {
+    setUserSearch(value);
+    setSelectedUser(null);
+
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+
+    searchTimeoutRef.current = setTimeout(() => {
+      searchUsers(value);
+    }, 300);
+  }, [searchUsers]);
+
+  const handleUserSelect = useCallback((user: DevUser) => {
+    setSelectedUser(user);
+    setUserSearch(user.username);
+    setShowResults(false);
+  }, []);
+
+  const handleLoginAsUser = useCallback(() => {
+    if (selectedUser) {
+      loginAsUser(selectedUser);
+    }
+  }, [selectedUser, loginAsUser]);
+
+  const handleSearchFocus = useCallback(() => {
+    if (searchResults.length > 0) {
+      setShowResults(true);
+    } else {
+      searchUsers(userSearch);
+    }
+  }, [searchResults.length, searchUsers, userSearch]);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (searchContainerRef.current && !searchContainerRef.current.contains(event.target as Node)) {
+        setShowResults(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const handleLogin = () => {
     login();
@@ -197,6 +296,105 @@ const LoginPage: React.FC = () => {
               <div className="pf-v6-u-text-align-center pf-v6-u-mt-sm">
                 <small className="pf-v6-u-color-400">{t('pages.login.bypassAuthentication')}</small>
               </div>
+            </StackItem>
+
+            <StackItem>
+              <div className="pf-v6-u-text-align-center pf-v6-u-my-sm">
+                <Divider />
+                <div className="pf-v6-u-mt-sm">
+                  <small className="pf-v6-u-color-400">{t('pages.login.loginAsUserDescription')}</small>
+                </div>
+              </div>
+            </StackItem>
+
+            <StackItem>
+              <div ref={searchContainerRef} style={{ position: 'relative' }}>
+                <TextInput
+                  type="text"
+                  id="dev-user-search"
+                  aria-label={t('pages.login.searchUsers')}
+                  placeholder={t('pages.login.searchUsersPlaceholder')}
+                  value={userSearch}
+                  onChange={handleSearchChange}
+                  onFocus={handleSearchFocus}
+                  customIcon={isSearching ? <Spinner size="sm" /> : <SearchIcon />}
+                />
+                {showResults && searchResults.length > 0 && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      zIndex: 1000,
+                      width: '100%',
+                      maxHeight: '250px',
+                      overflowY: 'auto',
+                      background: 'var(--pf-t--global--background--color--primary--default)',
+                      border: '1px solid var(--pf-t--global--border--color--default)',
+                      borderRadius: 'var(--pf-t--global--border--radius--small)',
+                      boxShadow: 'var(--pf-t--global--box-shadow--md)',
+                    }}
+                  >
+                    <Menu isPlain isScrollable>
+                      <MenuContent>
+                        <MenuList>
+                          {searchResults.map((user) => (
+                            <MenuItem
+                              key={user.id}
+                              onClick={() => handleUserSelect(user)}
+                              isSelected={selectedUser?.id === user.id}
+                              description={user.email}
+                            >
+                              <Flex spaceItems={{ default: 'spaceItemsSm' }} alignItems={{ default: 'alignItemsCenter' }}>
+                                <FlexItem>{user.username}</FlexItem>
+                                {user.roles.map((role) => (
+                                  <FlexItem key={role}>
+                                    <Label
+                                      isCompact
+                                      color={role === 'admin' ? 'red' : role === 'adminReadonly' ? 'orange' : 'blue'}
+                                    >
+                                      {role}
+                                    </Label>
+                                  </FlexItem>
+                                ))}
+                              </Flex>
+                            </MenuItem>
+                          ))}
+                        </MenuList>
+                      </MenuContent>
+                    </Menu>
+                  </div>
+                )}
+                {showResults && !isSearching && searchResults.length === 0 && userSearch.trim() && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      zIndex: 1000,
+                      width: '100%',
+                      padding: '12px',
+                      textAlign: 'center',
+                      background: 'var(--pf-t--global--background--color--primary--default)',
+                      border: '1px solid var(--pf-t--global--border--color--default)',
+                      borderRadius: 'var(--pf-t--global--border--radius--small)',
+                    }}
+                  >
+                    <small className="pf-v6-u-color-400">{t('pages.login.noUsersFound')}</small>
+                  </div>
+                )}
+              </div>
+            </StackItem>
+
+            <StackItem>
+              <Button
+                variant="tertiary"
+                onClick={handleLoginAsUser}
+                isBlock
+                isDisabled={!selectedUser}
+                icon={<SearchIcon />}
+                iconPosition="start"
+              >
+                {selectedUser
+                  ? t('pages.login.loginAsUser', { username: selectedUser.username })
+                  : t('pages.login.selectUserToLogin')}
+              </Button>
             </StackItem>
           </>
         ) : null}

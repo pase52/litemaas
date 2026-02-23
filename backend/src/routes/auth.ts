@@ -5,6 +5,7 @@ import { LoginResponseSchema, AuthCallbackQuerySchema, TokenResponseSchema } fro
 import { ApplicationError } from '../utils/errors';
 
 interface DevTokenRequestBody {
+  userId?: string;
   username?: string;
   roles?: string[];
 }
@@ -68,6 +69,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       body: {
         type: 'object',
         properties: {
+          userId: { type: 'string', description: 'Real user ID from database (overrides username/roles)' },
           username: { type: 'string', default: 'developer' },
           roles: { type: 'array', items: { type: 'string' }, default: ['admin', 'user'] },
         },
@@ -98,32 +100,60 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         throw fastify.createError(404, 'Endpoint not available');
       }
 
-      const { username = 'developer', roles = ['admin', 'user'] } =
+      const { userId, username = 'developer', roles = ['admin', 'user'] } =
         request.body as DevTokenRequestBody;
 
-      // Try to find a real user in the database by username or email
-      const dbUser = await fastify.dbUtils.queryOne(
-        `SELECT id, username, email, full_name, roles FROM users
-         WHERE username = $1 OR email = $1
-         LIMIT 1`,
-        [username],
-      );
+      let user;
 
-      const user = dbUser
-        ? {
-            id: dbUser.id as string,
-            username: (dbUser.username as string) || username,
-            email: (dbUser.email as string) || `${username}@litemaas.local`,
-            name: (dbUser.full_name as string) || username,
-            roles: roles, // Use the requested roles (allows testing admin vs user)
-          }
-        : {
-            id: '550e8400-e29b-41d4-a716-446655440001', // Fallback to seeded frontend user ID
-            username,
-            email: `${username}@litemaas.local`,
-            name: 'Development User',
-            roles,
-          };
+      // If userId is provided, look up the real user from the database
+      if (userId) {
+        const dbUser = await fastify.dbUtils.queryOne(
+          'SELECT id, username, email, full_name, roles FROM users WHERE id = $1',
+          [userId],
+        );
+
+        if (!dbUser) {
+          throw fastify.createError(404, 'User not found');
+        }
+
+        const dbRoles = Array.isArray(dbUser.roles)
+          ? dbUser.roles.map(String)
+          : typeof dbUser.roles === 'string'
+            ? JSON.parse(dbUser.roles)
+            : ['user'];
+
+        user = {
+          id: String(dbUser.id),
+          username: String(dbUser.username),
+          email: String(dbUser.email),
+          name: String(dbUser.full_name || dbUser.username),
+          roles: dbRoles,
+        };
+      } else {
+        // Try to find a real user in the database by username or email
+        const dbUser = await fastify.dbUtils.queryOne(
+          `SELECT id, username, email, full_name, roles FROM users
+           WHERE username = $1 OR email = $1
+           LIMIT 1`,
+          [username],
+        );
+
+        user = dbUser
+          ? {
+              id: dbUser.id as string,
+              username: (dbUser.username as string) || username,
+              email: (dbUser.email as string) || `${username}@litemaas.local`,
+              name: (dbUser.full_name as string) || username,
+              roles: roles, // Use the requested roles (allows testing admin vs user)
+            }
+          : {
+              id: '550e8400-e29b-41d4-a716-446655440001', // Fallback to seeded frontend user ID
+              username,
+              email: `${username}@litemaas.local`,
+              name: 'Development User',
+              roles,
+            };
+      }
 
       try {
         const accessToken = fastify.generateToken({
@@ -154,6 +184,93 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
         const errorMessage = error instanceof Error ? error.message : String(error);
         throw fastify.createError(500, `Failed to generate token: ${errorMessage}`);
       }
+    },
+  });
+
+  // Search users for development login (development only)
+  fastify.get('/dev-users', {
+    schema: {
+      tags: ['Authentication'],
+      description: 'Search users for development login (development only)',
+      hide: process.env.NODE_ENV === 'production',
+      querystring: {
+        type: 'object',
+        properties: {
+          search: { type: 'string', description: 'Search term for username or email' },
+          limit: { type: 'number', default: 20, minimum: 1, maximum: 100 },
+        },
+      },
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            users: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  username: { type: 'string' },
+                  email: { type: 'string' },
+                  name: { type: 'string' },
+                  roles: { type: 'array', items: { type: 'string' } },
+                },
+              },
+            },
+            total: { type: 'number' },
+          },
+        },
+      },
+    },
+    handler: async (request, _reply) => {
+      if (process.env.NODE_ENV === 'production' && !process.env.ALLOW_DEV_TOKENS) {
+        throw fastify.createNotFoundError('Endpoint');
+      }
+
+      const { search = '', limit = 20 } = request.query as { search?: string; limit?: number };
+
+      let query: string;
+      let params: unknown[];
+
+      if (search.trim()) {
+        query = `SELECT id, username, email, full_name, roles
+                 FROM users
+                 WHERE (username ILIKE $1 OR email ILIKE $1 OR full_name ILIKE $1)
+                   AND is_active = true
+                 ORDER BY username ASC
+                 LIMIT $2`;
+        params = [`%${search.trim()}%`, limit];
+      } else {
+        query = `SELECT id, username, email, full_name, roles
+                 FROM users
+                 WHERE is_active = true
+                 ORDER BY username ASC
+                 LIMIT $1`;
+        params = [limit];
+      }
+
+      const users = await fastify.dbUtils.queryMany(query, params);
+
+      const formattedUsers = users.map((u) => {
+        const roles = Array.isArray(u.roles)
+          ? u.roles.map(String)
+          : typeof u.roles === 'string'
+            ? JSON.parse(u.roles as string)
+            : ['user'];
+
+        return {
+          id: String(u.id),
+          username: String(u.username),
+          email: String(u.email),
+          name: String(u.full_name || u.username),
+          roles,
+        };
+      });
+
+      return {
+        users: formattedUsers,
+        total: formattedUsers.length,
+      };
     },
   });
 

@@ -52,15 +52,17 @@ class ApiClient {
           // For admin bypass, generate a development JWT token
           try {
             const user = JSON.parse(adminUser);
+            // If the user has a real ID (not admin-bypass), use userId for DB lookup
+            const tokenBody = user.id && user.id !== 'admin-bypass'
+              ? { userId: user.id }
+              : { username: user.username, roles: user.roles };
+
             const tokenResponse = await fetch('/api/auth/dev-token', {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
               },
-              body: JSON.stringify({
-                username: user.username,
-                roles: user.roles,
-              }),
+              body: JSON.stringify(tokenBody),
             });
 
             if (tokenResponse.ok) {
