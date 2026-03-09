@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { LiteLLMService } from './litellm.service.js';
+import { ApiKeyService } from './api-key.service.js';
 import { BaseService } from './base.service.js';
 import {
   User,
@@ -690,6 +691,16 @@ export class TeamService extends BaseService {
         return team;
       }
 
+      // Fetch current allowedModels before update to detect removals
+      let previousAllowedModels: string[] = [];
+      if (allowedModels !== undefined) {
+        const currentTeam = await this.fastify.dbUtils.queryOne<{ allowed_models: string[] }>(
+          `SELECT allowed_models FROM teams WHERE id = $1`,
+          [teamId],
+        );
+        previousAllowedModels = currentTeam?.allowed_models || [];
+      }
+
       updateFields.push(`updated_at = CURRENT_TIMESTAMP`);
       params.push(teamId);
 
@@ -714,6 +725,24 @@ export class TeamService extends BaseService {
           });
         } catch (error) {
           this.fastify.log.warn(error, 'Failed to sync team update with LiteLLM');
+        }
+      }
+
+      // Cascade model removal to team API keys when allowedModels shrinks
+      if (allowedModels !== undefined && previousAllowedModels.length > 0) {
+        const removedModels = previousAllowedModels.filter(
+          (m) => !allowedModels.includes(m),
+        );
+        if (removedModels.length > 0) {
+          try {
+            const apiKeyService = new ApiKeyService(this.fastify, this.liteLLMService);
+            await apiKeyService.removeModelsFromTeamApiKeys(teamId, removedModels);
+          } catch (error) {
+            this.fastify.log.warn(
+              { error, teamId, removedModels },
+              'Failed to cascade model removal to team API keys',
+            );
+          }
         }
       }
 

@@ -102,6 +102,8 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
             modelRpmLimit: apiKey.modelRpmLimit,
             modelTpmLimit: apiKey.modelTpmLimit,
             metadata: apiKey.metadata,
+            teamId: apiKey.teamId,
+            teamName: apiKey.teamName,
           })),
           pagination: {
             page,
@@ -675,6 +677,8 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
           modelRpmLimit: updatedApiKey.modelRpmLimit,
           modelTpmLimit: updatedApiKey.modelTpmLimit,
           metadata: updatedApiKey.metadata,
+          teamId: updatedApiKey.teamId,
+          teamName: updatedApiKey.teamName,
         };
       } catch (error) {
         fastify.log.error(error, 'Failed to update API key');

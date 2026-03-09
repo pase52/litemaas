@@ -56,6 +56,7 @@ import {
   ExclamationTriangleIcon,
   CheckCircleIcon,
   PencilAltIcon,
+  UsersIcon,
 } from '@patternfly/react-icons';
 import { Table, Thead, Tbody, Tr, Th, Td } from '@patternfly/react-table';
 import { useNotifications } from '../contexts/NotificationContext';
@@ -812,6 +813,7 @@ const ApiKeysPage: React.FC = () => {
     setNewKeyName(apiKey.name);
     setNewKeyDescription(apiKey.description || '');
     setSelectedModelIds(apiKey.models || []);
+    setSelectedGroupId(apiKey.teamId || null); // Restore group association for model filtering
     setNewKeyPermissions([]); // Reset permissions for edit
     setNewKeyRateLimit('1000'); // Reset rate limit for edit
     // Pre-fill expiration from existing key
@@ -1109,13 +1111,16 @@ const ApiKeysPage: React.FC = () => {
                     <Th scope="col" style={{ width: '15%' }}>
                       {t('pages.apiKeys.forms.name')}
                     </Th>
-                    <Th scope="col" style={{ width: '35%' }}>
+                    <Th scope="col" style={{ width: '30%' }}>
                       {t('pages.apiKeys.forms.apiKey')}
                     </Th>
                     <Th scope="col" style={{ width: '15%' }}>
                       {t('pages.apiKeys.forms.models')}
                     </Th>
-                    <Th scope="col" style={{ width: '35%' }}>
+                    <Th scope="col" style={{ width: '10%' }}>
+                      {t('pages.apiKeys.forms.groupColumn')}
+                    </Th>
+                    <Th scope="col" style={{ width: '30%' }}>
                       {t('pages.apiKeys.labels.actions')}
                     </Th>
                   </Tr>
@@ -1236,7 +1241,21 @@ const ApiKeysPage: React.FC = () => {
                           )}
                         </LabelGroup>
                       </Td>
-                      {/* 
+                      <Td>
+                        {apiKey.teamName ? (
+                          <Label isCompact icon={<UsersIcon />}>
+                            {apiKey.teamName}
+                          </Label>
+                        ) : (
+                          <Content
+                            component={ContentVariants.small}
+                            style={{ color: 'var(--pf-t--global--text--color--subtle)' }}
+                          >
+                            {t('pages.apiKeys.personalKey')}
+                          </Content>
+                        )}
+                      </Td>
+                      {/*
                       <Td>
                         <Content component={ContentVariants.small}>
                           {apiKey.lastUsed
@@ -1369,6 +1388,18 @@ const ApiKeysPage: React.FC = () => {
                 aria-describedby="key-description-helper"
               />
             </FormGroup>
+
+            {/* ✅ Read-only group display in edit mode */}
+            {isEditMode && editingKey?.teamName && (
+              <FormGroup
+                label={t('pages.apiKeys.forms.groupColumn')}
+                fieldId="key-group-readonly"
+              >
+                <Label icon={<UsersIcon />}>
+                  {editingKey.teamName}
+                </Label>
+              </FormGroup>
+            )}
 
             {/* ✅ Optional group selection */}
             {!isEditMode && groups.length > 0 && (
@@ -2092,6 +2123,18 @@ const ApiKeysPage: React.FC = () => {
                         )}
                       </Td>
                     </Tr>
+                    {selectedApiKey.teamName && (
+                      <Tr>
+                        <Th scope="row">
+                          <strong>{t('pages.apiKeys.forms.groupColumn')}</strong>
+                        </Th>
+                        <Td>
+                          <Label isCompact icon={<UsersIcon />}>
+                            {selectedApiKey.teamName}
+                          </Label>
+                        </Td>
+                      </Tr>
+                    )}
                     <Tr>
                       <Td colSpan={2} style={{ padding: 0 }}>
                         <Split hasGutter>

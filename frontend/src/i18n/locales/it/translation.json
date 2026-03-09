@@ -414,6 +414,7 @@
     },
     "table": {
       "allModels": "All",
+      "noModels": "Nessun modello",
       "noDescription": "No description",
       "ariaLabel": "Groups table",
       "caption": "List of {{count}} groups",
@@ -496,6 +497,7 @@
       "title": "Allowed Models",
       "allModelsInfo": "When no models are selected, the group has access to all available models.",
       "selectedCount": "{{count}} model(s) selected",
+      "noneSelected": "Nessuno selezionato",
       "searchModels": "Search models...",
       "clearSelection": "Clear selection",
       "noModelsAvailable": "No models available"
@@ -731,6 +733,7 @@
         "expirationMaxHelper": "Massimo consentito: {{max}} giorni",
         "expirationNever": "Mai",
         "expirationRequired": "È richiesta una data di scadenza (massimo: {{max}} giorni)",
+        "groupColumn": "Gruppo",
         "models": "Modelli",
         "modelsAriaLabel": "Seleziona modelli per l'accesso con chiave API",
         "modelsHelperText": "Seleziona uno o più modelli a cui questa chiave API può accedere",
@@ -877,6 +880,7 @@
       },
       "selectAll": "Seleziona tutto",
       "selectAllModelsAriaLabel": "Seleziona o deseleziona tutti i modelli disponibili",
+      "personalKey": "Personale",
       "selectModelAriaLabel": "Seleziona o deseleziona il modello {{name}}",
       "selectModels": "Seleziona modelli...",
       "showKey": "Mostra chiave",

@@ -105,7 +105,7 @@ const GroupModelsTab: React.FC<GroupModelsTabProps> = ({
       >
         {t(
           'groups.models.infoDescription',
-          'An empty selection means all models are accessible to this group.',
+          'An empty selection means no models are accessible to this group.',
         )}
       </Alert>
 
@@ -118,7 +118,7 @@ const GroupModelsTab: React.FC<GroupModelsTabProps> = ({
         <FlexItem>
           <Badge isRead>
             {selectedModels.length === 0
-              ? t('groups.models.allModels', 'All Models')
+              ? t('groups.models.noneSelected')
               : t('groups.models.selectedCount', '{{count}} selected', {
                   count: selectedModels.length,
                 })}

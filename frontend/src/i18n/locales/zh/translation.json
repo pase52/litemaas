@@ -414,6 +414,7 @@
     },
     "table": {
       "allModels": "All",
+      "noModels": "无模型",
       "noDescription": "No description",
       "ariaLabel": "Groups table",
       "caption": "List of {{count}} groups",
@@ -496,6 +497,7 @@
       "title": "Allowed Models",
       "allModelsInfo": "When no models are selected, the group has access to all available models.",
       "selectedCount": "{{count}} model(s) selected",
+      "noneSelected": "未选择",
       "searchModels": "Search models...",
       "clearSelection": "Clear selection",
       "noModelsAvailable": "No models available"
@@ -731,6 +733,7 @@
         "expirationMaxHelper": "最大允许：{{max}}天",
         "expirationNever": "永不过期",
         "expirationRequired": "需要设置过期时间（最长：{{max}}天）",
+        "groupColumn": "群组",
         "models": "模型",
         "modelsAriaLabel": "选择API密钥访问的模型",
         "modelsHelperText": "选择此API密钥可以访问的一个或多个模型",
@@ -877,6 +880,7 @@
       },
       "selectAll": "全部选择",
       "selectAllModelsAriaLabel": "选择或取消选择所有可用模型",
+      "personalKey": "个人",
       "selectModelAriaLabel": "选择或取消选择{{name}}模型",
       "selectModels": "选择模型...",
       "showKey": "显示密钥",

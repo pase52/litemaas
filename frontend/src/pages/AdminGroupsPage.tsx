@@ -167,7 +167,7 @@ const AdminGroupsPage: React.FC = () => {
 
   const formatModels = (group: Group): string => {
     if (!group.allowedModels || group.allowedModels.length === 0) {
-      return t('groups.table.allModels', 'All Models');
+      return t('groups.table.noModels');
     }
     return group.allowedModels.length.toString();
   };

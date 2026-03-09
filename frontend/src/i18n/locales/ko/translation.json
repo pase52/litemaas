@@ -414,6 +414,7 @@
     },
     "table": {
       "allModels": "All",
+      "noModels": "모델 없음",
       "noDescription": "No description",
       "ariaLabel": "Groups table",
       "caption": "List of {{count}} groups",
@@ -496,6 +497,7 @@
       "title": "Allowed Models",
       "allModelsInfo": "When no models are selected, the group has access to all available models.",
       "selectedCount": "{{count}} model(s) selected",
+      "noneSelected": "선택 없음",
       "searchModels": "Search models...",
       "clearSelection": "Clear selection",
       "noModelsAvailable": "No models available"
@@ -731,6 +733,7 @@
         "expirationMaxHelper": "최대 허용: {{max}}일",
         "expirationNever": "만료 없음",
         "expirationRequired": "만료일이 필요합니다 (최대: {{max}}일)",
+        "groupColumn": "그룹",
         "models": "모델",
         "modelsAriaLabel": "API 키 액세스를 위한 모델 선택",
         "modelsHelperText": "이 API 키가 액세스할 수 있는 하나 이상의 모델을 선택하세요",
@@ -877,6 +880,7 @@
       },
       "selectAll": "모두 선택",
       "selectAllModelsAriaLabel": "사용 가능한 모든 모델을 선택 또는 선택 해제",
+      "personalKey": "개인",
       "selectModelAriaLabel": "{{name}} 모델을 선택 또는 선택 해제",
       "selectModels": "모델 선택...",
       "showKey": "키 표시",

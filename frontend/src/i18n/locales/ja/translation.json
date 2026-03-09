@@ -414,6 +414,7 @@
     },
     "table": {
       "allModels": "All",
+      "noModels": "モデルなし",
       "noDescription": "No description",
       "ariaLabel": "Groups table",
       "caption": "List of {{count}} groups",
@@ -496,6 +497,7 @@
       "title": "Allowed Models",
       "allModelsInfo": "When no models are selected, the group has access to all available models.",
       "selectedCount": "{{count}} model(s) selected",
+      "noneSelected": "未選択",
       "searchModels": "Search models...",
       "clearSelection": "Clear selection",
       "noModelsAvailable": "No models available"
@@ -731,6 +733,7 @@
         "expirationMaxHelper": "最大許容期間: {{max}}日",
         "expirationNever": "無期限",
         "expirationRequired": "有効期限の設定が必要です（最大: {{max}}日）",
+        "groupColumn": "グループ",
         "models": "モデル",
         "modelsAriaLabel": "APIキーアクセス用のモデルを選択",
         "modelsHelperText": "このAPIキーがアクセスできる1つ以上のモデルを選択",
@@ -877,6 +880,7 @@
       },
       "selectAll": "すべて選択",
       "selectAllModelsAriaLabel": "利用可能なすべてのモデルを選択・選択解除",
+      "personalKey": "個人",
       "selectModelAriaLabel": "{{name}}モデルを選択・選択解除",
       "selectModels": "モデルを選択...",
       "showKey": "キーを表示",

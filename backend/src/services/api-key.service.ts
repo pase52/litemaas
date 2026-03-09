@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { createHash, randomBytes } from 'crypto';
 import { LiteLLMService } from './litellm.service.js';
 import { BaseService } from './base.service.js';
+import { DefaultTeamService } from './default-team.service.js';
 import { LiteLLMSyncUtils } from '../utils/litellm-sync.utils.js';
 import {
   EnhancedApiKey,
@@ -120,6 +121,8 @@ interface ApiKeyDbRow {
   metadata?: Record<string, unknown>;
   model_details?: unknown[];
   subscription_id?: string;
+  team_id?: string;
+  team_name?: string;
 }
 
 export class ApiKeyService extends BaseService {
@@ -299,7 +302,17 @@ export class ApiKeyService extends BaseService {
         );
 
         const allowedModels = team?.allowed_models as string[] | null | undefined;
-        if (allowedModels && allowedModels.length > 0) {
+        const isDefaultTeam = request.teamId === DefaultTeamService.DEFAULT_TEAM_ID;
+
+        if (!isDefaultTeam && (!allowedModels || allowedModels.length === 0)) {
+          // Non-default group with no models configured: no models are available
+          throw this.createValidationError(
+            'This group has no models configured',
+            'teamId',
+            request.teamId,
+            'Please contact your administrator to configure models for this group',
+          );
+        } else if (allowedModels && allowedModels.length > 0) {
           groupAllowedModelIds = allowedModels;
           const disallowedModels = modelIds.filter(
             (id) => !allowedModels.includes(id),
@@ -830,9 +843,10 @@ export class ApiKeyService extends BaseService {
     }
 
     try {
-      // Updated query to include model associations and LiteLLM key
+      // Updated query to include model associations, LiteLLM key, and team info
       let query = `
-        SELECT ak.*, 
+        SELECT ak.*,
+           t.name as team_name,
            ARRAY_AGG(DISTINCT akm.model_id) FILTER (WHERE akm.model_id IS NOT NULL) as models,
            ARRAY_AGG(DISTINCT jsonb_build_object(
              'id', m.id,
@@ -843,6 +857,7 @@ export class ApiKeyService extends BaseService {
          FROM api_keys ak
          LEFT JOIN api_key_models akm ON ak.id = akm.api_key_id
          LEFT JOIN models m ON akm.model_id = m.id
+         LEFT JOIN teams t ON ak.team_id = t.id
          WHERE ak.user_id = $1
       `;
       const params: (string | boolean | string[] | number)[] = [userId];
@@ -862,7 +877,7 @@ export class ApiKeyService extends BaseService {
         params.push(isActive);
       }
 
-      query += ` GROUP BY ak.id ORDER BY ak.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+      query += ` GROUP BY ak.id, t.name ORDER BY ak.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
       params.push(limit, offset);
 
       // Get count query
@@ -1349,9 +1364,35 @@ export class ApiKeyService extends BaseService {
         );
       }
 
-      // Validate models have active subscriptions if modelIds are being updated
+      // Validate models have active subscriptions if modelIds are being updated.
+      // Models granted by the key's associated group bypass individual subscription checks.
       if (updates.modelIds) {
-        await this.validateModelsHaveActiveSubscriptions(userId, updates.modelIds);
+        let modelsToValidate = updates.modelIds;
+        if (apiKey.teamId) {
+          const team = await this.fastify.dbUtils.queryOne<{ allowed_models: string[] }>(
+            `SELECT allowed_models FROM teams WHERE id = $1`,
+            [apiKey.teamId],
+          );
+          const teamAllowedModels = team?.allowed_models as string[] | null | undefined;
+          const isDefaultTeam = apiKey.teamId === DefaultTeamService.DEFAULT_TEAM_ID;
+
+          if (!isDefaultTeam && (!teamAllowedModels || teamAllowedModels.length === 0)) {
+            // Non-default group with no models configured: reject any model updates
+            throw this.createValidationError(
+              'This group has no models configured',
+              'modelIds',
+              updates.modelIds,
+              'Please contact your administrator to configure models for this group',
+            );
+          } else if (teamAllowedModels && teamAllowedModels.length > 0) {
+            modelsToValidate = updates.modelIds.filter(
+              (modelId) => !(teamAllowedModels as string[]).includes(modelId),
+            );
+          }
+        }
+        if (modelsToValidate.length > 0) {
+          await this.validateModelsHaveActiveSubscriptions(userId, modelsToValidate);
+        }
       }
 
       // Get the full LiteLLM key for the update call
@@ -2146,6 +2187,9 @@ export class ApiKeyService extends BaseService {
           },
         ]
         : undefined,
+      // Group/team association
+      teamId: apiKey.team_id || undefined,
+      teamName: apiKey.team_name || undefined,
     };
   }
 
@@ -2282,6 +2326,79 @@ export class ApiKeyService extends BaseService {
           totalKeys: apiKeys.length,
         },
         'Some API keys could not be updated in LiteLLM - database unchanged for those keys',
+      );
+    }
+  }
+
+  /**
+   * Remove specific models from all API keys belonging to a team.
+   * Called when a team's allowedModels list is updated and models are removed.
+   *
+   * CRITICAL: Updates LiteLLM FIRST, then database (security priority)
+   */
+  async removeModelsFromTeamApiKeys(teamId: string, removedModelIds: string[]): Promise<void> {
+    if (removedModelIds.length === 0) return;
+
+    // Find all active API keys in this team that have any of the removed models
+    const apiKeys = await this.fastify.dbUtils.queryMany<{
+      id: string;
+      lite_llm_key_value: string;
+    }>(
+      `SELECT DISTINCT ak.id, ak.lite_llm_key_value
+       FROM api_keys ak
+       JOIN api_key_models akm ON ak.id = akm.api_key_id
+       WHERE ak.team_id = $1
+         AND akm.model_id = ANY($2)
+         AND ak.is_active = true`,
+      [teamId, removedModelIds],
+    );
+
+    if (apiKeys.length === 0) return;
+
+    // STEP 1: Update LiteLLM FIRST for each affected key
+    const successfulKeyIds: string[] = [];
+
+    for (const apiKey of apiKeys) {
+      if (apiKey.lite_llm_key_value && !this.shouldUseMockData()) {
+        try {
+          const remainingModels = await this.fastify.dbUtils.queryMany<{ model_id: string }>(
+            `SELECT model_id FROM api_key_models
+             WHERE api_key_id = $1 AND model_id != ALL($2)`,
+            [apiKey.id, removedModelIds],
+          );
+
+          await this.liteLLMService.updateKey(apiKey.lite_llm_key_value, {
+            models: remainingModels.map((m) => m.model_id),
+          });
+
+          successfulKeyIds.push(apiKey.id);
+        } catch (error) {
+          this.fastify.log.error(
+            { error, keyId: apiKey.id, teamId, removedModelIds },
+            'Failed to update LiteLLM key during team model removal - skipping database update for this key',
+          );
+        }
+      } else {
+        successfulKeyIds.push(apiKey.id);
+      }
+    }
+
+    // STEP 2: Remove models from DB only for keys successfully updated in LiteLLM
+    if (successfulKeyIds.length > 0) {
+      await this.fastify.dbUtils.query(
+        `DELETE FROM api_key_models
+         WHERE api_key_id = ANY($1) AND model_id = ANY($2)`,
+        [successfulKeyIds, removedModelIds],
+      );
+
+      this.fastify.log.info(
+        {
+          teamId,
+          removedModelIds,
+          keysAffected: successfulKeyIds.length,
+          totalKeys: apiKeys.length,
+        },
+        'Removed models from team API keys',
       );
     }
   }

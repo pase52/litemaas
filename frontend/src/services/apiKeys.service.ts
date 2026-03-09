@@ -31,6 +31,9 @@ export interface ApiKey {
   modelMaxBudget?: Record<string, { budgetLimit: number; timePeriod: string }>;
   modelRpmLimit?: Record<string, number>;
   modelTpmLimit?: Record<string, number>;
+  // Group/team association
+  teamId?: string;
+  teamName?: string;
 }
 
 // Backend response interface
@@ -67,6 +70,9 @@ interface BackendApiKeyDetails {
     ratelimit?: number;
     description?: string;
   };
+  // Group/team association
+  teamId?: string;
+  teamName?: string;
 }
 
 interface BackendApiKeysResponse {
@@ -148,6 +154,8 @@ class ApiKeysService {
       modelMaxBudget: backend.modelMaxBudget,
       modelRpmLimit: backend.modelRpmLimit,
       modelTpmLimit: backend.modelTpmLimit,
+      teamId: backend.teamId,
+      teamName: backend.teamName,
     };
   }
 

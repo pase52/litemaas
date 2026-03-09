@@ -299,6 +299,8 @@ export const ApiKeyResponseSchema = Type.Object({
       modelRpmLimit: Type.Optional(Type.Record(Type.String(), Type.Integer())),
       modelTpmLimit: Type.Optional(Type.Record(Type.String(), Type.Integer())),
       metadata: Type.Optional(Type.Record(Type.String(), Type.Any())),
+      teamId: Type.Optional(Type.String()),
+      teamName: Type.Optional(Type.String()),
     }),
   ),
   pagination: Type.Object({

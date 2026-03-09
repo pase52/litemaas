@@ -414,6 +414,7 @@
     },
     "table": {
       "allModels": "All",
+      "noModels": "No models",
       "noDescription": "No description",
       "ariaLabel": "Groups table",
       "caption": "List of {{count}} groups",
@@ -496,6 +497,7 @@
       "title": "Allowed Models",
       "allModelsInfo": "When no models are selected, the group has access to all available models.",
       "selectedCount": "{{count}} model(s) selected",
+      "noneSelected": "None selected",
       "searchModels": "Search models...",
       "clearSelection": "Clear selection",
       "noModelsAvailable": "No models available"
@@ -731,6 +733,7 @@
         "expirationMaxHelper": "And orthad: {{max}} aurin",
         "expirationNever": "Úin",
         "expirationRequired": "Firnen-îuil aníra (and: {{max}} aurin)",
+        "groupColumn": "Gwaith",
         "models": "Echuin",
         "modelsAriaLabel": "Edhello echuin nan anguirel-API-uir",
         "modelsHelperText": "Edhello min pe in echui anguirel-API sin puia uir",
@@ -877,6 +880,7 @@
       },
       "selectAll": "Edhellen îl",
       "selectAllModelsAriaLabel": "Edhellen pe thuia îl echuin úir",
+      "personalKey": "Ereb",
       "selectModelAriaLabel": "Edhellen pe thuia {{name}} echui",
       "selectModels": "Edhellen echuin...",
       "showKey": "Tira anguirel",

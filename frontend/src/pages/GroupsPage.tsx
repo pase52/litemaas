@@ -84,7 +84,7 @@ const GroupsPage: React.FC = () => {
   const getModelsDisplay = (group: Group) => {
     if (!group.allowedModels || group.allowedModels.length === 0) {
       return (
-        <Label color="blue">{t('groups.table.allModels', 'All')}</Label>
+        <Label color="grey">{t('groups.table.noModels')}</Label>
       );
     }
     return group.allowedModels.length.toString();
