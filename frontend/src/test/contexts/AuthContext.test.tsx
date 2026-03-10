@@ -970,6 +970,7 @@ describe('AuthContext', () => {
           'isAuthenticated',
           'login',
           'loginAsAdmin',
+          'loginAsUser',
           'logout',
           'refreshUser',
         ].sort();
