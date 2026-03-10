@@ -1452,4 +1452,370 @@ describe('ApiKeyService', () => {
       });
     });
   });
+
+  describe('Group membership validation in createApiKey', () => {
+    const DEFAULT_TEAM_ID = 'a0000000-0000-4000-8000-000000000001';
+
+    it('should reject API key creation when user is not a group member', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      // team_members join returns null → not a member
+      mockDbUtils.queryOne.mockResolvedValueOnce(null);
+
+      await expect(
+        service.createApiKey('user-123', {
+          modelIds: ['gpt-4o'],
+          name: 'Team Key',
+          teamId: 'team-abc',
+        }),
+      ).rejects.toThrow(/not a member of the specified group/i);
+    });
+
+    it('should reject when non-default group has no models configured (empty allowedModels)', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      // Step 1: membership check passes
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce({ role: 'member' }) // user is a member
+        .mockResolvedValueOnce({ allowed_models: [] }); // team has empty allowed_models
+
+      await expect(
+        service.createApiKey('user-123', {
+          modelIds: ['gpt-4o'],
+          name: 'Team Key',
+          teamId: 'team-abc',
+        }),
+      ).rejects.toThrow(/group has no models configured/i);
+    });
+
+    it('should reject when requested models are not in group allowed list', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce({ role: 'member' }) // membership OK
+        .mockResolvedValueOnce({ allowed_models: ['gpt-4o'] }); // only gpt-4o allowed
+
+      await expect(
+        service.createApiKey('user-123', {
+          modelIds: ['gpt-4o', 'claude-3-5-sonnet'],
+          name: 'Team Key',
+          teamId: 'team-abc',
+        }),
+      ).rejects.toThrow(/not allowed by the selected group.*claude-3-5-sonnet/i);
+    });
+
+    it('should allow models from group allowedModels without subscriptions', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      // Step 1: membership check
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce({ role: 'member' }) // membership OK
+        .mockResolvedValueOnce({ allowed_models: ['gpt-4o', 'claude-3-5-sonnet'] }); // team allows both
+
+      // Step 2: subscription check returns NO subscriptions (all bypass via group)
+      mockDbUtils.queryMany.mockResolvedValueOnce([]); // no subscriptions
+
+      // Step 3: group-only model existence check
+      mockDbUtils.queryMany.mockResolvedValueOnce([
+        { id: 'gpt-4o' },
+        { id: 'claude-3-5-sonnet' },
+      ]); // both exist
+
+      // Step 4: key count check
+      mockDbUtils.queryOne.mockResolvedValueOnce({ count: 0 });
+
+      vi.mocked(mockLiteLLMService.generateApiKey!).mockResolvedValue(mockLiteLLMKeyResponse);
+
+      mockPgClient.query.mockResolvedValue(undefined);
+      mockPgClient.query.mockResolvedValueOnce(undefined); // BEGIN
+      mockPgClient.query.mockResolvedValueOnce({ rows: [mockApiKeyDbRow] }); // INSERT
+
+      const result = await service.createApiKey('user-123', {
+        modelIds: ['gpt-4o', 'claude-3-5-sonnet'],
+        name: 'Team Key',
+        teamId: 'team-abc',
+      });
+
+      expect(result).toBeDefined();
+    });
+
+    it('should validate that group-only models exist in the models table', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce({ role: 'member' }) // membership OK
+        .mockResolvedValueOnce({ allowed_models: ['gpt-4o', 'nonexistent-model'] }); // team allows both
+
+      // No subscriptions
+      mockDbUtils.queryMany.mockResolvedValueOnce([]);
+
+      // group-only model existence check: only gpt-4o exists
+      mockDbUtils.queryMany.mockResolvedValueOnce([{ id: 'gpt-4o' }]);
+
+      await expect(
+        service.createApiKey('user-123', {
+          modelIds: ['gpt-4o', 'nonexistent-model'],
+          name: 'Team Key',
+          teamId: 'team-abc',
+        }),
+      ).rejects.toThrow(/do not exist.*nonexistent-model/i);
+    });
+
+    it('should allow all models for default team (even with null allowedModels)', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      // membership OK
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce({ role: 'member' })
+        .mockResolvedValueOnce({ allowed_models: null }); // default team, null allowed_models
+
+      // subscription check: user has active subscription for requested model
+      mockDbUtils.queryMany.mockResolvedValueOnce([
+        { model_id: 'gpt-4o', model_name: 'GPT-4o', provider: 'openai' },
+      ]);
+
+      // key count
+      mockDbUtils.queryOne.mockResolvedValueOnce({ count: 0 });
+
+      vi.mocked(mockLiteLLMService.generateApiKey!).mockResolvedValue(mockLiteLLMKeyResponse);
+
+      mockPgClient.query.mockResolvedValue(undefined);
+      mockPgClient.query.mockResolvedValueOnce(undefined); // BEGIN
+      mockPgClient.query.mockResolvedValueOnce({ rows: [mockApiKeyDbRow] }); // INSERT
+
+      const result = await service.createApiKey('user-123', {
+        modelIds: ['gpt-4o'],
+        name: 'Default Team Key',
+        teamId: DEFAULT_TEAM_ID,
+      });
+
+      expect(result).toBeDefined();
+    });
+  });
+
+  describe('Group model bypass in updateApiKey', () => {
+    const DEFAULT_TEAM_ID = 'a0000000-0000-4000-8000-000000000001';
+
+    it('should bypass subscription check for models allowed by the team', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      // getApiKey returns key with teamId
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce({ ...mockApiKeyDbRow, team_id: 'team-abc' }); // getApiKey (initial)
+
+      // getApiKey model details
+      mockDbUtils.queryMany
+        .mockResolvedValueOnce([{ model_id: 'gpt-4o', name: 'GPT-4o', provider: 'openai' }]);
+
+      // team allowed_models lookup
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce({ allowed_models: ['gpt-4o', 'claude-3-5-sonnet'] }); // team allows both
+
+      // No subscription validation needed since all models are allowed by team
+
+      // update query
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce({ ...mockApiKeyDbRow, name: 'Updated' }); // update result
+
+      // getApiKey (final) model details
+      mockDbUtils.queryMany
+        .mockResolvedValueOnce([
+          { model_id: 'gpt-4o', name: 'GPT-4o', provider: 'openai' },
+          { model_id: 'claude-3-5-sonnet', name: 'Claude 3.5', provider: 'anthropic' },
+        ]);
+
+      mockDbUtils.query = vi.fn().mockResolvedValue({ rowCount: 1 }); // audit log + model updates
+      vi.mocked(mockLiteLLMService.updateKey!).mockResolvedValue(undefined);
+
+      const result = await service.updateApiKey('key-123', 'user-123', {
+        modelIds: ['gpt-4o', 'claude-3-5-sonnet'],
+      });
+
+      expect(result).toBeDefined();
+      // validateModelsHaveActiveSubscriptions should NOT have been called for team-allowed models
+    });
+
+    it('should reject when non-default team has no models configured', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      // getApiKey returns key with teamId
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce({ ...mockApiKeyDbRow, team_id: 'team-abc' });
+
+      // getApiKey model details
+      mockDbUtils.queryMany
+        .mockResolvedValueOnce([{ model_id: 'gpt-4o', name: 'GPT-4o', provider: 'openai' }]);
+
+      // team allowed_models is empty
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce({ allowed_models: [] });
+
+      await expect(
+        service.updateApiKey('key-123', 'user-123', {
+          modelIds: ['gpt-4o'],
+        }),
+      ).rejects.toThrow(/group has no models configured/i);
+    });
+
+    it('should only validate non-team-allowed models against subscriptions', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      // getApiKey returns key with teamId
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce({ ...mockApiKeyDbRow, team_id: 'team-abc' });
+
+      // getApiKey model details
+      mockDbUtils.queryMany
+        .mockResolvedValueOnce([{ model_id: 'gpt-4o', name: 'GPT-4o', provider: 'openai' }]);
+
+      // team allows only gpt-4o
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce({ allowed_models: ['gpt-4o'] });
+
+      // validateModelsHaveActiveSubscriptions for claude-3-5-sonnet (non-team model)
+      // returns no active subscription → should reject
+      mockDbUtils.queryMany
+        .mockResolvedValueOnce([]); // no subscription for claude-3-5-sonnet
+
+      await expect(
+        service.updateApiKey('key-123', 'user-123', {
+          modelIds: ['gpt-4o', 'claude-3-5-sonnet'],
+        }),
+      ).rejects.toThrow(/without active subscriptions.*claude-3-5-sonnet/i);
+    });
+  });
+
+  describe('removeModelsFromTeamApiKeys', () => {
+    it('should do nothing when removedModelIds is empty', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      await service.removeModelsFromTeamApiKeys('team-abc', []);
+
+      expect(mockDbUtils.queryMany).not.toHaveBeenCalled();
+      expect(mockDbUtils.query).not.toHaveBeenCalled();
+    });
+
+    it('should find affected API keys in the team', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      const apiKeys = [
+        { id: 'key-1', lite_llm_key_value: 'sk-litellm-1' },
+        { id: 'key-2', lite_llm_key_value: 'sk-litellm-2' },
+      ];
+
+      mockDbUtils.queryMany
+        .mockResolvedValueOnce(apiKeys) // find affected keys
+        .mockResolvedValue([{ model_id: 'other-model' }]); // remaining models
+
+      mockDbUtils.query.mockResolvedValue({ rowCount: 1 });
+      vi.mocked(mockLiteLLMService.updateKey!).mockResolvedValue(undefined);
+
+      await service.removeModelsFromTeamApiKeys('team-abc', ['gpt-4o']);
+
+      // Verify the query to find affected keys
+      expect(mockDbUtils.queryMany).toHaveBeenCalledWith(
+        expect.stringContaining('team_id'),
+        expect.arrayContaining(['team-abc', ['gpt-4o']]),
+      );
+    });
+
+    it('should update LiteLLM first, then database', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      const apiKeys = [
+        { id: 'key-1', lite_llm_key_value: 'sk-litellm-1' },
+      ];
+
+      const callOrder: string[] = [];
+
+      mockDbUtils.queryMany
+        .mockResolvedValueOnce(apiKeys)
+        .mockResolvedValue([{ model_id: 'other-model' }]);
+
+      mockDbUtils.query.mockImplementation(async () => {
+        callOrder.push('database');
+        return { rowCount: 1 };
+      });
+
+      vi.mocked(mockLiteLLMService.updateKey!).mockImplementation(async () => {
+        callOrder.push('litellm');
+      });
+
+      await service.removeModelsFromTeamApiKeys('team-abc', ['gpt-4o']);
+
+      // Verify LiteLLM was called before database DELETE
+      const litellmIndex = callOrder.indexOf('litellm');
+      const dbIndex = callOrder.indexOf('database');
+      expect(litellmIndex).toBeGreaterThanOrEqual(0);
+      expect(dbIndex).toBeGreaterThanOrEqual(0);
+      expect(litellmIndex).toBeLessThan(dbIndex);
+    });
+
+    it('should skip DB update for keys where LiteLLM update failed', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      const apiKeys = [
+        { id: 'key-1', lite_llm_key_value: 'sk-litellm-1' },
+        { id: 'key-2', lite_llm_key_value: 'sk-litellm-2' },
+      ];
+
+      mockDbUtils.queryMany
+        .mockResolvedValueOnce(apiKeys) // find affected keys
+        .mockResolvedValue([{ model_id: 'other-model' }]); // remaining models queries
+
+      mockDbUtils.query.mockResolvedValue({ rowCount: 1 });
+
+      // First key LiteLLM succeeds, second fails
+      vi.mocked(mockLiteLLMService.updateKey!)
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('LiteLLM error'));
+
+      await service.removeModelsFromTeamApiKeys('team-abc', ['gpt-4o']);
+
+      // DB delete should only include key-1 (successful), not key-2 (failed)
+      expect(mockDbUtils.query).toHaveBeenCalledWith(
+        expect.stringContaining('DELETE FROM api_key_models'),
+        expect.arrayContaining([['key-1'], ['gpt-4o']]),
+      );
+    });
+
+    it('should handle case when no API keys are affected', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      // No keys found for this team with the removed models
+      mockDbUtils.queryMany.mockResolvedValueOnce([]);
+
+      await service.removeModelsFromTeamApiKeys('team-abc', ['gpt-4o']);
+
+      // No LiteLLM or DB updates should happen
+      expect(mockLiteLLMService.updateKey).not.toHaveBeenCalled();
+      expect(mockDbUtils.query).not.toHaveBeenCalled();
+    });
+
+    it('should log the operation', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+
+      const apiKeys = [
+        { id: 'key-1', lite_llm_key_value: 'sk-litellm-1' },
+      ];
+
+      mockDbUtils.queryMany
+        .mockResolvedValueOnce(apiKeys)
+        .mockResolvedValue([{ model_id: 'other-model' }]);
+
+      mockDbUtils.query.mockResolvedValue({ rowCount: 1 });
+      vi.mocked(mockLiteLLMService.updateKey!).mockResolvedValue(undefined);
+
+      await service.removeModelsFromTeamApiKeys('team-abc', ['gpt-4o']);
+
+      expect(mockFastify.log!.info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          teamId: 'team-abc',
+          removedModelIds: ['gpt-4o'],
+          keysAffected: 1,
+        }),
+        expect.stringContaining('Removed models from team API keys'),
+      );
+    });
+  });
 });

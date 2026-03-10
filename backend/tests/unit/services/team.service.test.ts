@@ -444,6 +444,7 @@ describe('TeamService', () => {
       mockDbUtils.queryOne
         .mockResolvedValueOnce({ role: 'admin' }) // checkTeamAccess
         .mockResolvedValueOnce(null) // Check name uniqueness
+        .mockResolvedValueOnce({ allowed_models: ['gpt-4o', 'claude-3-5-sonnet-20241022'] }) // Fetch previous allowedModels
         .mockResolvedValueOnce({ ...mockTeamDbRow, name: 'Updated Team' }); // Update result
 
       vi.spyOn(service, 'getTeam').mockResolvedValue({
@@ -493,6 +494,7 @@ describe('TeamService', () => {
       mockDbUtils.queryOne
         .mockResolvedValueOnce({ role: 'admin' })
         .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ allowed_models: ['gpt-4o', 'claude-3-5-sonnet-20241022'] }) // Fetch previous allowedModels
         .mockResolvedValueOnce(mockTeamDbRow);
 
       vi.spyOn(service, 'getTeam').mockResolvedValue({} as TeamWithMembers);
@@ -976,6 +978,295 @@ describe('TeamService', () => {
 
       await expect(service.getUserTeams('user-123')).rejects.toThrow();
       expect(mockFastify.log!.error).toHaveBeenCalledWith(dbError, 'Failed to get user teams');
+    });
+  });
+
+  describe('getAllTeams', () => {
+    it('should return mock teams excluding default team when in mock mode', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(true);
+
+      const result = await service.getAllTeams();
+
+      expect(result).toBeDefined();
+      expect(result.data).toBeDefined();
+      expect(result.total).toBeGreaterThan(0);
+      // Should not include default team
+      const defaultTeamId = 'a0000000-0000-4000-8000-000000000001';
+      expect(result.data.every((t) => t.id !== defaultTeamId)).toBe(true);
+    });
+
+    it('should support pagination in mock mode', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(true);
+
+      const result = await service.getAllTeams({ page: 1, limit: 1 });
+
+      expect(result.data.length).toBeLessThanOrEqual(1);
+      expect(result.total).toBeGreaterThanOrEqual(result.data.length);
+    });
+
+    it('should filter by search in mock mode', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(true);
+
+      const result = await service.getAllTeams({ search: 'Production' });
+
+      expect(result.data.length).toBeGreaterThan(0);
+      result.data.forEach((team) => {
+        const matchesSearch =
+          team.name.toLowerCase().includes('production') ||
+          (team.alias && team.alias.toLowerCase().includes('production'));
+        expect(matchesSearch).toBe(true);
+      });
+    });
+
+    it('should filter by isActive in mock mode', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(true);
+
+      const result = await service.getAllTeams({ isActive: true });
+
+      result.data.forEach((team) => {
+        expect(team.isActive).toBe(true);
+      });
+    });
+
+    it('should query database with correct filters and pagination', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      mockDbUtils.queryMany.mockResolvedValue([mockTeamDbRow]);
+      mockDbUtils.queryOne.mockResolvedValue({ count: 1 });
+
+      await service.getAllTeams({ page: 2, limit: 5 });
+
+      expect(mockDbUtils.queryMany).toHaveBeenCalledWith(
+        expect.stringContaining('LIMIT'),
+        expect.arrayContaining([5, 5]), // limit, offset = (2-1)*5
+      );
+    });
+
+    it('should exclude default team from database results', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      mockDbUtils.queryMany.mockResolvedValue([mockTeamDbRow]);
+      mockDbUtils.queryOne.mockResolvedValue({ count: 1 });
+
+      await service.getAllTeams();
+
+      const defaultTeamId = 'a0000000-0000-4000-8000-000000000001';
+      // The main query should filter out default team via WHERE t.id != $1
+      expect(mockDbUtils.queryMany).toHaveBeenCalledWith(
+        expect.stringContaining('WHERE t.id != $1'),
+        expect.arrayContaining([defaultTeamId]),
+      );
+      // The count query should also filter out default team
+      expect(mockDbUtils.queryOne).toHaveBeenCalledWith(
+        expect.stringContaining('WHERE t.id != $1'),
+        expect.arrayContaining([defaultTeamId]),
+      );
+    });
+
+    it('should apply search filter in database query', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      mockDbUtils.queryMany.mockResolvedValue([]);
+      mockDbUtils.queryOne.mockResolvedValue({ count: 0 });
+
+      await service.getAllTeams({ search: 'Engineering' });
+
+      expect(mockDbUtils.queryMany).toHaveBeenCalledWith(
+        expect.stringContaining('ILIKE'),
+        expect.arrayContaining(['%Engineering%']),
+      );
+    });
+
+    it('should apply isActive filter in database query', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      mockDbUtils.queryMany.mockResolvedValue([]);
+      mockDbUtils.queryOne.mockResolvedValue({ count: 0 });
+
+      await service.getAllTeams({ isActive: true });
+
+      expect(mockDbUtils.queryMany).toHaveBeenCalledWith(
+        expect.stringContaining('is_active'),
+        expect.arrayContaining([true]),
+      );
+    });
+
+    it('should fetch members for each team in database mode', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      mockDbUtils.queryMany
+        .mockResolvedValueOnce([mockTeamDbRow]) // teams list
+        .mockResolvedValueOnce([mockTeamMemberDbRow]); // members for team
+      mockDbUtils.queryOne.mockResolvedValue({ count: 1 });
+
+      const result = await service.getAllTeams();
+
+      expect(result.data.length).toBe(1);
+      // Second queryMany call should be for fetching members
+      expect(mockDbUtils.queryMany).toHaveBeenCalledTimes(2);
+      expect(mockDbUtils.queryMany).toHaveBeenLastCalledWith(
+        expect.stringContaining('team_members'),
+        [mockTeamDbRow.id],
+      );
+    });
+
+    it('should handle database errors', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      const dbError = new Error('Database connection failed');
+      mockDbUtils.queryMany.mockRejectedValue(dbError);
+      mockDbUtils.queryOne.mockRejectedValue(dbError);
+
+      await expect(service.getAllTeams()).rejects.toThrow('Database connection failed');
+      expect(mockFastify.log!.error).toHaveBeenCalledWith(dbError, 'Failed to get all teams');
+    });
+  });
+
+  describe('deleteTeam with skipAccessCheck', () => {
+    it('should bypass access check when skipAccessCheck is true', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      // No checkTeamAccess mock - if skipAccessCheck works, it won't be called
+      mockDbUtils.queryOne.mockResolvedValueOnce({ count: 0 }); // No active subscriptions
+
+      vi.spyOn(service, 'getTeam').mockResolvedValue({
+        id: 'team-123',
+        name: 'Test Team',
+        liteLLMTeamId: 'litellm-team-123',
+      } as TeamWithMembers);
+
+      // Should NOT throw even though no team access is set up
+      await service.deleteTeam('team-123', 'user-123', true);
+
+      expect(mockDbUtils.query).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE teams SET is_active = false'),
+        ['team-123'],
+      );
+    });
+
+    it('should still check for active subscriptions even with skipAccessCheck', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      mockDbUtils.queryOne.mockResolvedValueOnce({ count: 3 }); // Has active subscriptions
+
+      vi.spyOn(service, 'getTeam').mockResolvedValue({
+        id: 'team-123',
+        name: 'Test Team',
+        liteLLMTeamId: 'litellm-team-123',
+      } as TeamWithMembers);
+
+      await expect(service.deleteTeam('team-123', 'user-123', true)).rejects.toThrow(
+        /Cannot delete team with active subscriptions/i,
+      );
+    });
+
+    it('should still create audit log with skipAccessCheck', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      mockDbUtils.queryOne.mockResolvedValueOnce({ count: 0 }); // No active subscriptions
+
+      vi.spyOn(service, 'getTeam').mockResolvedValue({
+        id: 'team-123',
+        name: 'Test Team',
+        liteLLMTeamId: 'litellm-team-123',
+      } as TeamWithMembers);
+
+      await service.deleteTeam('team-123', 'admin-user', true);
+
+      expect(mockDbUtils.query).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO audit_logs'),
+        expect.arrayContaining(['admin-user', 'TEAM_DELETE', 'TEAM', 'team-123', expect.any(String)]),
+      );
+    });
+
+    it('should call getTeam without userId when skipAccessCheck is true', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      mockDbUtils.queryOne.mockResolvedValueOnce({ count: 0 });
+
+      const getTeamSpy = vi.spyOn(service, 'getTeam').mockResolvedValue({
+        id: 'team-123',
+        name: 'Test Team',
+        liteLLMTeamId: 'litellm-team-123',
+      } as TeamWithMembers);
+
+      await service.deleteTeam('team-123', 'user-123', true);
+
+      // With skipAccessCheck, getTeam is called without userId
+      expect(getTeamSpy).toHaveBeenCalledWith('team-123');
+    });
+
+    it('should call getTeam with userId when skipAccessCheck is false', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce({ role: 'admin' }) // checkTeamAccess
+        .mockResolvedValueOnce({ count: 0 }); // No active subscriptions
+
+      const getTeamSpy = vi.spyOn(service, 'getTeam').mockResolvedValue({
+        id: 'team-123',
+        name: 'Test Team',
+        liteLLMTeamId: 'litellm-team-123',
+      } as TeamWithMembers);
+
+      await service.deleteTeam('team-123', 'user-123', false);
+
+      // Without skipAccessCheck, getTeam is called with userId
+      expect(getTeamSpy).toHaveBeenCalledWith('team-123', 'user-123');
+    });
+  });
+
+  describe('updateTeam with skipAccessCheck', () => {
+    const updateDto: UpdateTeamDto = {
+      name: 'Updated Team',
+      maxBudget: 2000,
+    };
+
+    it('should bypass access check when skipAccessCheck is true', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      // No checkTeamAccess mock - if skipAccessCheck works, it won't be called
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce(null) // Check name uniqueness - no duplicate
+        .mockResolvedValueOnce({ ...mockTeamDbRow, name: 'Updated Team' }); // Update result
+
+      vi.spyOn(service, 'getTeam').mockResolvedValue({
+        ...({} as TeamWithMembers),
+        id: 'team-123',
+        name: 'Updated Team',
+        maxBudget: 2000,
+      });
+
+      // Should NOT throw even though no team access is set up
+      const result = await service.updateTeam('team-123', 'user-123', updateDto, true);
+
+      expect(result.name).toBe('Updated Team');
+      expect(mockDbUtils.queryOne).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE teams SET'),
+        expect.arrayContaining(['Updated Team', 2000, 'team-123']),
+      );
+    });
+
+    it('should still check name uniqueness with skipAccessCheck', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      mockDbUtils.queryOne.mockResolvedValueOnce({ id: 'other-team' }); // Existing team with same name
+
+      await expect(
+        service.updateTeam('team-123', 'user-123', { name: 'Duplicate Name' }, true),
+      ).rejects.toThrow(/already exists/i);
+    });
+
+    it('should still create audit log with skipAccessCheck', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      mockDbUtils.queryOne
+        .mockResolvedValueOnce(null) // Check name uniqueness
+        .mockResolvedValueOnce(mockTeamDbRow); // Update result
+
+      vi.spyOn(service, 'getTeam').mockResolvedValue({} as TeamWithMembers);
+
+      await service.updateTeam('team-123', 'admin-user', updateDto, true);
+
+      expect(mockDbUtils.query).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO audit_logs'),
+        expect.arrayContaining(['admin-user', 'TEAM_UPDATE', 'TEAM', 'team-123', expect.any(String)]),
+      );
+    });
+
+    it('should still enforce access check when skipAccessCheck is false', async () => {
+      vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
+      mockDbUtils.queryOne.mockResolvedValue(null); // No member found (checkTeamAccess fails)
+
+      await expect(
+        service.updateTeam('team-123', 'user-123', updateDto, false),
+      ).rejects.toThrow(/Insufficient permissions/i);
     });
   });
 });

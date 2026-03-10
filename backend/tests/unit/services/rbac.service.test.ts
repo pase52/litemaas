@@ -57,6 +57,8 @@ describe('RBACService', () => {
         'admin:audit',
         'admin:banners:read',
         'admin:subscriptions:read', // Added for Restricted Model Subscription Approval feature
+        'admin:groups:read',
+        'groups:read',
         'users:read',
         'models:read',
         'subscriptions:read',
@@ -174,6 +176,21 @@ describe('RBACService', () => {
         const result = await service.hasPermission(mockUser.id, 'admin:audit');
         expect(result).toBe(true);
       });
+
+      it('should allow admin:groups:read permission', async () => {
+        const result = await service.hasPermission(mockUser.id, 'admin:groups:read');
+        expect(result).toBe(true);
+      });
+
+      it('should allow groups:read permission', async () => {
+        const result = await service.hasPermission(mockUser.id, 'groups:read');
+        expect(result).toBe(true);
+      });
+
+      it('should deny admin:groups:write permission', async () => {
+        const result = await service.hasPermission(mockUser.id, 'admin:groups:write');
+        expect(result).toBe(false);
+      });
     });
 
     describe('admin role permissions (comparison)', () => {
@@ -192,6 +209,27 @@ describe('RBACService', () => {
       });
     });
 
+    describe('admin role group permissions', () => {
+      beforeEach(() => {
+        mockFastify.dbUtils!.queryOne = vi.fn().mockResolvedValue(mockUserWithRoles(['admin']));
+      });
+
+      it('should allow admin:groups:read', async () => {
+        const result = await service.hasPermission(mockUser.id, 'admin:groups:read');
+        expect(result).toBe(true);
+      });
+
+      it('should allow admin:groups:write', async () => {
+        const result = await service.hasPermission(mockUser.id, 'admin:groups:write');
+        expect(result).toBe(true);
+      });
+
+      it('should allow groups:read', async () => {
+        const result = await service.hasPermission(mockUser.id, 'groups:read');
+        expect(result).toBe(true);
+      });
+    });
+
     describe('user role permissions (comparison)', () => {
       beforeEach(() => {
         mockFastify.dbUtils!.queryOne = vi.fn().mockResolvedValue(mockUserWithRoles(['user']));
@@ -204,6 +242,21 @@ describe('RBACService', () => {
 
       it('should deny users:read for regular user', async () => {
         const result = await service.hasPermission(mockUser.id, 'users:read');
+        expect(result).toBe(false);
+      });
+
+      it('should allow groups:read for regular user', async () => {
+        const result = await service.hasPermission(mockUser.id, 'groups:read');
+        expect(result).toBe(true);
+      });
+
+      it('should deny admin:groups:read for regular user', async () => {
+        const result = await service.hasPermission(mockUser.id, 'admin:groups:read');
+        expect(result).toBe(false);
+      });
+
+      it('should deny admin:groups:write for regular user', async () => {
+        const result = await service.hasPermission(mockUser.id, 'admin:groups:write');
         expect(result).toBe(false);
       });
     });
@@ -248,6 +301,10 @@ describe('RBACService', () => {
       expect(permissions).not.toContain('users:write');
       expect(permissions).not.toContain('users:delete');
       expect(permissions).not.toContain('admin:system');
+
+      expect(permissions).toContain('admin:groups:read');
+      expect(permissions).toContain('groups:read');
+      expect(permissions).not.toContain('admin:groups:write');
     });
 
     it('should combine permissions from multiple roles', () => {
@@ -403,9 +460,13 @@ describe('RBACService', () => {
       // Ensure existing role permissions are unchanged
       const adminRole = roles.find((r) => r.id === 'admin');
       expect(adminRole!.permissions).toContain('admin:system');
+      expect(adminRole!.permissions).toContain('admin:groups:read');
+      expect(adminRole!.permissions).toContain('admin:groups:write');
 
       const userRole = roles.find((r) => r.id === 'user');
       expect(userRole!.permissions).toContain('subscriptions:write');
+      expect(userRole!.permissions).toContain('groups:read');
+      expect(userRole!.permissions).not.toContain('admin:groups:read');
 
       const readonlyRole = roles.find((r) => r.id === 'readonly');
       expect(readonlyRole!.permissions).not.toContain('admin:users');
