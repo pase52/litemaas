@@ -27,6 +27,16 @@ See [`docs/architecture/project-structure.md`](docs/architecture/project-structu
 
 **Role-Based Access Control (RBAC)**: Three-tier hierarchy `admin > adminReadonly > user` with OpenShift integration.
 
+**Group Management** (Major feature - 2026 Q1): Organize users into groups with shared model access, budgets, and rate limits via LiteLLM team integration:
+
+- **Admin Group Management**: Full CRUD at `/admin/groups` with model allowlist, budget, rate limits, and three-role membership (admin/member/viewer)
+- **User-facing My Groups**: Users view and manage their groups at `/groups`; group admins edit details and manage members
+- **API Key Association**: Group-linked API keys bypass individual subscriptions; model removal cascades to existing keys
+- **LiteLLM Sync**: Full team/member/budget synchronization; viewer role exists only locally
+- **RBAC**: `admin:groups:read/write` (admin, adminReadonly) and `groups:read` (all users)
+- **Audit Trail**: All group operations logged (`TEAM_CREATE`, `TEAM_UPDATE`, `TEAM_DELETE`, member add/remove/role updates)
+- **Database**: `teams` and `team_members` tables with `api_keys.team_id` column
+
 **Restricted Model Subscription Approval** (Major feature - 2025 Q4): Admin-controlled access to sensitive/costly models with comprehensive approval workflow:
 
 - **Restricted Model Flagging**: Administrators mark models requiring approval
@@ -98,6 +108,7 @@ For detailed features, see:
 
 - [`backend/CLAUDE.md`](backend/CLAUDE.md) - API implementation, service layer, caching patterns
 - [`frontend/CLAUDE.md`](frontend/CLAUDE.md) - UI components, state management, PatternFly 6
+- [`docs/features/group-management.md`](docs/features/group-management.md) - Complete group management guide
 - [`docs/features/user-roles-administration.md`](docs/features/user-roles-administration.md) - Complete RBAC guide
 - [`docs/features/subscription-approval-workflow.md`](docs/features/subscription-approval-workflow.md) - Complete approval workflow guide
 - [`docs/features/users-management.md`](docs/features/users-management.md) - Admin user management guide

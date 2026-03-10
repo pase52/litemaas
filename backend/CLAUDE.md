@@ -72,7 +72,9 @@ Fastify plugins are registered in specific order:
 
 ## 🗄️ Database Schema
 
-**Core Tables**: users, teams, models, subscriptions, api_keys, audit_logs, daily_usage_cache, subscription_status_history, branding_settings, system_settings
+**Core Tables**: users, teams, team_members, models, subscriptions, api_keys, audit_logs, daily_usage_cache, subscription_status_history, branding_settings, system_settings
+
+**Group Management**: `teams` table stores group configuration (name, alias, description, budget, rate limits, allowed_models) with LiteLLM team sync via `lite_llm_team_id`. `team_members` table tracks membership with three roles (`admin`, `member`, `viewer`). `api_keys.team_id` column links keys to groups. Admin endpoints at `src/routes/admin-groups.ts`, user endpoints at `src/routes/groups.ts`, service logic in `src/services/team.service.ts`. See `docs/features/group-management.md`.
 
 **Subscription Approval Workflow**: `subscription_status_history` table tracks all status changes with full audit trail. Models table includes `restricted_access` boolean. Subscriptions enhanced with `status_reason`, `status_changed_at`, `status_changed_by` fields and unique constraint `(user_id, model_id)`.
 

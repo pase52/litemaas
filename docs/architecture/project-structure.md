@@ -42,9 +42,11 @@ litemaas/
 │   │   │   ├── users.ts      # User management (/api/v1/users)
 │   │   │   ├── admin.ts      # Admin endpoints (/api/v1/admin)
 │   │   │   ├── admin-models.ts # Admin model management (/api/v1/admin/models)
+│   │   │   ├── admin-groups.ts # Admin group management (/api/v1/admin/groups)
 │   │   │   ├── admin-users.ts # Admin user management (/api/v1/admin/users)
 │   │   │   ├── admin-usage.ts # Admin usage analytics (/api/v1/admin/usage)
 │   │   │   ├── usage.ts      # Usage tracking (/api/v1/usage)
+│   │   │   ├── groups.ts     # User group management (/api/v1/groups)
 │   │   │   ├── config.ts     # Configuration endpoints (/api/v1/config)
 │   │   │   ├── health.ts     # Health check (/api/v1/health)
 │   │   │   ├── banners.ts    # Banner announcements (/api/v1/banners)
@@ -60,6 +62,7 @@ litemaas/
 │   │   │   ├── usage.ts      # Usage schemas
 │   │   │   ├── admin-users.ts # Admin user management schemas
 │   │   │   ├── admin-usage.ts # Admin usage analytics schemas
+│   │   │   ├── groups.ts     # Group management schemas
 │   │   │   ├── branding.ts   # Branding schemas
 │   │   │   ├── health.ts     # Health check schemas
 │   │   │   └── index.ts      # Schema exports
@@ -165,8 +168,10 @@ litemaas/
 │   │   │   ├── SubscriptionsPage.tsx # Subscription management
 │   │   │   ├── ApiKeysPage.tsx # API key management
 │   │   │   ├── AdminModelsPage.tsx # Admin model management with configuration testing
+│   │   │   ├── AdminGroupsPage.tsx # Admin group management
 │   │   │   ├── AdminUsagePage.tsx # Admin usage analytics (admin-only)
 │   │   │   ├── UsagePage.tsx # User usage analytics
+│   │   │   ├── GroupsPage.tsx # User-facing "My Groups"
 │   │   │   ├── UsersPage.tsx # User management (admin-only)
 │   │   │   ├── ToolsPage.tsx    # Admin tools
 │   │   │   ├── ChatbotPage.tsx # AI chatbot interface
@@ -184,6 +189,7 @@ litemaas/
 │   │   │   ├── usage.service.ts # User usage analytics API
 │   │   │   ├── adminUsage.service.ts # Admin usage analytics API
 │   │   │   ├── users.service.ts # Admin user management API
+│   │   │   ├── groups.service.ts # Group management API (admin + user)
 │   │   │   ├── chat.service.ts # Chatbot API
 │   │   │   ├── prompts.service.ts # Prompt management API
 │   │   │   └── config.service.ts # Configuration API
@@ -191,6 +197,7 @@ litemaas/
 │   │   │   ├── auth.ts       # Auth types
 │   │   │   ├── models.ts     # Model types
 │   │   │   ├── users.ts      # Admin user management types
+│   │   │   ├── groups.ts     # Group management types
 │   │   │   └── api.ts        # API response types
 │   │   ├── utils/             # Utility functions
 │   │   │   ├── formatters.ts # Data formatting

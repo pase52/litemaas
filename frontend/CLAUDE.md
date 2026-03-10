@@ -129,6 +129,14 @@ See [`docs/architecture/project-structure.md`](../docs/architecture/project-stru
   - `UserBudgetLimitsTab.tsx` - Budget and rate limit configuration with utilization tracking
   - `UserApiKeysTab.tsx` - API key lifecycle management (create, view, revoke)
   - `UserSubscriptionsTab.tsx` - Read-only subscription list with status display
+- `components/admin/` - Admin group management components
+  - `GroupDetailsTab.tsx` - Group name, alias, description, status form
+  - `GroupModelsTab.tsx` - Searchable checkbox model allowlist with select all/clear
+  - `GroupMembersTab.tsx` - Admin-level member management with user search and role assignment
+  - `GroupBudgetTab.tsx` - Budget, duration, TPM, RPM with utilization progress bar
+- `components/groups/` - User-facing group components
+  - `MyGroupEditModal.tsx` - User manage/view modal (details + members tabs)
+  - `MyGroupMembersTab.tsx` - Group-admin member management with scoped user search
 - `components/charts/` - Shared chart components
   - `UsageTrends.tsx`, `ModelDistributionChart.tsx`, `ModelUsageTrends.tsx`
   - `UsageHeatmap.tsx` - Weekly heatmap (component ready, integration pending)
@@ -153,6 +161,7 @@ See [`docs/architecture/project-structure.md`](../docs/architecture/project-stru
 - `config.service.ts` - Application configuration and API key quota defaults
 - `admin.service.ts` - Admin operations (API key quota defaults CRUD, bulk user limits, system stats)
 - `backup.service.ts` - **Database backup & restore** (capabilities, create, list, download, delete, restore, test-restore)
+- `groups.service.ts` - **Group management** (admin CRUD, user groups, member management, budget info, user search)
 
 ## 🌍 Routing Structure
 
@@ -182,6 +191,18 @@ See [`docs/architecture/project-structure.md`](../docs/architecture/project-stru
 - `/admin/tools` - **Settings and Tools (ToolsPage.tsx)** - Tabs: Limits, Banners, Branding, Currency, Models Sync, Backup
   - Limits tab: Bulk User Limits (max budget, TPM, RPM for all users) and API Key Quota Defaults (admin-configurable defaults and maximums)
   - Backup tab: Create/restore/test-restore/download/delete database backups for LiteMaaS and LiteLLM (admin only, visible read-only for adminReadonly)
+- `/admin/groups` - **Group Management (AdminGroupsPage.tsx)** - Full group lifecycle management:
+  - Tabbed modal: Details, Models (allowlist), Members (with user search and role assignment), Budget & Limits
+  - Search, status filter, pagination with URL parameter sync
+  - RBAC: admin (full CRUD) vs adminReadonly (view only)
+
+**User Routes**:
+
+- `/groups` - **My Groups (GroupsPage.tsx)** - User-facing group management:
+  - View groups user belongs to with role badges (Admin/Member/Viewer)
+  - Group admins: edit details, manage members
+  - Members/Viewers: read-only access
+  - Group-linked API key creation from API Keys page
 
 **Protection**: `ProtectedRoute` for auth, `RoleProtectedRoute` for admin routes with required roles
 

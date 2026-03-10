@@ -15,6 +15,7 @@ This directory contains documentation for key features and functionality in Lite
 - **[Test Chatbot](test-chatbot.md)** - Chatbot testing guide and features
 - **[Audit Log](admin-tools.md#audit-log)** - Admin audit log viewing and filtering
 - **[Backup & Restore](admin-tools.md#backup--restore)** - Database backup and restore for LiteMaaS and LiteLLM
+- **[Group Management](group-management.md)** - Groups with shared model access, budgets, and member roles
 
 ## Feature Categories
 
@@ -22,6 +23,7 @@ This directory contains documentation for key features and functionality in Lite
 
 - Role-based access control (RBAC)
 - User management
+- Group management (shared model access, budgets, member roles)
 - Admin tools and dashboards
 - Audit log viewing and filtering
 - Branding customization (login logo, title, subtitle, header brand)

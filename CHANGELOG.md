@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Group Management**: Organize users into groups with shared model access, budgets, and rate limits
+  - **Admin Group Management** (`/admin/groups`): Full CRUD for groups with name, alias, description, status, model allowlist, budget, and rate limits
+  - **User-facing My Groups** (`/groups`): Users view and manage groups they belong to; group admins can edit details and manage members
+  - **Three-role membership**: `admin`, `member`, `viewer` roles within each group with role hierarchy enforcement
+  - **Model allowlist**: Per-group control over accessible models with automatic cascade to existing API keys when models are removed
+  - **Budget & rate limits**: Max budget, budget duration (daily/weekly/monthly/yearly), TPM, and RPM limits enforced via LiteLLM team integration
+  - **API key association**: Users create API keys linked to a group; group-allowed models bypass individual subscription requirements
+  - **Group column in API keys table**: Shows team name or "Personal" for each key; read-only group field in edit/view modals
+  - **Dual member management**: Admin-level and group-admin-level interfaces with user search, role assignment, and last-admin protection
+  - **LiteLLM team sync**: Full synchronization of teams, members, budgets, and model access with LiteLLM; viewer role exists only locally
+  - **9 admin API endpoints**: List, create, get, update, delete groups; add, update role, remove members; get budget info
+  - **8 user API endpoints**: List own groups, get details, update details, search users, add/update/remove members, get budget
+  - **RBAC**: `admin:groups:read` (admin, adminReadonly), `admin:groups:write` (admin only), `groups:read` (all users)
+  - **Audit trail**: All group operations logged (`TEAM_CREATE`, `TEAM_UPDATE`, `TEAM_DELETE`, `TEAM_MEMBER_ADD`, `TEAM_MEMBER_REMOVE`, `TEAM_MEMBER_ROLE_UPDATE`)
+  - **Database**: `teams` and `team_members` tables with `api_keys.team_id` column; Default Team auto-migration
+  - **i18n**: Full translations across all 9 locales
+  - **Comprehensive tests**: Integration tests for admin and user routes (127 tests), unit tests for schemas (45), RBAC (9), TeamService (19), ApiKeyService group validation (15)
+
 ## [0.3.1] - 2026-03-08
 
 ### Fixed

@@ -1032,110 +1032,196 @@ Query Parameters:
 Response: File download
 ```
 
-### Teams
+### Groups (/api/v1/groups)
 
-> **Default Team**: All users are automatically assigned to the Default Team (`a0000000-0000-4000-8000-000000000001`) during registration or API key creation. This team has an empty `allowed_models` array which enables access to all available models.
+> **Default Team**: All users are automatically assigned to the Default Team (`a0000000-0000-4000-8000-000000000001`) during migration. The Default Team is filtered out from group list responses. Its empty `allowed_models` array grants access to all models. For non-default groups, an empty `allowed_models` means no models are accessible.
 
-#### GET /api/v1/teams
+#### GET /api/v1/groups
 
-**Authorization**: Requires valid JWT token (any role)
-**Data Access**:
+**Authorization**: Requires valid JWT token (any authenticated user)
 
-- Standard users: Only teams they belong to
-- Admin users: All teams (use `?userId=all` for admin view)
-
-List user teams
+List groups the current user belongs to (excludes Default Team).
 
 ```json
 Query Parameters:
 - page: number (default: 1)
 - limit: number (default: 20)
+- search: string (search by name/alias)
+- isActive: boolean (filter by status)
 
 Response:
 {
   "data": [
     {
-      "id": "a0000000-0000-4000-8000-000000000001",
-      "name": "Default Team",
-      "description": "Default team for all users until team management is implemented",
-      "maxBudget": 10000.00,
-      "currentSpend": 245.50,
-      "allowedModels": [], // Empty array enables all models
-      "members": [
-        {
-          "userId": "user_123",
-          "role": "member",
-          "joinedAt": "2024-01-01T00:00:00Z"
-        }
-      ],
-      "liteLLMTeamId": "a0000000-0000-4000-8000-000000000001",
-      "metadata": {
-        "auto_created": true,
-        "default_team": true,
-        "created_by": "system"
-      },
-      "createdAt": "2024-01-01T00:00:00Z"
+      "id": "group-uuid",
+      "name": "Data Science Team",
+      "alias": "DS",
+      "description": "Data science and ML engineering",
+      "maxBudget": 500.00,
+      "currentSpend": 125.50,
+      "budgetDuration": "monthly",
+      "tpmLimit": 50000,
+      "rpmLimit": 500,
+      "allowedModels": ["gpt-4", "claude-3-opus"],
+      "memberCount": 5,
+      "isActive": true,
+      "myRole": "admin",
+      "createdAt": "2026-03-01T10:00:00Z",
+      "updatedAt": "2026-03-10T12:00:00Z"
     }
   ],
   "pagination": {
     "page": 1,
     "limit": 20,
-    "total": 5,
+    "total": 3,
     "totalPages": 1
   }
 }
 ```
 
-#### POST /api/v1/teams
+#### GET /api/v1/groups/:groupId
 
-**Authorization**: Requires `admin` role (write operation)
+**Authorization**: Requires team membership
 
-Create new team
+Get group details with full member list.
 
 ```json
-Request:
-{
-  "name": "New Team",
-  "description": "Team description",
-  "maxBudget": 500.00
-}
-
 Response:
 {
-  "id": "team_456",
-  "name": "New Team",
-  "description": "Team description",
+  "id": "group-uuid",
+  "name": "Data Science Team",
+  "alias": "DS",
+  "description": "Data science and ML engineering",
   "maxBudget": 500.00,
-  "currentSpend": 0.00,
-  "liteLLMTeamId": "litellm_team_789",
-  "createdAt": "2024-01-20T10:00:00Z"
+  "currentSpend": 125.50,
+  "members": [
+    {
+      "id": "member-uuid",
+      "userId": "user-uuid",
+      "role": "admin",
+      "joinedAt": "2026-03-01T10:00:00Z",
+      "user": {
+        "id": "user-uuid",
+        "username": "jdoe",
+        "email": "jdoe@example.com",
+        "fullName": "Jane Doe"
+      }
+    }
+  ]
 }
 ```
 
-#### POST /api/v1/teams/:id/sync
+#### PATCH /api/v1/groups/:groupId
 
-**Authorization**: Requires `admin` role (system operation)
+**Authorization**: Requires team `admin` role
 
-Sync team with LiteLLM
+Update group details (name, alias, description only — budget and models are admin-only).
 
 ```json
 Request:
 {
-  "forceSync": true,
-  "syncBudget": true,
-  "syncMembers": true,
-  "syncUsage": true
+  "name": "Updated Name",
+  "alias": "UN",
+  "description": "Updated description"
 }
 
 Response:
 {
-  "success": true,
-  "syncedAt": "2024-01-20T10:00:00Z",
-  "changes": {
-    "budget": "updated",
-    "members": "no_changes",
-    "usage": "updated"
-  }
+  "message": "Group updated successfully"
+}
+```
+
+#### GET /api/v1/groups/:groupId/users/search
+
+**Authorization**: Requires team `admin` role
+
+Search users by username or email to add to the group. Excludes existing members.
+
+```json
+Query Parameters:
+- search: string (min 2 chars)
+- limit: number (default: 10)
+
+Response:
+{
+  "users": [
+    {
+      "userId": "user-uuid",
+      "username": "newuser",
+      "email": "newuser@example.com"
+    }
+  ],
+  "total": 1
+}
+```
+
+#### POST /api/v1/groups/:groupId/members
+
+**Authorization**: Requires team `admin` role
+
+Add a user to the group. Non-viewer members are synced to LiteLLM.
+
+```json
+Request:
+{
+  "userId": "user-uuid",
+  "role": "member"
+}
+
+Response (201):
+{
+  "message": "Member added successfully"
+}
+```
+
+#### PATCH /api/v1/groups/:groupId/members/:userId
+
+**Authorization**: Requires team `admin` role
+
+Update a member's role. Cannot demote the last group admin.
+
+```json
+Request:
+{
+  "role": "admin"
+}
+
+Response:
+{
+  "message": "Member role updated successfully"
+}
+```
+
+#### DELETE /api/v1/groups/:groupId/members/:userId
+
+**Authorization**: Requires team `admin` role
+
+Remove a member from the group. Cannot remove the last group admin.
+
+```json
+Response:
+{
+  "message": "Member removed successfully"
+}
+```
+
+#### GET /api/v1/groups/:groupId/budget
+
+**Authorization**: Requires team membership (any role)
+
+Get group budget utilization info with real-time spend from LiteLLM.
+
+```json
+Response:
+{
+  "teamId": "group-uuid",
+  "maxBudget": 500.00,
+  "currentSpend": 125.50,
+  "budgetUtilization": 25.1,
+  "remainingBudget": 374.50,
+  "budgetDuration": "monthly",
+  "memberCount": 5,
+  "lastUpdatedAt": "2026-03-10T12:00:00Z"
 }
 ```
 
@@ -1380,6 +1466,242 @@ Response: Prometheus format metrics
 ```
 
 ## Admin Endpoints
+
+### Group Management (/api/v1/admin/groups)
+
+Full group lifecycle management for administrators. All endpoints require authentication and RBAC permission checks.
+
+**Permission Levels**:
+
+| Permission            | Role                 | Capabilities                                  |
+| --------------------- | -------------------- | --------------------------------------------- |
+| `admin:groups:read`   | admin, adminReadonly  | View all groups, members, and budget info     |
+| `admin:groups:write`  | admin                | Create, update, delete groups; manage members |
+
+#### GET /api/v1/admin/groups
+
+**Authorization**: Requires `admin:groups:read` permission
+
+List all groups (excludes Default Team), with pagination, search, and status filter.
+
+```json
+Query Parameters:
+- page: number (default: 1)
+- limit: number (default: 20)
+- search: string (search by name, alias, or description)
+- isActive: boolean (filter by status)
+
+Response:
+{
+  "data": [
+    {
+      "id": "group-uuid",
+      "name": "Data Science Team",
+      "alias": "DS",
+      "description": "Data science and ML engineering",
+      "maxBudget": 500.00,
+      "currentSpend": 125.50,
+      "budgetDuration": "monthly",
+      "tpmLimit": 50000,
+      "rpmLimit": 500,
+      "allowedModels": ["gpt-4", "claude-3-opus"],
+      "memberCount": 5,
+      "isActive": true,
+      "createdAt": "2026-03-01T10:00:00Z",
+      "updatedAt": "2026-03-10T12:00:00Z"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 3,
+    "totalPages": 1
+  }
+}
+```
+
+#### POST /api/v1/admin/groups
+
+**Authorization**: Requires `admin:groups:write` permission
+
+Create a new group. The creator is automatically added as group admin. Additional admin user IDs can be specified.
+
+```json
+Request:
+{
+  "name": "Data Science Team",
+  "alias": "DS",
+  "description": "Data science and ML engineering team",
+  "maxBudget": 500.00,
+  "budgetDuration": "monthly",
+  "tpmLimit": 50000,
+  "rpmLimit": 500,
+  "allowedModels": ["gpt-4", "claude-3-opus"],
+  "adminIds": ["user-uuid-1", "user-uuid-2"]
+}
+
+Response (201):
+{
+  "id": "group-uuid",
+  "name": "Data Science Team",
+  "alias": "DS",
+  ...
+}
+```
+
+**Validation**:
+- `name`: required, 1-100 characters, unique among active teams
+- `alias`: optional, max 50 characters
+- `description`: optional, max 500 characters
+- `budgetDuration`: one of `daily`, `weekly`, `monthly`, `yearly`
+- `maxBudget`, `tpmLimit`, `rpmLimit`: non-negative numbers
+
+#### GET /api/v1/admin/groups/:groupId
+
+**Authorization**: Requires `admin:groups:read` permission
+
+Get full group details including complete member list with user info.
+
+```json
+Response:
+{
+  "id": "group-uuid",
+  "name": "Data Science Team",
+  "alias": "DS",
+  "description": "...",
+  "maxBudget": 500.00,
+  "currentSpend": 125.50,
+  "budgetDuration": "monthly",
+  "allowedModels": ["gpt-4", "claude-3-opus"],
+  "members": [
+    {
+      "id": "member-uuid",
+      "userId": "user-uuid",
+      "role": "admin",
+      "joinedAt": "2026-03-01T10:00:00Z",
+      "user": {
+        "id": "user-uuid",
+        "username": "jdoe",
+        "email": "jdoe@example.com",
+        "fullName": "Jane Doe"
+      }
+    }
+  ],
+  "isActive": true,
+  "createdAt": "2026-03-01T10:00:00Z"
+}
+```
+
+#### PATCH /api/v1/admin/groups/:groupId
+
+**Authorization**: Requires `admin:groups:write` permission
+
+Update group settings. All fields are optional. Model changes cascade to existing API keys.
+
+```json
+Request:
+{
+  "name": "Updated Name",
+  "alias": "UN",
+  "description": "Updated description",
+  "maxBudget": 1000.00,
+  "budgetDuration": "yearly",
+  "tpmLimit": 100000,
+  "rpmLimit": 1000,
+  "allowedModels": ["gpt-4"],
+  "isActive": true
+}
+
+Response:
+{
+  "message": "Group updated successfully"
+}
+```
+
+**Model removal cascade**: When models are removed from `allowedModels`, the system automatically removes those models from all API keys linked to the group. LiteLLM keys are updated first; local database is updated only after successful LiteLLM sync.
+
+#### DELETE /api/v1/admin/groups/:groupId
+
+**Authorization**: Requires `admin:groups:write` permission
+
+Soft-delete a group (sets `is_active = false`). Blocked if the group has active subscriptions.
+
+```json
+Response:
+{
+  "message": "Group deleted successfully"
+}
+```
+
+#### POST /api/v1/admin/groups/:groupId/members
+
+**Authorization**: Requires `admin:groups:write` permission
+
+Add a user to the group. Non-viewer members are synced to LiteLLM.
+
+```json
+Request:
+{
+  "userId": "user-uuid",
+  "role": "member"
+}
+
+Response (201):
+{
+  "message": "Member added successfully"
+}
+```
+
+#### PATCH /api/v1/admin/groups/:groupId/members/:userId
+
+**Authorization**: Requires `admin:groups:write` permission
+
+Update a member's role. Cannot demote the last group admin.
+
+```json
+Request:
+{
+  "role": "admin"
+}
+
+Response:
+{
+  "message": "Member role updated successfully"
+}
+```
+
+#### DELETE /api/v1/admin/groups/:groupId/members/:userId
+
+**Authorization**: Requires `admin:groups:write` permission
+
+Remove a member from the group. Cannot remove the last group admin.
+
+```json
+Response:
+{
+  "message": "Member removed successfully"
+}
+```
+
+#### GET /api/v1/admin/groups/:groupId/budget
+
+**Authorization**: Requires `admin:groups:read` permission
+
+Get group budget utilization info. Fetches real-time spend from LiteLLM.
+
+```json
+Response:
+{
+  "teamId": "group-uuid",
+  "maxBudget": 500.00,
+  "currentSpend": 125.50,
+  "budgetUtilization": 25.1,
+  "remainingBudget": 374.50,
+  "budgetDuration": "monthly",
+  "memberCount": 5,
+  "lastUpdatedAt": "2026-03-10T12:00:00Z"
+}
+```
 
 ### User Management (/api/v1/admin/users)
 

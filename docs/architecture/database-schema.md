@@ -86,7 +86,7 @@ COMMENT ON COLUMN models.restricted_access IS 'When true, subscriptions require 
 
 ### teams
 
-Team management with LiteLLM integration and Default Team support
+Group (team) management with LiteLLM integration and Default Team support
 
 ```sql
 CREATE TABLE teams (
@@ -95,18 +95,16 @@ CREATE TABLE teams (
     alias VARCHAR(255),
     description TEXT,
     created_by UUID REFERENCES users(id), -- Nullable for system-created teams
-    max_budget DECIMAL(10, 2) DEFAULT 1000.00,
+    max_budget DECIMAL(10, 2),
     current_spend DECIMAL(10, 2) DEFAULT 0.00,
 
     -- LiteLLM Integration Fields
-    litellm_team_id VARCHAR(255),
-    budget_duration VARCHAR(20) DEFAULT 'monthly', -- monthly, yearly, lifetime
-    tpm_limit INTEGER DEFAULT 10000,
-    rpm_limit INTEGER DEFAULT 1000,
-    allowed_models JSONB DEFAULT '[]'::JSONB, -- Empty array enables all models
+    lite_llm_team_id VARCHAR(255),
+    budget_duration VARCHAR(20) DEFAULT 'monthly', -- daily, weekly, monthly, yearly
+    tpm_limit INTEGER,
+    rpm_limit INTEGER,
+    allowed_models TEXT[] DEFAULT '{}', -- Empty = no models (non-default teams); Default Team empty = all models
     metadata JSONB DEFAULT '{}'::JSONB,
-    last_sync_at TIMESTAMP WITH TIME ZONE,
-    sync_status VARCHAR(20) DEFAULT 'pending', -- pending, synced, error
 
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -115,24 +113,27 @@ CREATE TABLE teams (
 
 -- Default Team: a0000000-0000-4000-8000-000000000001
 -- Created automatically during migration with empty allowed_models array (enables all models)
--- All users are automatically assigned to this team until team management is implemented
+-- All users are automatically assigned to this team
+-- Filtered out from admin and user group list responses
 
+CREATE INDEX idx_teams_name ON teams(name);
+CREATE INDEX idx_teams_alias ON teams(alias);
 CREATE INDEX idx_teams_created_by ON teams(created_by);
-CREATE INDEX idx_teams_litellm ON teams(litellm_team_id);
-CREATE INDEX idx_teams_sync_status ON teams(sync_status);
+CREATE INDEX idx_teams_litellm ON teams(lite_llm_team_id);
 ```
 
 ### team_members
 
-Team membership and roles
+Team membership with three-role hierarchy (admin, member, viewer)
 
 ```sql
 CREATE TABLE team_members (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role VARCHAR(20) DEFAULT 'member', -- admin, member
+    role VARCHAR(20) DEFAULT 'member' CHECK (role IN ('admin', 'member', 'viewer')),
     joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    added_by UUID REFERENCES users(id),
     UNIQUE(team_id, user_id)
 );
 

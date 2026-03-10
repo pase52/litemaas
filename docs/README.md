@@ -61,6 +61,7 @@ Welcome to the LiteMaaS documentation! This guide will help you understand, depl
 #### ✨ Features
 
 - **[User Roles & Administration](features/user-roles-administration.md)** - RBAC with three-tier role hierarchy
+- **[Group Management](features/group-management.md)** - Groups with shared model access, budgets, and member roles
 - **[Users Management](features/users-management.md)** - Admin user management (profile, budget, API keys, subscriptions)
 - **[Settings and Tools](features/admin-tools.md)** - Administrative settings and tools
 - **[Branding Customization](features/branding-customization.md)** - Custom login page and header branding
