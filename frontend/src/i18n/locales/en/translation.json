@@ -426,6 +426,7 @@
       "caption": "List of {{count}} groups",
       "name": "Name",
       "description": "Description",
+      "myRole": "My Role",
       "members": "Members",
       "models": "Models",
       "status": "Status",
@@ -474,6 +475,9 @@
       "roleUpdateSuccess": "Member role updated successfully",
       "roleUpdateError": "Failed to update member role",
       "lastAdmin": "Cannot remove or demote the last admin",
+      "roleAdmin": "Admin",
+      "roleMember": "Member",
+      "roleViewer": "Viewer",
       "roles": {
         "admin": "Admin",
         "member": "Member",
@@ -511,7 +515,41 @@
     "details": {
       "nameRequired": "Group name is required",
       "readOnlyNote": "You have read-only access to this group."
-    }
+    },
+    "filters": {
+      "statusAriaLabel": "Filter by status",
+      "allStatus": "All Status",
+      "clearAll": "Clear all filters",
+      "noMatches": "No groups match your filters",
+      "adjustFilters": "Try adjusting your search or filter criteria."
+    },
+    "actions": {
+      "createGroup": "Create Group",
+      "edit": "Edit",
+      "delete": "Delete",
+      "view": "View",
+      "manage": "Manage",
+      "confirmDelete": "Confirm Delete"
+    },
+    "deleteModal": {
+      "title": "Delete Group",
+      "description": "Are you sure you want to delete the group \"{{name}}\"? This action cannot be undone."
+    },
+    "modal": {
+      "createTitle": "Create Group",
+      "editTitle": "Edit Group",
+      "viewTitle": "Group Details"
+    },
+    "notifications": {
+      "deleteSuccess": "Group Deleted",
+      "deleteSuccessDesc": "The group has been deleted successfully.",
+      "deleteError": "Delete Failed"
+    },
+    "permissions": {
+      "accessDenied": "Access Denied",
+      "noPermission": "You do not have permission to view groups."
+    },
+    "readOnlyNote": "You have read-only access to these settings."
   },
   "models": {
     "admin": {
