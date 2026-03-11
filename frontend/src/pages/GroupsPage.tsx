@@ -49,6 +49,7 @@ const GroupsPage: React.FC = () => {
   const queryParams: GroupListParams = {
     page,
     limit: perPage,
+    isActive: true,
     ...(searchValue && { search: searchValue }),
   };
 

@@ -30,6 +30,10 @@ import {
   ToolbarItem,
   ToolbarGroup,
   Divider,
+  Modal,
+  ModalHeader,
+  ModalBody,
+  ModalFooter,
 } from '@patternfly/react-core';
 import {
   UsersIcon,
@@ -64,11 +68,11 @@ const AdminGroupsPage: React.FC = () => {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isCreateMode, setIsCreateMode] = useState(false);
   const [searchValue, setSearchValue] = useState(searchParams.get('search') || '');
-  const [statusFilter, setStatusFilter] = useState(searchParams.get('status') || '');
+  const [statusFilter, setStatusFilter] = useState(searchParams.get('status') || 'active');
   const [isStatusFilterOpen, setIsStatusFilterOpen] = useState(false);
   const [page, setPage] = useState(parseInt(searchParams.get('page') || '1', 10));
   const [perPage, setPerPage] = useState(parseInt(searchParams.get('limit') || '10', 10));
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [groupToDelete, setGroupToDelete] = useState<Group | null>(null);
 
   // Modal focus management ref
   const editModalTriggerRef = useRef<HTMLElement | null>(null);
@@ -116,7 +120,7 @@ const AdminGroupsPage: React.FC = () => {
     mutationFn: (groupId: string) => groupsService.deleteGroup(groupId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin-groups'] });
-      setConfirmDeleteId(null);
+      setGroupToDelete(null);
       addNotification({
         title: t('groups.notifications.deleteSuccess', 'Group Deleted'),
         description: t(
@@ -127,7 +131,7 @@ const AdminGroupsPage: React.FC = () => {
       });
     },
     onError: (err: Error) => {
-      setConfirmDeleteId(null);
+      setGroupToDelete(null);
       addNotification({
         title: t('groups.notifications.deleteError', 'Delete Failed'),
         description: err.message,
@@ -198,11 +202,13 @@ const AdminGroupsPage: React.FC = () => {
     setIsEditModalOpen(true);
   };
 
-  const handleDeleteGroup = (groupId: string) => {
-    if (confirmDeleteId === groupId) {
-      deleteGroupMutation.mutate(groupId);
-    } else {
-      setConfirmDeleteId(groupId);
+  const handleDeleteGroup = (group: Group) => {
+    setGroupToDelete(group);
+  };
+
+  const handleConfirmDelete = () => {
+    if (groupToDelete) {
+      deleteGroupMutation.mutate(groupToDelete.id);
     }
   };
 
@@ -469,11 +475,8 @@ const AdminGroupsPage: React.FC = () => {
                               isSeparator: true,
                             },
                             {
-                              title:
-                                confirmDeleteId === group.id
-                                  ? t('groups.actions.confirmDelete', 'Confirm Delete')
-                                  : t('groups.actions.delete', 'Delete'),
-                              onClick: () => handleDeleteGroup(group.id),
+                              title: t('groups.actions.delete', 'Delete'),
+                              onClick: () => handleDeleteGroup(group),
                               isDanger: true,
                             },
                           ]
@@ -569,6 +572,46 @@ const AdminGroupsPage: React.FC = () => {
           </div>
         )}
       </PageSection>
+
+      {/* Delete Confirmation Modal */}
+      <Modal
+        variant="small"
+        isOpen={groupToDelete !== null}
+        onClose={() => setGroupToDelete(null)}
+        aria-labelledby="delete-group-modal-title"
+      >
+        <ModalHeader
+          title={t('groups.deleteModal.title', 'Delete Group')}
+          labelId="delete-group-modal-title"
+          titleIconVariant="warning"
+        />
+        <ModalBody>
+          <Content>
+            {t(
+              'groups.deleteModal.description',
+              'Are you sure you want to delete the group "{{name}}"? This action cannot be undone.',
+              { name: groupToDelete?.name },
+            )}
+          </Content>
+        </ModalBody>
+        <ModalFooter>
+          <Button
+            variant="danger"
+            onClick={handleConfirmDelete}
+            isLoading={deleteGroupMutation.isLoading}
+            isDisabled={deleteGroupMutation.isLoading}
+          >
+            {t('groups.actions.delete', 'Delete')}
+          </Button>
+          <Button
+            variant="link"
+            onClick={() => setGroupToDelete(null)}
+            isDisabled={deleteGroupMutation.isLoading}
+          >
+            {t('common.cancel', 'Cancel')}
+          </Button>
+        </ModalFooter>
+      </Modal>
 
       {/* Group Edit/Create Modal */}
       <GroupEditModal

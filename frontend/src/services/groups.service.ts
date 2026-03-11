@@ -131,6 +131,9 @@ export class GroupsService {
     if (params.search) {
       searchParams.append('search', params.search);
     }
+    if (params.isActive !== undefined) {
+      searchParams.append('isActive', params.isActive.toString());
+    }
 
     const queryString = searchParams.toString();
     const url = queryString ? `/groups?${queryString}` : '/groups';
