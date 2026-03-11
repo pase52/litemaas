@@ -5,7 +5,6 @@ import {
   FormGroup,
   TextInput,
   TextArea,
-  Switch,
   Content,
   ContentVariants,
 } from '@patternfly/react-core';
@@ -78,27 +77,7 @@ const GroupDetailsTab: React.FC<GroupDetailsTabProps> = ({
         />
       </FormGroup>
 
-      {/* Active/Inactive toggle - edit mode only, not create */}
-      {!isCreateMode && group && (
-        <FormGroup
-          label={t('groups.form.status', 'Status')}
-          fieldId="group-status"
-        >
-          <Switch
-            id="group-status"
-            label={group.isActive ? t('status.active', 'Active') : t('status.inactive', 'Inactive')}
-            isChecked={group.isActive}
-            isDisabled={!canEdit}
-            aria-label={t('groups.form.toggleStatus', 'Toggle group active status')}
-            onChange={() => {
-              // Status changes are handled via the update API; this is informational
-              // Parent should handle this through a separate update call if needed
-            }}
-          />
-        </FormGroup>
-      )}
-
-      {!canEdit && (
+{!canEdit && (
         <Content
           component={ContentVariants.small}
           style={{ marginTop: '1rem', fontStyle: 'italic' }}
