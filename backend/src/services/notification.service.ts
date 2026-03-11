@@ -90,4 +90,22 @@ export class NotificationService {
     );
     // Future: Send bulk email/push to affected users
   }
+
+  /**
+   * Notify users their API keys were revoked because their group was deleted
+   * TODO: Implement email/push notification
+   */
+  async notifyUsersGroupApiKeysRevoked(
+    teamId: string,
+    teamName: string,
+    affectedUserIds: string[],
+    revokedKeyCount: number,
+  ): Promise<void> {
+    this.fastify.log.debug(
+      { teamId, teamName, userCount: affectedUserIds.length, revokedKeyCount },
+      'Notification hook: API keys revoked due to group deletion (not implemented)',
+    );
+    // Future: Send email/push to each affected user informing them their API key
+    // was revoked because the group it was associated with has been deleted
+  }
 }

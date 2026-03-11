@@ -218,7 +218,7 @@ const ApiKeysPage: React.FC = () => {
   const loadGroups = async () => {
     try {
       setLoadingGroups(true);
-      const response = await groupsService.getMyGroups({ limit: 100 });
+      const response = await groupsService.getMyGroups({ limit: 100, isActive: true });
       setGroups(response.data);
     } catch (err: any) {
       console.error('Failed to load groups:', err);
@@ -1303,7 +1303,6 @@ const ApiKeysPage: React.FC = () => {
                               variant="danger"
                               size="sm"
                               onClick={(event) => handleDeleteKey(apiKey, event.currentTarget)}
-                              isDisabled={apiKey.status !== 'active'}
                               icon={<TrashIcon />}
                               aria-label={t('pages.apiKeys.deleteKeyAriaLabel', {
                                 keyName: apiKey.name,

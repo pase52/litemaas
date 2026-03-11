@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { LiteLLMService } from './litellm.service.js';
 import { ApiKeyService } from './api-key.service.js';
+import { NotificationService } from './notification.service.js';
 import { BaseService } from './base.service.js';
 import {
   User,
@@ -1464,6 +1465,67 @@ export class TeamService extends BaseService {
         );
       }
 
+      // Revoke all active API keys linked to this team
+      const teamApiKeys = await this.fastify.dbUtils.queryMany<{
+        id: string;
+        user_id: string;
+        lite_llm_key_value: string | null;
+        name: string;
+        key_prefix: string;
+      }>(
+        `SELECT id, user_id, lite_llm_key_value, name, key_prefix
+         FROM api_keys
+         WHERE team_id = $1 AND is_active = true`,
+        [teamId],
+      );
+
+      const affectedUserIds = new Set<string>();
+      for (const apiKey of teamApiKeys) {
+        // Delete from LiteLLM first (security priority)
+        if (apiKey.lite_llm_key_value && !this.shouldUseMockData()) {
+          try {
+            await this.liteLLMService.deleteKey(apiKey.lite_llm_key_value);
+          } catch (error) {
+            this.fastify.log.warn(
+              { error, keyId: apiKey.id },
+              'Failed to delete team API key from LiteLLM during group deletion, proceeding with local deactivation',
+            );
+          }
+        }
+
+        await this.fastify.dbUtils.query(
+          `UPDATE api_keys SET is_active = false, revoked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+          [apiKey.id],
+        );
+
+        await this.fastify.dbUtils.query(
+          `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, metadata)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            userId,
+            'API_KEY_REVOKE',
+            'API_KEY',
+            apiKey.id,
+            JSON.stringify({
+              keyName: apiKey.name,
+              keyPrefix: apiKey.key_prefix,
+              reason: `Group "${team.name}" was deleted`,
+              teamId,
+              teamName: team.name,
+            }),
+          ],
+        );
+
+        affectedUserIds.add(apiKey.user_id);
+      }
+
+      if (teamApiKeys.length > 0) {
+        this.fastify.log.info(
+          { teamId, teamName: team.name, revokedKeys: teamApiKeys.length },
+          'Revoked team API keys due to group deletion',
+        );
+      }
+
       // Soft delete (mark as inactive)
       await this.fastify.dbUtils.query(
         `UPDATE teams SET is_active = false, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
@@ -1479,6 +1541,17 @@ export class TeamService extends BaseService {
         }
       }
 
+      // Notify affected users
+      if (affectedUserIds.size > 0) {
+        const notificationService = new NotificationService(this.fastify);
+        await notificationService.notifyUsersGroupApiKeysRevoked(
+          teamId,
+          team.name,
+          [...affectedUserIds],
+          teamApiKeys.length,
+        );
+      }
+
       // Create audit log
       await this.fastify.dbUtils.query(
         `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, metadata)
@@ -1488,7 +1561,12 @@ export class TeamService extends BaseService {
           'TEAM_DELETE',
           'TEAM',
           teamId,
-          JSON.stringify({ teamName: team.name, liteLLMTeamId: team.liteLLMTeamId }),
+          JSON.stringify({
+            teamName: team.name,
+            liteLLMTeamId: team.liteLLMTeamId,
+            revokedApiKeys: teamApiKeys.length,
+            affectedUsers: [...affectedUserIds],
+          }),
         ],
       );
 
@@ -1497,6 +1575,7 @@ export class TeamService extends BaseService {
           userId,
           teamId,
           teamName: team.name,
+          revokedApiKeys: teamApiKeys.length,
         },
         'Team deleted (soft delete)',
       );
