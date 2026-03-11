@@ -747,6 +747,39 @@ export class TeamService extends BaseService {
         }
       }
 
+      // Notify members when models are added or removed
+      if (allowedModels !== undefined) {
+        const addedModels = allowedModels.filter((m) => !previousAllowedModels.includes(m));
+        const removedModels = previousAllowedModels.filter((m) => !allowedModels.includes(m));
+
+        if (addedModels.length > 0 || removedModels.length > 0) {
+          try {
+            const members = await this.fastify.dbUtils.queryMany<{ user_id: string }>(
+              `SELECT user_id FROM team_members WHERE team_id = $1`,
+              [teamId],
+            );
+            const memberUserIds = members.map((m) => m.user_id);
+
+            if (memberUserIds.length > 0) {
+              const teamName = String(updatedTeam?.name || teamId);
+              const notificationService = new NotificationService(this.fastify);
+              await notificationService.notifyUsersGroupModelsChanged(
+                teamId,
+                teamName,
+                memberUserIds,
+                addedModels,
+                removedModels,
+              );
+            }
+          } catch (error) {
+            this.fastify.log.warn(
+              { error, teamId },
+              'Failed to notify members of model changes',
+            );
+          }
+        }
+      }
+
       // Create audit log
       await this.fastify.dbUtils.query(
         `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, metadata)

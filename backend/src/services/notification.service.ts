@@ -92,6 +92,31 @@ export class NotificationService {
   }
 
   /**
+   * Notify group members that models were added or removed from their group
+   * TODO: Implement email/push notification
+   */
+  async notifyUsersGroupModelsChanged(
+    teamId: string,
+    teamName: string,
+    memberUserIds: string[],
+    addedModels: string[],
+    removedModels: string[],
+  ): Promise<void> {
+    this.fastify.log.debug(
+      {
+        teamId,
+        teamName,
+        userCount: memberUserIds.length,
+        addedModels,
+        removedModels,
+      },
+      'Notification hook: Group model list changed (not implemented)',
+    );
+    // Future: Send email/push to each member informing them which models
+    // were added to or removed from their group
+  }
+
+  /**
    * Notify users their API keys were revoked because their group was deleted
    * TODO: Implement email/push notification
    */
