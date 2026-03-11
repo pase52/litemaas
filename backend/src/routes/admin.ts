@@ -104,6 +104,13 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
       description:
         'Get list of all users with basic information for filtering purposes. Admin or adminReadonly role required.',
       security: [{ bearerAuth: [] }],
+      querystring: {
+        type: 'object',
+        properties: {
+          search: { type: 'string' },
+          limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+        },
+      },
       response: {
         200: {
           type: 'object',
@@ -130,13 +137,22 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
     preHandler: [fastify.authenticate, fastify.requirePermission('admin:usage')],
     handler: async (request, reply) => {
       const authRequest = request as AuthenticatedRequest;
+      const { search, limit = 50 } = request.query as { search?: string; limit?: number };
       try {
-        // Fetch all users with basic information
-        const users = await fastify.dbUtils.queryMany(
-          `SELECT id, username, email
-           FROM users
-           ORDER BY username ASC`,
-        );
+        const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000001';
+        const params: (string | number | string[])[] = [SYSTEM_USER_ID];
+        let query = `SELECT id, username, email FROM users WHERE id != $1`;
+
+        if (search && search.trim()) {
+          const term = `%${search.trim().toLowerCase()}%`;
+          params.push(term);
+          query += ` AND (LOWER(username) LIKE $2 OR LOWER(email) LIKE $2)`;
+        }
+
+        query += ` ORDER BY username ASC LIMIT $${params.length + 1}`;
+        params.push(limit);
+
+        const users = await fastify.dbUtils.queryMany(query, params);
 
         const formattedUsers = users.map((user) => ({
           userId: String(user.id),
@@ -147,6 +163,7 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
         fastify.log.debug(
           {
             adminUser: authRequest.user?.userId,
+            search,
             userCount: formattedUsers.length,
           },
           'Admin requested user list',
