@@ -21,6 +21,7 @@ export interface AdminUsageFilters {
   modelIds?: string[];
   providerIds?: string[];
   apiKeyIds?: string[]; // API key aliases (litellm_key_alias) for filtering
+  groupIds?: string[]; // Array of team UUIDs; expanded to userIds before aggregation
 }
 
 /**

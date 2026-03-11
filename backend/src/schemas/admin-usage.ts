@@ -72,6 +72,11 @@ export const AdminUsageFiltersSchema = Type.Object({
       description: 'Optional array of API key aliases (litellm_key_alias) to filter by',
     }),
   ),
+  groupIds: Type.Optional(
+    Type.Array(Type.String({ format: 'uuid' }), {
+      description: 'Optional array of group/team IDs to filter by (expands to userIds)',
+    }),
+  ),
 });
 
 // Combined schema for breakdown endpoints with pagination
@@ -99,6 +104,7 @@ export const ExportQuerySchema = Type.Object({
   modelIds: Type.Optional(Type.Array(Type.String())),
   providerIds: Type.Optional(Type.Array(Type.String())),
   apiKeyIds: Type.Optional(Type.Array(Type.String())),
+  groupIds: Type.Optional(Type.Array(Type.String({ format: 'uuid' }))),
 });
 
 // Response schemas

@@ -190,6 +190,7 @@ export interface AdminUsageFilters {
   modelIds?: string[];
   providerIds?: string[];
   apiKeyIds?: string[];
+  groupIds?: string[];
 }
 
 /**

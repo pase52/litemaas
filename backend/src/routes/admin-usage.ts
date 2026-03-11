@@ -158,6 +158,7 @@ const adminUsageRoutes: FastifyPluginAsync = async (fastify) => {
           modelIds: queryFilters.modelIds,
           providerIds: queryFilters.providerIds,
           apiKeyIds: queryFilters.apiKeyIds,
+          groupIds: queryFilters.groupIds,
         };
 
         // Log admin action for audit trail
@@ -300,6 +301,7 @@ const adminUsageRoutes: FastifyPluginAsync = async (fastify) => {
           modelIds: bodyFilters.modelIds,
           providerIds: bodyFilters.providerIds,
           apiKeyIds: bodyFilters.apiKeyIds,
+          groupIds: bodyFilters.groupIds,
         };
 
         // Extract pagination parameters from query
@@ -450,6 +452,7 @@ const adminUsageRoutes: FastifyPluginAsync = async (fastify) => {
           modelIds: bodyFilters.modelIds,
           providerIds: bodyFilters.providerIds,
           apiKeyIds: bodyFilters.apiKeyIds,
+          groupIds: bodyFilters.groupIds,
         };
 
         // Extract pagination parameters from query
@@ -597,6 +600,7 @@ const adminUsageRoutes: FastifyPluginAsync = async (fastify) => {
           modelIds: bodyFilters.modelIds,
           providerIds: bodyFilters.providerIds,
           apiKeyIds: bodyFilters.apiKeyIds,
+          groupIds: bodyFilters.groupIds,
         };
 
         // Extract pagination parameters from query
@@ -720,6 +724,7 @@ const adminUsageRoutes: FastifyPluginAsync = async (fastify) => {
           modelIds: exportRequest.modelIds,
           providerIds: exportRequest.providerIds,
           apiKeyIds: exportRequest.apiKeyIds,
+          groupIds: exportRequest.groupIds,
         };
 
         fastify.log.info(

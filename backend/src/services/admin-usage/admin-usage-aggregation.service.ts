@@ -1288,6 +1288,51 @@ export class AdminUsageAggregationService extends BaseService {
   // ============================================================================
 
   /**
+   * Resolve groupIds to userIds by querying the team_members table.
+   *
+   * When groupIds are present in the filters, this method looks up all users
+   * that belong to those teams and merges them with any explicitly provided
+   * userIds, returning a new filters object with groupIds expanded.
+   *
+   * @param filters - Original filter object potentially containing groupIds
+   * @returns New filters object with groupIds expanded into userIds
+   */
+  async resolveGroupIds(filters: AdminUsageFilters): Promise<AdminUsageFilters> {
+    if (!filters.groupIds || filters.groupIds.length === 0) {
+      return filters;
+    }
+
+    this.fastify.log.debug(
+      { groupIds: filters.groupIds },
+      'AdminUsageAggregationService: resolving groupIds to userIds',
+    );
+
+    const placeholders = filters.groupIds.map((_, i) => `$${i + 1}`).join(', ');
+    const result = await this.executeQuery<{ rows: Array<{ user_id: string }> }>(
+      `SELECT DISTINCT user_id FROM team_members WHERE team_id IN (${placeholders})`,
+      filters.groupIds,
+      'resolveGroupIds',
+    );
+
+    const groupUserIds = result.rows.map((row) => row.user_id);
+
+    this.fastify.log.debug(
+      { groupIds: filters.groupIds, resolvedUserCount: groupUserIds.length },
+      'AdminUsageAggregationService: groupIds resolved to userIds',
+    );
+
+    // Merge with any explicitly provided userIds, deduplicating
+    const mergedUserIds = filters.userIds
+      ? [...new Set([...filters.userIds, ...groupUserIds])]
+      : groupUserIds;
+
+    return {
+      ...filters,
+      userIds: mergedUserIds,
+    };
+  }
+
+  /**
    * Collect data for a date range day-by-day with caching
    *
    * @param startDate - Range start date (YYYY-MM-DD)

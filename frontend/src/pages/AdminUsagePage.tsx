@@ -39,6 +39,7 @@ import {
   type DatePreset,
 } from '../components/usage';
 import { UserFilterSelect } from '../components/admin/UserFilterSelect';
+import { GroupFilterSelect } from '../components/admin/GroupFilterSelect';
 import { ApiKeyFilterSelect } from '../components/admin/ApiKeyFilterSelect';
 
 /**
@@ -63,6 +64,7 @@ const AdminUsagePage: React.FC = () => {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
   const [selectedApiKeyIds, setSelectedApiKeyIds] = useState<string[]>([]);
   const [apiKeyFilterAnnouncement, setApiKeyFilterAnnouncement] = useState<string>('');
 
@@ -114,6 +116,7 @@ const AdminUsagePage: React.FC = () => {
     ...getDateRange(),
     ...(selectedModelIds.length > 0 && { modelIds: selectedModelIds }),
     ...(selectedUserIds.length > 0 && { userIds: selectedUserIds }),
+    ...(selectedGroupIds.length > 0 && { groupIds: selectedGroupIds }),
     ...(selectedApiKeyIds.length > 0 && { apiKeyIds: selectedApiKeyIds }),
   };
 
@@ -241,6 +244,15 @@ const AdminUsagePage: React.FC = () => {
         setTimeout(() => setApiKeyFilterAnnouncement(''), 5000);
       }
     }
+  };
+
+  const handleGroupFilterChange = (groupIds: string[]) => {
+    setSelectedGroupIds(groupIds);
+    announce(
+      t('adminUsage.groupFilterChanged', 'Filtering by {{count}} group(s)', {
+        count: groupIds.length,
+      }),
+    );
   };
 
   /**
@@ -436,6 +448,13 @@ const AdminUsagePage: React.FC = () => {
                 selected={selectedUserIds}
                 onSelect={handleUserFilterChange}
                 dateRange={{ startDate: filters.startDate, endDate: filters.endDate }}
+              />
+            </ToolbarItem>
+
+            <ToolbarItem>
+              <GroupFilterSelect
+                selected={selectedGroupIds}
+                onSelect={handleGroupFilterChange}
               />
             </ToolbarItem>
 

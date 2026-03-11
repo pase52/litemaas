@@ -90,39 +90,55 @@ export class AdminUsageStatsService extends BaseService {
    */
   async getAnalytics(filters: AdminUsageFilters): Promise<Analytics> {
     try {
+      // Resolve groupIds to userIds before any aggregation
+      const resolvedFilters = await this.aggregationService.resolveGroupIds(filters);
+
       // Validate date range
-      this.validateDateRange(filters.startDate, filters.endDate);
+      this.validateDateRange(resolvedFilters.startDate, resolvedFilters.endDate);
 
       // 1. Collect and aggregate current period data
       const dailyData = await this.aggregationService.collectDateRangeData(
-        filters.startDate,
-        filters.endDate,
+        resolvedFilters.startDate,
+        resolvedFilters.endDate,
       );
 
       if (dailyData.length === 0) {
-        this.fastify.log.warn({ filters }, 'No data found for date range');
-        return this.createEmptyAnalytics(filters.startDate, filters.endDate);
+        this.fastify.log.warn({ filters: resolvedFilters }, 'No data found for date range');
+        return this.createEmptyAnalytics(resolvedFilters.startDate, resolvedFilters.endDate);
       }
 
-      const currentAggregated = this.aggregationService.aggregateDailyData(dailyData, filters);
+      const currentAggregated = this.aggregationService.aggregateDailyData(
+        dailyData,
+        resolvedFilters,
+      );
       const currentTotals = this.aggregationService.calculateTotals(currentAggregated);
 
       // 2. Calculate comparison period and aggregate comparison data
-      const trends = await this.calculateTrendsWithComparison(filters, currentTotals);
+      const trends = await this.calculateTrendsWithComparison(resolvedFilters, currentTotals);
 
       // 3. Generate chart data
-      const dailyUsage = this.aggregationService.generateDailyUsageSummary(dailyData, filters);
+      const dailyUsage = this.aggregationService.generateDailyUsageSummary(
+        dailyData,
+        resolvedFilters,
+      );
       const dailyModelUsage = this.aggregationService.generateDailyModelUsageSummary(
         dailyData,
-        filters,
+        resolvedFilters,
       );
 
       // 4. Get top performers
-      const topUser = this.aggregationService.findTopUser(currentAggregated.byUser, filters);
+      const topUser = this.aggregationService.findTopUser(
+        currentAggregated.byUser,
+        resolvedFilters,
+      );
       const topModel = this.aggregationService.findTopModel(currentAggregated.byModel);
       const topApiKey = this.aggregationService.findTopApiKey(dailyData);
       const topModels = this.aggregationService.findTopModels(currentAggregated.byModel, 10);
-      const topUsers = this.aggregationService.findTopUsers(currentAggregated.byUser, 5, filters);
+      const topUsers = this.aggregationService.findTopUsers(
+        currentAggregated.byUser,
+        5,
+        resolvedFilters,
+      );
 
       // 5. Calculate cost breakdown
       const costBreakdown = this.aggregationService.calculateCostBreakdown(currentAggregated);
@@ -130,8 +146,8 @@ export class AdminUsageStatsService extends BaseService {
       // 6. Build and return analytics response
       const analytics: Analytics = {
         period: {
-          startDate: filters.startDate,
-          endDate: filters.endDate,
+          startDate: resolvedFilters.startDate,
+          endDate: resolvedFilters.endDate,
         },
         totalUsers: currentTotals.uniqueUsers,
         activeUsers: currentTotals.activeUsers,
@@ -189,6 +205,9 @@ export class AdminUsageStatsService extends BaseService {
     paginationParams?: Partial<PaginationParams>,
   ): Promise<PaginatedResponse<UserBreakdown>> {
     try {
+      // Resolve groupIds to userIds before any aggregation
+      const resolvedFilters = await this.aggregationService.resolveGroupIds(filters);
+
       // Validate and normalize pagination params
       const pagination = validatePaginationParams(paginationParams || {});
 
@@ -197,14 +216,14 @@ export class AdminUsageStatsService extends BaseService {
 
       this.fastify.log.info(
         {
-          filters,
+          filters: resolvedFilters,
           pagination,
         },
         'Getting user breakdown with pagination',
       );
 
       // Get ALL user breakdown data (existing logic)
-      const allUsers = await this.getUserBreakdownInternal(filters);
+      const allUsers = await this.getUserBreakdownInternal(resolvedFilters);
 
       this.fastify.log.debug({ totalUsers: allUsers.length }, 'Retrieved all user breakdown data');
 
@@ -303,13 +322,16 @@ export class AdminUsageStatsService extends BaseService {
     paginationParams?: Partial<PaginationParams>,
   ): Promise<PaginatedResponse<ModelBreakdown>> {
     try {
+      // Resolve groupIds to userIds before any aggregation
+      const resolvedFilters = await this.aggregationService.resolveGroupIds(filters);
+
       const pagination = validatePaginationParams(paginationParams || {});
       validateSortField(pagination.sortBy, MODEL_BREAKDOWN_SORT_FIELDS);
 
-      this.fastify.log.info({ filters, pagination }, 'Getting model breakdown');
+      this.fastify.log.info({ filters: resolvedFilters, pagination }, 'Getting model breakdown');
 
       // Get all model data
-      const allModels = await this.getModelBreakdownInternal(filters);
+      const allModels = await this.getModelBreakdownInternal(resolvedFilters);
 
       // Flatten data for sorting
       const flattenedModels = allModels.map((model) => ({
@@ -398,13 +420,16 @@ export class AdminUsageStatsService extends BaseService {
     paginationParams?: Partial<PaginationParams>,
   ): Promise<PaginatedResponse<ProviderBreakdown>> {
     try {
+      // Resolve groupIds to userIds before any aggregation
+      const resolvedFilters = await this.aggregationService.resolveGroupIds(filters);
+
       const pagination = validatePaginationParams(paginationParams || {});
       validateSortField(pagination.sortBy, PROVIDER_BREAKDOWN_SORT_FIELDS);
 
-      this.fastify.log.info({ filters, pagination }, 'Getting provider breakdown');
+      this.fastify.log.info({ filters: resolvedFilters, pagination }, 'Getting provider breakdown');
 
       // Get all provider data
-      const allProviders = await this.getProviderBreakdownInternal(filters);
+      const allProviders = await this.getProviderBreakdownInternal(resolvedFilters);
 
       // Flatten data for sorting
       const flattenedProviders = allProviders.map((provider) => ({
@@ -492,8 +517,11 @@ export class AdminUsageStatsService extends BaseService {
     currencyCode: string = 'USD',
   ): Promise<string> {
     try {
+      // Resolve groupIds to userIds before any aggregation
+      const resolvedFilters = await this.aggregationService.resolveGroupIds(filters);
+
       // For export, get ALL users without pagination
-      const users = await this.getUserBreakdownInternal(filters);
+      const users = await this.getUserBreakdownInternal(resolvedFilters);
 
       if (format === 'json') {
         return this.exportService.exportToJSON(users, filters, 'user');
