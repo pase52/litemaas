@@ -909,6 +909,7 @@ describe('TeamService', () => {
       mockDbUtils.queryOne
         .mockResolvedValueOnce({ role: 'admin' }) // checkTeamAccess
         .mockResolvedValueOnce({ count: 0 }); // No active subscriptions
+      mockDbUtils.queryMany.mockResolvedValueOnce([]); // No team API keys
 
       vi.spyOn(service, 'getTeam').mockResolvedValue({
         id: 'team-123',
@@ -945,6 +946,7 @@ describe('TeamService', () => {
       mockDbUtils.queryOne
         .mockResolvedValueOnce({ role: 'admin' })
         .mockResolvedValueOnce({ count: 0 });
+      mockDbUtils.queryMany.mockResolvedValueOnce([]); // No team API keys
 
       vi.spyOn(service, 'getTeam').mockResolvedValue({
         id: 'team-123',
@@ -1121,6 +1123,7 @@ describe('TeamService', () => {
       vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
       // No checkTeamAccess mock - if skipAccessCheck works, it won't be called
       mockDbUtils.queryOne.mockResolvedValueOnce({ count: 0 }); // No active subscriptions
+      mockDbUtils.queryMany.mockResolvedValueOnce([]); // No team API keys
 
       vi.spyOn(service, 'getTeam').mockResolvedValue({
         id: 'team-123',
@@ -1155,6 +1158,7 @@ describe('TeamService', () => {
     it('should still create audit log with skipAccessCheck', async () => {
       vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
       mockDbUtils.queryOne.mockResolvedValueOnce({ count: 0 }); // No active subscriptions
+      mockDbUtils.queryMany.mockResolvedValueOnce([]); // No team API keys
 
       vi.spyOn(service, 'getTeam').mockResolvedValue({
         id: 'team-123',
@@ -1173,6 +1177,7 @@ describe('TeamService', () => {
     it('should call getTeam without userId when skipAccessCheck is true', async () => {
       vi.spyOn(service, 'shouldUseMockData').mockReturnValue(false);
       mockDbUtils.queryOne.mockResolvedValueOnce({ count: 0 });
+      mockDbUtils.queryMany.mockResolvedValueOnce([]); // No team API keys
 
       const getTeamSpy = vi.spyOn(service, 'getTeam').mockResolvedValue({
         id: 'team-123',
@@ -1191,6 +1196,7 @@ describe('TeamService', () => {
       mockDbUtils.queryOne
         .mockResolvedValueOnce({ role: 'admin' }) // checkTeamAccess
         .mockResolvedValueOnce({ count: 0 }); // No active subscriptions
+      mockDbUtils.queryMany.mockResolvedValueOnce([]); // No team API keys
 
       const getTeamSpy = vi.spyOn(service, 'getTeam').mockResolvedValue({
         id: 'team-123',
