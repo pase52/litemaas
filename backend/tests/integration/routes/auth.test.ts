@@ -120,14 +120,14 @@ describe('Auth Routes Integration', () => {
         method: 'POST',
         url: '/api/auth/dev-token',
         payload: {
-          username: 'testuser',
+          username: 'nonexistentdevuser',
         },
       });
 
       expect(response.statusCode).toBe(200);
       const result = JSON.parse(response.body);
-      expect(result.user.username).toBe('testuser');
-      expect(result.user.email).toBe('testuser@litemaas.local');
+      expect(result.user.username).toBe('nonexistentdevuser');
+      expect(result.user.email).toBe('nonexistentdevuser@litemaas.local');
     });
 
     it('should generate development token with custom roles', async () => {
