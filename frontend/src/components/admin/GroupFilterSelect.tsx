@@ -55,10 +55,9 @@ export const GroupFilterSelect: React.FC<GroupFilterSelectProps> = ({ selected, 
   const { data: groupsData } = useQuery(
     ['groups-for-filter'],
     async () => {
-      const response = await apiClient.get<PaginatedGroupResponse>(
+      return await apiClient.get<PaginatedGroupResponse>(
         '/admin/groups?limit=100',
       );
-      return response.data;
     },
     {
       staleTime: 5 * 60 * 1000, // 5 minutes
@@ -66,7 +65,7 @@ export const GroupFilterSelect: React.FC<GroupFilterSelectProps> = ({ selected, 
     },
   );
 
-  const allGroups: GroupOption[] = (groupsData || []).map((g) => ({
+  const allGroups: GroupOption[] = (groupsData?.data || []).map((g) => ({
     id: g.id,
     name: g.name,
     alias: g.alias || g.name,
