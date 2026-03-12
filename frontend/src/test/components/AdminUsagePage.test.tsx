@@ -116,7 +116,15 @@ vi.mock('../../components/ScreenReaderAnnouncement', () => ({
 // Mock API client to avoid filter-options requests
 vi.mock('../../services/api', () => ({
   apiClient: {
-    get: vi.fn().mockResolvedValue({ data: { users: [], models: [] } }),
+    get: vi.fn().mockImplementation((url: string) => {
+      if (url.startsWith('/admin/groups')) {
+        return Promise.resolve({
+          data: [],
+          pagination: { page: 1, limit: 100, total: 0, totalPages: 0 },
+        });
+      }
+      return Promise.resolve({ users: [], models: [] });
+    }),
     post: vi.fn(),
     put: vi.fn(),
     delete: vi.fn(),
