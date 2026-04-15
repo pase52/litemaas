@@ -43,8 +43,26 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
             await fastify.authenticate(request, reply);
             return; // Authentication successful
           } catch (error) {
-            // If token authentication fails, continue to frontend bypass logic
-            fastify.log.debug('Token authentication failed, checking frontend bypass');
+            // Token was explicitly provided but authentication failed — reject
+            // immediately. Do NOT fall through to the bypass: a transient DB error
+            // during token validation (e.g. a brief connection drop) would otherwise
+            // grant mock-admin access to every browser-based request.
+            fastify.log.warn(
+              {
+                url: request.url,
+                method: request.method,
+                ip: request.ip,
+                error: error instanceof Error ? error.message : 'Unknown error',
+              },
+              'Token authentication failed',
+            );
+            return reply.status(401).send({
+              error: {
+                code: 'UNAUTHORIZED',
+                message: 'Invalid or missing authentication token',
+              },
+              requestId: request.id,
+            });
           }
         }
 
