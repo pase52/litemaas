@@ -24,10 +24,22 @@ import {
   UNKNOWN_USERNAME,
   extractProviderFromModel,
   isHistoricalDate,
+  isTodayUTC,
+  parseDateAsUTC,
 } from './admin-usage.utils.js';
 import { LiteLLMService } from '../litellm.service.js';
-import { mergeDayData } from '../maas/maas-usage.source.js';
+import { isWithinUsageRetention, mergeDayData } from '../maas/maas-usage.source.js';
+import { isUnconfiguredClient } from '../maas/maas-clients.js';
 import { ApplicationError } from '../../utils/errors.js';
+
+/** Options of {@link AdminUsageAggregationService.refreshSingleDay} */
+export interface RefreshSingleDayOptions {
+  /**
+   * MaaS slice (see extractMaasSlice) of the cached row that is being replaced. Carried forward
+   * when Prometheus cannot provide the day: older than its retention, empty result or failure.
+   */
+  previousMaas?: LiteLLMDayData | null;
+}
 
 /**
  * Service for aggregating enriched usage data
@@ -1345,15 +1357,44 @@ export class AdminUsageAggregationService extends BaseService {
    * Unlike collectDateRangeData, this method throws errors if the fetch fails,
    * making it suitable for explicit refresh operations where failure should be reported.
    *
+   * The strict contract covers LiteLLM, enrichment and the database. MaaS usage (Prometheus) is
+   * best-effort, as everywhere else: when its query fails the day is NOT thrown away and NOT
+   * stored as complete. It is saved as incomplete (`is_complete = false`, exactly like
+   * `getCachedOrFetch` does), so it is served for the current-day TTL and then re-fetched by the
+   * regular path instead of being frozen without its MaaS usage as a permanent historical row.
+   *
+   * With MaaS enabled a day also counts as current while it is today in UTC (MaaS windows are UTC
+   * days); without MaaS only the server-timezone `isToday` applies, as before.
+   *
+   * Prometheus is not asked about days older than MAAS_USAGE_RETENTION_DAYS (it would answer with
+   * an empty vector, not an error). `options.previousMaas`, the MaaS slice of the cached row being
+   * replaced (see extractMaasSlice), is carried forward instead, and also when the fresh MaaS
+   * result is empty or failed. A non-empty fresh MaaS result always wins.
+   *
    * @param dateString - The date to refresh (YYYY-MM-DD)
+   * @param options - Usage resync: MaaS usage of the row that is being replaced
    * @returns Enriched day data
    * @throws ApplicationError if fetch or enrichment fails
    */
-  async refreshSingleDay(dateString: string): Promise<EnrichedDayData> {
+  async refreshSingleDay(
+    dateString: string,
+    options: RefreshSingleDayOptions = {},
+  ): Promise<EnrichedDayData> {
     this.fastify.log.info({ date: dateString }, 'Refreshing single day data');
 
     // Fetch from LiteLLM (will throw on error); MaaS usage is merged in, never blocking
-    const liteLLMData = await this.fetchMergedDayData(dateString).then((r) => r.data);
+    let liteLLMData: LiteLLMDayData | null;
+    let maasFailed = false;
+    if (this.isBeyondMaasRetention(dateString)) {
+      liteLLMData = await this.fetchDailyDataFromLiteLLM(dateString);
+    } else {
+      ({ data: liteLLMData, maasFailed } = await this.fetchMergedDayData(dateString));
+    }
+
+    // No fresh MaaS usage (empty result, failed or skipped query): keep what the row had
+    if (options.previousMaas && !liteLLMData?.sources?.maas) {
+      liteLLMData = mergeDayData(liteLLMData, options.previousMaas);
+    }
 
     if (!liteLLMData) {
       throw this.createNotFoundError(
@@ -1369,11 +1410,38 @@ export class AdminUsageAggregationService extends BaseService {
     // Cache if manager available
     if (this.cacheManager) {
       const date = parseISO(dateString);
-      await this.cacheManager.saveToDailyCache(dateString, enrichedData, isToday(date));
+      if (maasFailed) {
+        this.fastify.log.warn(
+          { date: dateString },
+          'MaaS usage unavailable - day stored as incomplete and re-fetched after the cache TTL',
+        );
+      }
+      await this.cacheManager.saveToDailyCache(
+        dateString,
+        enrichedData,
+        this.isCurrentUsageDay(dateString, date) || maasFailed,
+      );
     }
 
     this.fastify.log.info({ date: dateString }, 'Single day data refreshed successfully');
     return enrichedData;
+  }
+
+  /**
+   * Whether the day may still receive usage. date-fns `isToday` uses the server timezone, but
+   * MaaS windows are UTC days: with MaaS enabled a day is current while it is today in either, so
+   * a UTC day that is still running is never stored as complete. Without MaaS this is `isToday`.
+   */
+  private isCurrentUsageDay(dateString: string, date: Date): boolean {
+    if (isToday(date)) return true;
+    return !!this.fastify.maasClients && isTodayUTC(parseDateAsUTC(dateString));
+  }
+
+  /** True when the MaaS backend is on and Prometheus no longer holds the whole day */
+  private isBeyondMaasRetention(dateString: string): boolean {
+    if (!this.fastify.maasClients || !this.fastify.backends?.has('maas')) return false;
+    const retentionDays = this.fastify.maasClients.config?.usageRetentionDays;
+    return !!retentionDays && !isWithinUsageRetention(dateString, retentionDays);
   }
 
   /**
@@ -1395,7 +1463,7 @@ export class AdminUsageAggregationService extends BaseService {
         return cached;
       }
       // For today's date, cache manager will check freshness (5 minute TTL)
-      if (cached && isToday(date)) {
+      if (cached && this.isCurrentUsageDay(dateString, date)) {
         this.fastify.log.debug({ date: dateString }, 'Using cached data for today (if fresh)');
         return cached;
       }
@@ -1413,11 +1481,17 @@ export class AdminUsageAggregationService extends BaseService {
     // Enrich with user mappings
     const enrichedData = await this.enrichWithUserMapping(liteLLMData);
 
-    // Cache if manager available. A day whose MaaS fetch failed is not cached (historical days
-    // are cached permanently and would otherwise lose their MaaS usage for good).
-    if (this.cacheManager && !maasFailed) {
+    // Cache if manager available. A day whose MaaS fetch failed is cached as incomplete: it is
+    // served for the current-day TTL and then re-fetched, so a Prometheus outage neither loses
+    // the day's MaaS usage for good (historical rows are otherwise permanent) nor forces a
+    // LiteLLM re-fetch of every day on every request.
+    if (this.cacheManager) {
       const date = parseISO(dateString);
-      await this.cacheManager.saveToDailyCache(dateString, enrichedData, isToday(date));
+      await this.cacheManager.saveToDailyCache(
+        dateString,
+        enrichedData,
+        this.isCurrentUsageDay(dateString, date) || maasFailed,
+      );
     }
 
     return enrichedData;
@@ -1432,6 +1506,15 @@ export class AdminUsageAggregationService extends BaseService {
   ): Promise<{ data: LiteLLMDayData | null; maasFailed: boolean }> {
     const liteLLMData = await this.fetchDailyDataFromLiteLLM(dateString);
     if (!this.fastify.maasClients || !this.fastify.backends?.has('maas')) {
+      return { data: liteLLMData, maasFailed: false };
+    }
+    // No Prometheus endpoint configured: there is no MaaS usage to merge, and the day must be
+    // cached like any other (otherwise nothing would ever be cached while MaaS is enabled)
+    if (isUnconfiguredClient(this.fastify.maasClients.prometheus)) {
+      this.fastify.log.debug(
+        { date: dateString },
+        'MaaS usage skipped: PROMETHEUS_URL is not configured',
+      );
       return { data: liteLLMData, maasFailed: false };
     }
     try {

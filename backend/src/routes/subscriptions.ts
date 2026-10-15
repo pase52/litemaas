@@ -9,6 +9,7 @@ import {
 } from '../types';
 import { SubscriptionService } from '../services/subscription.service';
 import { ApplicationError } from '../utils/errors';
+import { ErrorResponseSchema } from '../schemas/common';
 
 const subscriptionsRoutes: FastifyPluginAsync = async (fastify) => {
   // Initialize subscription service
@@ -330,7 +331,10 @@ const subscriptionsRoutes: FastifyPluginAsync = async (fastify) => {
   }>('/:id', {
     schema: {
       tags: ['Subscriptions'],
-      description: 'Update subscription',
+      description:
+        "Update your own subscription (quotas, expiry). The status can only be changed to 'cancelled' or 'inactive' (self-cancel): " +
+        'any other status change is rejected with 403. A subscription is activated by requesting it again ' +
+        '(POST /subscriptions) or by an administrator (approve / revert), never through this endpoint.',
       security: [{ bearerAuth: [] }],
       params: {
         type: 'object',
@@ -345,6 +349,8 @@ const subscriptionsRoutes: FastifyPluginAsync = async (fastify) => {
           status: {
             type: 'string',
             enum: ['active', 'suspended', 'cancelled', 'expired', 'inactive', 'pending', 'denied'],
+            description:
+              "Owners may only set 'cancelled' or 'inactive'; sending the current status is a no-op, any other value returns 403",
           },
           quotaRequests: { type: 'number', minimum: 1 },
           quotaTokens: { type: 'number', minimum: 1 },
@@ -643,22 +649,10 @@ const subscriptionsRoutes: FastifyPluginAsync = async (fastify) => {
             updatedAt: { type: 'string', format: 'date-time' },
           },
         },
-        400: {
-          type: 'object',
-          properties: {
-            statusCode: { type: 'number' },
-            error: { type: 'string' },
-            message: { type: 'string' },
-          },
-        },
-        404: {
-          type: 'object',
-          properties: {
-            statusCode: { type: 'number' },
-            error: { type: 'string' },
-            message: { type: 'string' },
-          },
-        },
+        // The error handler answers with the standard { error: { code, message, ... } } body;
+        // the previous { error: string } schema flattened it to "[object Object]"
+        400: ErrorResponseSchema,
+        404: ErrorResponseSchema,
       },
     },
     preHandler: fastify.authenticate,

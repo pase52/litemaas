@@ -47,11 +47,74 @@ function isAdminRemoved(row: { metadata: Record<string, unknown> | null }): bool
   return row.metadata?.[ADMIN_REMOVED_FLAG] === true;
 }
 
-/** pg advisory lock key for the periodic sync ("MAAT"); keeps replicas from syncing at once */
+/**
+ * pg advisory lock key for the model sync ("MAAT"); keeps replicas, the periodic job and the
+ * manual admin endpoint from syncing at the same time
+ */
 export const MAAS_SYNC_LOCK_ID = 0x4d414154;
 
 /** Provider label stored on MaaS models */
 export const MAAS_PROVIDER = 'maas';
+
+/** Per-user cluster calls (policy grants / revocations) run at most this many at a time */
+export const MAAS_POLICY_CONCURRENCY = 5;
+
+/**
+ * Run `fn` for every item with at most `limit` calls in flight. Never rejects: failures are
+ * returned, so callers can count and log them without one bad item stopping the rest.
+ */
+export async function runBounded<T>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<unknown>,
+): Promise<Array<{ item: T; error: unknown }>> {
+  const failures: Array<{ item: T; error: unknown }> = [];
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const item = items[next++];
+      try {
+        await fn(item);
+      } catch (error) {
+        failures.push({ item, error });
+      }
+    }
+  };
+  const workers = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return failures;
+}
+
+/** In-flight fire-and-forget jobs, tracked so tests (and shutdown code) can wait for them */
+const backgroundJobs = new Set<Promise<void>>();
+
+/**
+ * Start `job` without making the caller wait for it. Used for cluster work that is safe to
+ * finish later because the database is already committed and the reconciler converges whatever
+ * the job does not complete. A failing job is logged, never thrown.
+ */
+export function runInBackground(
+  log: FastifyInstance['log'],
+  description: string,
+  job: () => Promise<void>,
+): void {
+  const promise: Promise<void> = Promise.resolve()
+    .then(job)
+    .catch((error) => {
+      log.error({ error }, `${description} failed - the reconciler will converge`);
+    })
+    .finally(() => {
+      backgroundJobs.delete(promise);
+    });
+  backgroundJobs.add(promise);
+}
+
+/** Resolves once every background MaaS job started so far (and any it spawned) has finished */
+export async function waitForMaasBackground(): Promise<void> {
+  while (backgroundJobs.size > 0) {
+    await Promise.allSettled([...backgroundJobs]);
+  }
+}
 
 /**
  * Synchronises MaaSModelRef objects from the cluster into the `models` table
@@ -81,13 +144,24 @@ export class MaasModelSyncService extends BaseService {
   private timer?: NodeJS.Timeout;
 
   /**
-   * Run a sync under a pg advisory lock (null when another replica is already syncing).
-   * Used by the startup and interval jobs; the manual admin endpoint calls syncModels() directly.
+   * Run a sync under a pg advisory lock (null when another sync is already running, on this
+   * replica or another). Used by the startup and interval jobs AND the manual admin endpoint, so
+   * a manual sync can never race the periodic one (duplicate inserts).
    */
-  async syncWithLock(): Promise<MaasSyncResult | null> {
-    return withAdvisoryLock(this.fastify.pg.pool, MAAS_SYNC_LOCK_ID, () => this.syncModels(), {
-      blocking: false,
-    });
+  async syncWithLock(options: { restoreRemoved?: boolean } = {}): Promise<MaasSyncResult | null> {
+    return withAdvisoryLock(
+      this.fastify.pg.pool,
+      MAAS_SYNC_LOCK_ID,
+      () => this.syncModels(options),
+      {
+        blocking: false,
+      },
+    );
+  }
+
+  /** Wait for the background cluster work started by this service (tests, graceful shutdown) */
+  static waitForBackground(): Promise<void> {
+    return waitForMaasBackground();
   }
 
   /** Sync once now (non-blocking for the caller) and then every MAAS_SYNC_INTERVAL_MS */
@@ -246,8 +320,16 @@ export class MaasModelSyncService extends BaseService {
   }
 
   /**
-   * Mark a MaaS model unavailable and cascade. Cluster access is revoked FIRST for every
-   * user holding an active subscription, then the shared DB cascade runs.
+   * Mark a MaaS model unavailable and cascade.
+   *
+   *  1. Cluster access is revoked FIRST (revoke-before-database-change rule) for every user
+   *     holding an active subscription. This stays on the request path, but runs with bounded
+   *     concurrency so a popular model does not take a serial round trip per user.
+   *  2. The shared DB cascade runs. A model that is already parked as unavailable (Pending
+   *     phase) is only flipped to 'available' for the duration of the cascade and is put back
+   *     if the cascade fails, so a failed cascade never leaves it visible / subscribable.
+   *  3. Policies are re-asserted from the (now updated) database state in the BACKGROUND with
+   *     bounded concurrency (a convergence step the reconciler repeats anyway).
    */
   async markUnavailableWithCascade(modelId: string) {
     const users = await this.fastify.dbUtils.queryMany<{ user_id: string }>(
@@ -267,23 +349,54 @@ export class MaasModelSyncService extends BaseService {
       };
     }
     const access = new MaasAccessService(this.fastify, this.clients);
-    for (const u of users) {
-      await access.removeModelForUser(u.user_id, modelId);
-    }
+    // removeModelForUser never throws: a cluster failure marks the user's keys pending instead
+    await runBounded(users, MAAS_POLICY_CONCURRENCY, (u) =>
+      access.removeModelForUser(u.user_id, modelId),
+    );
+
     // markModelUnavailable only cascades on an available -> unavailable transition; a model
     // parked as unavailable (Pending phase) may still hold active subscriptions.
-    await this.fastify.dbUtils.query(
-      `UPDATE models SET availability = 'available' WHERE id = $1 AND availability = 'unavailable'`,
-      [modelId],
-    );
-    const dbCascade = await new ModelSyncService(this.fastify).markModelUnavailable(modelId);
-    // Re-assert policies from the (now updated) DB state for the affected users
-    for (const u of users) {
-      try {
-        await access.syncUserAuthPolicy(u.user_id);
-      } catch (error) {
-        this.fastify.log.warn({ error, userId: u.user_id }, 'MaaS policy resync failed');
+    const parked = current?.availability === 'unavailable';
+    if (parked) {
+      await this.fastify.dbUtils.query(
+        `UPDATE models SET availability = 'available' WHERE id = $1 AND availability = 'unavailable'`,
+        [modelId],
+      );
+    }
+    let dbCascade: Awaited<ReturnType<ModelSyncService['markModelUnavailable']>>;
+    try {
+      dbCascade = await new ModelSyncService(this.fastify).markModelUnavailable(modelId);
+    } catch (error) {
+      // The cascade transaction rolled back, so the temporary flip above would otherwise stay
+      if (parked) {
+        try {
+          await this.fastify.dbUtils.query(
+            `UPDATE models SET availability = 'unavailable' WHERE id = $1 AND availability = 'available'`,
+            [modelId],
+          );
+        } catch (restoreError) {
+          this.fastify.log.error(
+            { error: restoreError, modelId },
+            'MaaS: cascade failed and the model could not be parked as unavailable again',
+          );
+        }
       }
+      throw error;
+    }
+
+    if (users.length > 0) {
+      runInBackground(
+        this.fastify.log,
+        `MaaS policy re-sync after cascading ${modelId}`,
+        async () => {
+          const failures = await runBounded(users, MAAS_POLICY_CONCURRENCY, (u) =>
+            access.syncUserAuthPolicy(u.user_id),
+          );
+          for (const { item, error } of failures) {
+            this.fastify.log.warn({ error, userId: item.user_id }, 'MaaS policy resync failed');
+          }
+        },
+      );
     }
     return dbCascade;
   }

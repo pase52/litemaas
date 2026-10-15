@@ -12,6 +12,8 @@ interface MaasReauthAlertProps {
  * Inline alert shown when the backend answers MAAS_REAUTH_REQUIRED: the stored
  * OpenShift login token is missing or expired, so the user has to sign in again.
  * The existing login redirect returns the user to the current page (/api-keys).
+ * It is a live region: when a create/update fails inside the modal this alert is the only
+ * feedback, so assistive technology has to announce it when it appears.
  */
 export const MaasReauthAlert: React.FC<MaasReauthAlertProps> = ({ className }) => {
   const { t } = useTranslation();
@@ -29,6 +31,7 @@ export const MaasReauthAlert: React.FC<MaasReauthAlertProps> = ({ className }) =
     <Alert
       variant="warning"
       isInline
+      isLiveRegion
       className={className}
       title={t('maas.keys.reauthTitle', 'Re-authentication required')}
       data-testid="maas-reauth-alert"

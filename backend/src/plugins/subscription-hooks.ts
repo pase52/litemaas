@@ -271,19 +271,17 @@ class SubscriptionHookManager {
   }
 
   /**
-   * MaaS revocation-first: remove cluster access (auth policy + per-key subscriptions) and the
-   * model from the owner's MaaS keys BEFORE the subscription row stops being active.
+   * MaaS revocation-first: remove cluster access (auth policy + per-key subscriptions) BEFORE
+   * the subscription row stops being active. Like the LiteLLM path for suspension / expiry,
+   * the key's model associations are kept in the database, so the key regains the model (via
+   * the reconciler) when the subscription becomes active again.
    * No-op when MaaS is disabled or the model is not a MaaS model. Never throws.
    */
   private async revokeMaasAccess(userId: string, modelId: string): Promise<void> {
     if (!this.fastify.maasClients) return;
     try {
       const { MaasAccessService } = await import('../services/maas/maas-access.service.js');
-      const result = await new MaasAccessService(this.fastify).removeModelForUser(userId, modelId);
-      if (!result.applicable) return;
-      const { ApiKeyService } = await import('../services/api-key.service.js');
-      const apiKeyService = new ApiKeyService(this.fastify, this.fastify.liteLLMService);
-      await apiKeyService.removeModelFromUserApiKeys(userId, modelId);
+      await new MaasAccessService(this.fastify).removeModelForUser(userId, modelId);
     } catch (error) {
       this.fastify.log.error(
         { error, userId, modelId },

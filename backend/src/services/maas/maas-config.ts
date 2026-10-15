@@ -10,6 +10,12 @@ export interface MaasConfig {
   gatewayUrl?: string;
   /** Namespace holding MaaSAuthPolicy / MaaSSubscription objects */
   namespace: string;
+  /**
+   * Identifies this deployment on the objects it creates (label litemaas.io/instance), so two
+   * LiteMaaS instances sharing a MaaS namespace never reconcile each other's objects.
+   * Undefined = derive it from the in-cluster namespace (or "default").
+   */
+  instanceId?: string;
   /** Namespaces scanned for MaaSModelRef objects; empty = all namespaces */
   modelNamespaces: string[];
   syncIntervalMs: number;
@@ -19,6 +25,14 @@ export interface MaasConfig {
   usageHitsMetric: string;
   usageCallsMetric: string;
   usageLabelMatchers?: string;
+  /**
+   * How many days of history Prometheus / Thanos keeps (platform Prometheus: about 15). Days
+   * older than this are never queried by the usage resync: querying them returns an empty vector
+   * without an error, so their cached MaaS usage is carried forward instead.
+   */
+  usageRetentionDays: number;
+  /** HTTP timeout of a single Prometheus request */
+  prometheusTimeoutMs: number;
 }
 
 type ConfigSource = Partial<FastifyInstance['config']> | Record<string, string | undefined>;
@@ -41,6 +55,7 @@ export function getMaasConfig(config: ConfigSource): MaasConfig {
     apiUrl: stripTrailingSlash(c.MAAS_API_URL),
     gatewayUrl: stripTrailingSlash(c.MAAS_GATEWAY_URL),
     namespace: c.MAAS_NAMESPACE?.trim() || 'models-as-a-service',
+    instanceId: c.MAAS_INSTANCE_ID?.trim() || undefined,
     modelNamespaces: (c.MAAS_MODEL_NAMESPACES || '')
       .split(',')
       .map((s) => s.trim())
@@ -51,6 +66,8 @@ export function getMaasConfig(config: ConfigSource): MaasConfig {
     usageHitsMetric: c.MAAS_USAGE_HITS_METRIC?.trim() || 'authorized_hits',
     usageCallsMetric: c.MAAS_USAGE_CALLS_METRIC?.trim() || 'authorized_calls',
     usageLabelMatchers: c.MAAS_USAGE_LABEL_MATCHERS?.trim() || undefined,
+    usageRetentionDays: toInt(c.MAAS_USAGE_RETENTION_DAYS, 15),
+    prometheusTimeoutMs: toInt(c.PROMETHEUS_TIMEOUT_MS, 10_000),
   };
 }
 

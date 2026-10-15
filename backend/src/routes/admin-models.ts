@@ -16,7 +16,7 @@ import {
   AdminTestModelConfigResponseSchema,
 } from '../schemas/admin-models.js';
 import { encryptApiKey, decryptApiKey, getEncryptionKey } from '../utils/encryption.js';
-import { ApplicationError } from '../utils/errors.js';
+import { ApplicationError, ErrorCode } from '../utils/errors.js';
 import { MaasMigrationService } from '../services/maas/maas-migration.service.js';
 import {
   MaasModelSyncService,
@@ -53,7 +53,8 @@ const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: { restoreRemoved?: boolean } | undefined }>('/maas/sync', {
     schema: {
       tags: ['Admin Models'],
-      description: 'Synchronise MaaSModelRef objects from the cluster into LiteMaaS models',
+      description:
+        'Synchronise MaaSModelRef objects from the cluster into LiteMaaS models. Takes the same lock as the periodic sync: answers 409 (RESOURCE_LOCKED) when a sync is already running.',
       security: [{ bearerAuth: [] }],
       body: {
         type: 'object',
@@ -66,9 +67,26 @@ const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
     handler: async (request) => {
       const user = (request as AuthenticatedRequest).user;
       const service = requireMaas();
-      const result = await service.syncModels({
+      // Same non-blocking advisory lock as the periodic sync (any replica): a manual run racing
+      // it would insert the same new models twice
+      const result = await service.syncWithLock({
         restoreRemoved: request.body?.restoreRemoved === true,
       });
+      if (!result) {
+        throw new ApplicationError({
+          code: ErrorCode.RESOURCE_LOCKED,
+          statusCode: 409,
+          message: 'A MaaS model sync is already running',
+          details: {
+            resource: 'MaaS model sync',
+            suggestion:
+              'The periodic or another manual sync is in progress. Wait a few seconds and try again',
+          },
+          retryable: true,
+          retryAfter: 10,
+          maxRetries: 3,
+        });
+      }
       await fastify.dbUtils.query(
         `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, metadata, success)
          VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -109,7 +127,7 @@ const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
     schema: {
       tags: ['Admin Models'],
       description:
-        'Migrate a LiteLLM model to MaaS: copies the model and its active subscriptions to the given MaaSModelRef, blocks new subscriptions on the old model and removes LiteLLM access after the grace period',
+        'Migrate a LiteLLM model to MaaS: copies the model, its active subscriptions (as active) and its pending requests (as pending) to the given MaaSModelRef, blocks new subscriptions and activations on the old model and removes LiteLLM access after the grace period. The MaaSAuthPolicies are applied in the background after the response (policiesScheduled).',
       security: [{ bearerAuth: [] }],
       params: AdminModelParamsSchema,
       body: {
@@ -137,6 +155,28 @@ const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
             },
           },
           graceDays: { type: 'integer', minimum: 1, maximum: 365 },
+        },
+      },
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'object',
+              properties: {
+                oldModelId: { type: 'string' },
+                newModelId: { type: 'string' },
+                created: { type: 'boolean' },
+                graceUntil: { type: 'string', format: 'date-time' },
+                subscriptionsCopied: { type: 'integer' },
+                pendingRequestsCopied: { type: 'integer' },
+                pendingRequestsClosed: { type: 'integer' },
+                usersToNotify: { type: 'integer' },
+                policiesScheduled: { type: 'integer' },
+              },
+            },
+            message: { type: 'string' },
+          },
         },
       },
     },

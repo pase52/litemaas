@@ -2142,6 +2142,8 @@
     "keys": {
       "backendHelp": "Une clé ne fonctionne qu'avec les modèles d'un seul backend. Choisissez d'abord le backend, puis sélectionnez ses modèles.",
       "backendLabel": "Backend de la clé",
+      "expiryNotLater": "La nouvelle expiration ne peut pas être postérieure à l'expiration actuelle ({{date}}).",
+      "expiryShortenOnly": "L'expiration d'une clé API MaaS ne peut qu'être raccourcie.",
       "graceBannerItem": "Clé « {{key}} » : {{models}} restent disponibles via LiteLLM jusqu'au {{date}}. Créez une clé MaaS pour ces modèles avant cette date.",
       "graceBannerTitle": "Certaines de vos clés utilisent des modèles en cours de migration vers MaaS",
       "noSubscribedMaasModels": "Vous n'avez aucun abonnement actif à des modèles MaaS.",

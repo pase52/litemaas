@@ -4,12 +4,18 @@ import { FastifyInstance } from 'fastify';
  * NotificationService - Placeholder for future notification integration
  * All methods are async no-ops ready for external service integration
  *
+ * There is NO delivery channel behind these hooks yet (no email, push, webhook or notifications
+ * table): every method only writes a debug log line. Callers must therefore not report counts of
+ * "notified" users as delivered - say "to notify" instead - and users learn about changes from
+ * the UI (status labels, the migration banner), not from a message.
+ *
  * Integration points:
  * - SubscriptionService.createSubscription (pending requests)
  * - SubscriptionService.approveSubscriptions (approvals)
  * - SubscriptionService.denySubscriptions (denials)
  * - SubscriptionService.requestReview (review requests)
  * - SubscriptionService.handleModelRestrictionChange (model restrictions)
+ * - MaasMigrationService.migrate (LiteLLM -> MaaS migrations)
  */
 export class NotificationService {
   constructor(private fastify: FastifyInstance) {}
@@ -92,7 +98,8 @@ export class NotificationService {
   }
 
   /**
-   * Notify users a model they use is migrating to MaaS (old model keeps working until graceUntil)
+   * Notify users a model they use is migrating to MaaS (old model keeps working until graceUntil).
+   * Log-only today (see the class comment): nothing is delivered to the users.
    * TODO: Implement email/push notification
    */
   async notifyUsersModelMigration(

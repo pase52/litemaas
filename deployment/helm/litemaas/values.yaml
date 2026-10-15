@@ -409,11 +409,17 @@ maas:
     callsMetric: authorized_calls
     # -- Extra PromQL label matchers, e.g. namespace="kuadrant-system" (MAAS_USAGE_LABEL_MATCHERS)
     labelMatchers: ""
+    # -- Days of history Prometheus/Thanos keeps (MAAS_USAGE_RETENTION_DAYS). Older days are never
+    # re-queried by the usage resync; their cached MaaS usage is carried forward instead.
+    retentionDays: 15
   prometheus:
-    # -- Thanos Querier URL (PROMETHEUS_URL). Empty disables MaaS usage collection.
+    # -- Thanos Querier URL (PROMETHEUS_URL), needed for MaaS usage analytics. Empty: MaaS usage is
+    # not collected (admin analytics show LiteLLM usage only) and /health reports prometheus: unconfigured.
     url: "https://thanos-querier.openshift-monitoring.svc.cluster.local:9091"
     # -- Skip TLS verification for Prometheus/Thanos (PROMETHEUS_SKIP_TLS_VERIFY)
     skipTlsVerify: false
+    # -- Timeout of a single Prometheus query in milliseconds (PROMETHEUS_TIMEOUT_MS)
+    timeoutMs: 10000
     # -- Bind the backend ServiceAccount to the cluster-monitoring-view ClusterRole
     clusterMonitoringView: true
   rbac:

@@ -450,7 +450,7 @@ With `maas.enabled=true` the chart:
   | Kind | Namespace | Rules |
   | --- | --- | --- |
   | ClusterRole + ClusterRoleBinding `<release>-maas-modelrefs-reader-<ns>` (or a Role per `modelNamespaces` entry) | cluster | `get/list/watch maasmodelrefs.maas.opendatahub.io` |
-  | Role + RoleBinding `<release>-maas-access-manager` | `maas.namespace` | full CRUD on `maassubscriptions`, `maasauthpolicies` |
+  | Role + RoleBinding `<release>-maas-access-manager-<release namespace>` | `maas.namespace` | full CRUD on `maassubscriptions`, `maasauthpolicies` |
   | ClusterRoleBinding `<release>-maas-monitoring-view-<ns>` → `cluster-monitoring-view` | cluster | Thanos Querier queries (`maas.prometheus.clusterMonitoringView`) |
 
   Installing these requires cluster-admin rights. Set `maas.rbac.create=false` to manage them

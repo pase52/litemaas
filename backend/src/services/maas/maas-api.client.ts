@@ -1,5 +1,5 @@
 import type { FastifyBaseLogger } from 'fastify';
-import { ApplicationError } from '../../utils/errors.js';
+import { ApplicationError, ErrorCode } from '../../utils/errors.js';
 import { tlsFetch, type TlsOptions } from '../http/tls-fetch.js';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -133,6 +133,21 @@ export class MaasApiClient implements IMaasApiClient {
         text ||
         undefined;
       this.log?.warn({ method, path, status: response.status, upstream }, 'maas-api error');
+      // maas-api rejected the request itself (e.g. expiry above the tenant maximum): that is a
+      // 400 for the caller, with the upstream reason, not a gateway failure
+      if (response.status === 400 || response.status === 422) {
+        throw new ApplicationError({
+          code: ErrorCode.VALIDATION_ERROR,
+          statusCode: 400,
+          message: `maas-api rejected the request${upstream ? `: ${upstream}` : ''}`,
+          details: {
+            service: 'maas',
+            upstreamStatus: response.status,
+            upstreamMessage: upstream,
+            suggestion: 'Adjust the request (for example the expiration) and retry',
+          },
+        });
+      }
       throw ApplicationError.maasError(
         `maas-api request failed with status ${response.status}`,
         response.status,

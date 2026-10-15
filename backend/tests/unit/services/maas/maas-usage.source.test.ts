@@ -1,11 +1,19 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   MaasUsageSource,
+  PROMETHEUS_BREAKER_COOLDOWN_MS,
   dayWindow,
+  extractMaasSlice,
+  isWithinUsageRetention,
   mergeDayData,
   stripNamespace,
 } from '../../../../src/services/maas/maas-usage.source';
 import { MockPrometheusClient } from '../../../../src/services/maas/prometheus.client';
+import {
+  extractProviderFromModel,
+  setMaasModelIds,
+} from '../../../../src/services/admin-usage/admin-usage.utils';
+import { ApplicationError } from '../../../../src/utils/errors';
 import type { LiteLLMDayData } from '../../../../src/types/admin-usage.types';
 
 const MODELS = [
@@ -39,6 +47,7 @@ function sample(subscription: string, model: string | undefined, value: number) 
 function setup(
   responder: (promql: string, time?: unknown) => ReturnType<typeof sample>[],
   config: Record<string, unknown> = {},
+  models: typeof MODELS = MODELS,
 ) {
   const queries: Array<{ promql: string; time?: unknown }> = [];
   const prometheus = new MockPrometheusClient();
@@ -49,7 +58,7 @@ function setup(
   const fastify: any = {
     dbUtils: {
       queryMany: vi.fn().mockImplementation(async (sql: string) => {
-        if (sql.includes('FROM models')) return MODELS;
+        if (sql.includes('FROM models')) return models;
         return [{ maas_subscription_name: 'litemaas-key-1' }];
       }),
     },
@@ -289,7 +298,10 @@ describe('mergeDayData / stripNamespace', () => {
 
   it('sums providers present on both sides and keeps the others', () => {
     const a = day({});
-    a.breakdown.providers = { maas: { metrics: metrics(1, 10, 1) }, openai: { metrics: metrics(2, 20, 2) } };
+    a.breakdown.providers = {
+      maas: { metrics: metrics(1, 10, 1) },
+      openai: { metrics: metrics(2, 20, 2) },
+    };
     const b = day({});
     b.breakdown.providers = { maas: { metrics: metrics(3, 30, 3) } };
     const merged = mergeDayData(a, b)!;
@@ -345,5 +357,445 @@ describe('mergeDayData / stripNamespace', () => {
   it('strips namespace prefixes', () => {
     expect(stripNamespace('ns/litemaas-key-1')).toBe('litemaas-key-1');
     expect(stripNamespace('litemaas-key-1')).toBe('litemaas-key-1');
+  });
+});
+
+describe('MaasUsageSource Prometheus breaker', () => {
+  const pastDay = new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10);
+  const otherDay = new Date(Date.now() - 4 * 86_400_000).toISOString().slice(0, 10);
+  const outage = () =>
+    ApplicationError.maasError('Failed to reach Prometheus', undefined, 'timeout', true);
+
+  afterEach(() => vi.useRealTimers());
+
+  it('opens after a transport failure: later calls rethrow the same error without reaching Prometheus', async () => {
+    const failure = outage();
+    const { source, prometheus, fastify } = setup(() => {
+      throw failure;
+    });
+    await expect(source.getDayData(pastDay)).rejects.toBe(failure);
+    const attempts = vi.mocked(prometheus.query).mock.calls.length;
+    expect(attempts).toBe(2);
+
+    // another day, a range summary and a per-user query all fail at once
+    await expect(source.getDayData(otherDay)).rejects.toBe(failure);
+    await expect(source.getUsageSummary(['litemaas-key-1'], otherDay, pastDay)).rejects.toBe(
+      failure,
+    );
+    expect(prometheus.query).toHaveBeenCalledTimes(attempts);
+    // opening is announced once, not for every skipped call
+    expect(fastify.log.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('probes Prometheus again once the cooldown is over and closes after a success', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-03-10T12:00:00Z'));
+    let down = true;
+    const { source, queries } = setup(() => {
+      if (down) throw outage();
+      return [sample('litemaas-key-1', 'llama', 5)];
+    });
+
+    await expect(source.getDayData('2026-03-07')).rejects.toBeTruthy();
+    expect(queries).toHaveLength(2);
+
+    vi.setSystemTime(Date.now() + PROMETHEUS_BREAKER_COOLDOWN_MS - 1000);
+    await expect(source.getDayData('2026-03-06')).rejects.toBeTruthy();
+    expect(queries).toHaveLength(2); // still skipped
+
+    vi.setSystemTime(Date.now() + 2000);
+    down = false;
+    expect(await source.getDayData('2026-03-06')).not.toBeNull();
+    expect(queries).toHaveLength(4); // probed and succeeded
+
+    // closed again: the next day goes straight through
+    expect(await source.getDayData('2026-03-05')).not.toBeNull();
+    expect(queries).toHaveLength(6);
+  });
+
+  it('re-opens for another cooldown when the probe fails', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-03-10T12:00:00Z'));
+    const { source, queries } = setup(() => {
+      throw outage();
+    });
+    await expect(source.getDayData('2026-03-07')).rejects.toBeTruthy();
+
+    vi.setSystemTime(Date.now() + PROMETHEUS_BREAKER_COOLDOWN_MS + 1);
+    await expect(source.getDayData('2026-03-06')).rejects.toBeTruthy();
+    expect(queries).toHaveLength(4); // the probe reached Prometheus
+
+    await expect(source.getDayData('2026-03-05')).rejects.toBeTruthy();
+    expect(queries).toHaveLength(4); // and the breaker is open again
+  });
+
+  it.each([
+    ['a plain error (unknown failure)', () => new Error('socket hang up')],
+    ['a 5xx', () => ApplicationError.maasError('Prometheus query failed', 503, 'x', true)],
+    ['a 429', () => ApplicationError.maasError('Prometheus query failed', 429, 'x', true)],
+  ])('opens for %s', async (_label, makeError) => {
+    const { source, prometheus } = setup(() => {
+      throw makeError();
+    });
+    await expect(source.getDayData(pastDay)).rejects.toBeTruthy();
+    await expect(source.getDayData(otherDay)).rejects.toBeTruthy();
+    expect(prometheus.query).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not open for a request error (4xx): the next call is still sent', async () => {
+    const { source, prometheus } = setup(() => {
+      throw ApplicationError.maasError('Prometheus query failed', 422, 'parse error', false);
+    });
+    await expect(source.getDayData(pastDay)).rejects.toBeTruthy();
+    await expect(source.getDayData(otherDay)).rejects.toBeTruthy();
+    expect(prometheus.query).toHaveBeenCalledTimes(4);
+  });
+
+  it('keeps serving results that are already cached while it is open', async () => {
+    let fail = false;
+    const { source, prometheus } = setup(() => {
+      if (fail) throw outage();
+      return [sample('litemaas-key-1', 'llama', 7)];
+    });
+    expect(await source.getDayData(pastDay)).not.toBeNull();
+    fail = true;
+    await expect(source.getDayData(otherDay)).rejects.toBeTruthy(); // opens the breaker
+    const calls = vi.mocked(prometheus.query).mock.calls.length;
+
+    expect(await source.getDayData(pastDay)).not.toBeNull(); // served from the row cache
+    expect(prometheus.query).toHaveBeenCalledTimes(calls);
+  });
+
+  it('is closed by clearCache(): an explicit refresh asks Prometheus again right away', async () => {
+    const { source, prometheus } = setup(() => {
+      throw outage();
+    });
+    await expect(source.getDayData(pastDay)).rejects.toBeTruthy();
+    await expect(source.getDayData(otherDay)).rejects.toBeTruthy();
+    expect(prometheus.query).toHaveBeenCalledTimes(2);
+
+    source.clearCache();
+    await expect(source.getDayData(otherDay)).rejects.toBeTruthy();
+    expect(prometheus.query).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not count future days (no query) as a failure or a probe', async () => {
+    const { source, prometheus } = setup(() => []);
+    const future = new Date(Date.now() + 5 * 86_400_000).toISOString().slice(0, 10);
+    expect(await source.getDayData(future)).toBeNull();
+    expect(prometheus.query).not.toHaveBeenCalled();
+  });
+});
+
+describe('MaasUsageSource.queryDayRows cache and midnight UTC', () => {
+  const rowsFor = (tokens: () => number) => (promql: string) =>
+    promql.includes('authorized_hits')
+      ? [sample('litemaas-key-a', 'llama', tokens())]
+      : [sample('litemaas-key-a', 'llama', 5)];
+
+  it('does not reuse a partial-window result once the day is complete', async () => {
+    let tokens = 1000;
+    const { source, queries } = setup(rowsFor(() => tokens));
+    const day = '2025-03-10';
+
+    // 23:58Z: the window is still partial
+    const before = await source.queryDayRows(day, undefined, new Date('2025-03-10T23:58:00Z'));
+    expect(before[0].tokens).toBe(1000);
+    expect(queries).toHaveLength(2);
+
+    // 500 more tokens were produced before midnight; at 00:02Z the day is complete and its
+    // result must be re-queried (the cache entry is only 4 minutes old)
+    tokens = 1500;
+    const after = await source.queryDayRows(day, undefined, new Date('2025-03-11T00:02:00Z'));
+    expect(after[0].tokens).toBe(1500);
+    expect(queries).toHaveLength(4);
+
+    // the complete result is cached normally
+    tokens = 9999;
+    const again = await source.queryDayRows(day, undefined, new Date('2025-03-11T00:03:00Z'));
+    expect(again[0].tokens).toBe(1500);
+    expect(queries).toHaveLength(4);
+  });
+
+  it('still reuses a partial result while the day is running (short TTL)', async () => {
+    const { source, queries } = setup(rowsFor(() => 1000));
+    const day = '2025-03-10';
+    await source.queryDayRows(day, undefined, new Date('2025-03-10T12:00:00Z'));
+    await source.queryDayRows(day, undefined, new Date('2025-03-10T12:03:00Z'));
+    expect(queries).toHaveLength(2);
+    // ... but only for the TTL
+    await source.queryDayRows(day, undefined, new Date('2025-03-10T12:06:00Z'));
+    expect(queries).toHaveLength(4);
+  });
+});
+
+describe('MaasUsageSource model resolution', () => {
+  const model = (ns: string, ref: string, served: string = ref, price = '0.000001') => ({
+    id: `${ns}/${ref}`,
+    name: ref,
+    backend_model_name: served,
+    maas_model_ref_name: ref,
+    maas_model_ref_namespace: ns,
+    input_cost_per_token: price,
+    output_cost_per_token: price,
+  });
+  const pastDay = new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10);
+
+  it('loads the models in a deterministic order', async () => {
+    const { source, fastify } = setup(() => []);
+    await source.syncModelProviders();
+    const sql = vi
+      .mocked(fastify.dbUtils.queryMany)
+      .mock.calls.map((c: unknown[]) => String(c[0]))
+      .find((q: string) => q.includes('FROM models'));
+    expect(sql).toMatch(/ORDER BY id\s*$/);
+  });
+
+  it('leaves a label claimed by several models unresolved, whatever the row order', () => {
+    const a = model('team-a', 'granite');
+    const b = model('team-b', 'granite', 'granite', '0.00001');
+    for (const order of [
+      [a, b],
+      [b, a],
+    ]) {
+      const onAmbiguous = vi.fn();
+      const resolve = MaasUsageSource.buildResolver(order, onAmbiguous);
+
+      expect(resolve('granite')).toEqual({ id: 'granite', unitPrice: 0, resolved: false });
+      // the namespace-less fallback must not pick one either
+      expect(resolve('other-ns/granite').resolved).toBe(false);
+      // unambiguous names keep working
+      expect(resolve('team-a/granite')).toMatchObject({ id: 'team-a/granite', resolved: true });
+      expect(resolve('TEAM-B/granite')).toMatchObject({ id: 'team-b/granite', resolved: true });
+      expect(onAmbiguous).toHaveBeenCalledTimes(1);
+      expect(onAmbiguous).toHaveBeenCalledWith('granite', ['team-a/granite', 'team-b/granite']);
+    }
+  });
+
+  it('treats two models that share a served name as ambiguous only for that name', () => {
+    const a = model('ns', 'llama-a', 'shared');
+    const b = model('ns', 'llama-b', 'shared');
+    const onAmbiguous = vi.fn();
+    const resolve = MaasUsageSource.buildResolver([b, a], onAmbiguous);
+    expect(resolve('shared').resolved).toBe(false);
+    expect(resolve('llama-a')).toMatchObject({ id: 'ns/llama-a', resolved: true });
+    expect(resolve('llama-b')).toMatchObject({ id: 'ns/llama-b', resolved: true });
+    expect(onAmbiguous).toHaveBeenCalledWith('shared', ['ns/llama-a', 'ns/llama-b']);
+  });
+
+  it('does not resolve an ambiguous namespaced label through its namespace-less tail', () => {
+    // two models serve the same "org/shared" name; a third model is called "shared"
+    const a = model('ns', 'one', 'org/shared');
+    const b = model('ns', 'two', 'org/shared');
+    const tail = model('ns', 'shared');
+    const resolve = MaasUsageSource.buildResolver([tail, b, a]);
+
+    expect(resolve('org/shared')).toEqual({ id: 'org/shared', unitPrice: 0, resolved: false });
+    // the unrelated lookup of the tail itself still works
+    expect(resolve('shared').id).toBe('ns/shared');
+    // and a namespaced label that is not claimed at all still falls back to its tail
+    expect(resolve('other/shared').id).toBe('ns/shared');
+  });
+
+  it('lets a stronger match win over a looser one without calling it ambiguous', () => {
+    const byRef = model('ns', 'foo');
+    const byServedName = model('ns', 'bar', 'foo');
+    const onAmbiguous = vi.fn();
+    const resolve = MaasUsageSource.buildResolver([byServedName, byRef], onAmbiguous);
+    expect(resolve('foo').id).toBe('ns/foo');
+    expect(onAmbiguous).not.toHaveBeenCalled();
+  });
+
+  it('prices usage of an ambiguous label at 0 and warns once, not on every model reload', async () => {
+    const models = [model('team-a', 'granite'), model('team-b', 'granite', 'granite', '0.00001')];
+    const { source, fastify } = setup(
+      (promql) =>
+        promql.includes('authorized_hits')
+          ? [sample('litemaas-key-1', 'granite', 1000)]
+          : [sample('litemaas-key-1', 'granite', 2)],
+      {},
+      models,
+    );
+
+    const day = (await source.getDayData(pastDay))!;
+    expect(day.breakdown.models['granite'].metrics).toMatchObject({ total_tokens: 1000, spend: 0 });
+
+    // the model cache is rebuilt (admin refresh): the same ambiguity must not warn again
+    source.clearCache();
+    await source.getDayData(pastDay);
+    const ambiguityWarnings = vi
+      .mocked(fastify.log.warn)
+      .mock.calls.filter((c: unknown[]) => String(c[1]).includes('several MaaS models'));
+    expect(ambiguityWarnings).toHaveLength(1);
+    expect(ambiguityWarnings[0][0]).toMatchObject({
+      label: 'granite',
+      modelIds: ['team-a/granite', 'team-b/granite'],
+    });
+  });
+});
+
+describe('MaasUsageSource range truncation', () => {
+  it('warns when a range is cut to the most recent 120 days', async () => {
+    const { source, fastify, queries } = setup(() => []);
+    const start = '2024-01-01';
+    const end = '2025-03-01';
+    expect(MaasUsageSource.countDays(start, end)).toBe(426);
+
+    await source.getUsageSummary(['litemaas-key-1'], start, end);
+
+    expect(fastify.log.warn).toHaveBeenCalledTimes(1);
+    expect(fastify.log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        startDate: start,
+        endDate: end,
+        requestedDays: 426,
+        maxDays: 120,
+        effectiveStartDate: '2024-11-02',
+      }),
+      expect.stringContaining('truncated to the most recent 120 days'),
+    );
+    expect(queries.length).toBe(2 * 120); // only the retained days were queried
+  });
+
+  it('does not warn for a range within the cap', async () => {
+    const { source, fastify } = setup(() => []);
+    await source.getUsageSummary(['litemaas-key-1'], '2025-02-01', '2025-03-01');
+    expect(fastify.log.warn).not.toHaveBeenCalled();
+    expect(MaasUsageSource.countDays('2025-03-02', '2025-03-01')).toBe(0);
+  });
+});
+
+describe('isWithinUsageRetention', () => {
+  const now = new Date('2025-03-10T12:00:00Z');
+
+  it('requires the whole day window to be inside the retention', () => {
+    // 15 days back from 2025-03-10T12:00Z is 2025-02-23T12:00Z
+    expect(isWithinUsageRetention('2025-03-10', 15, now)).toBe(true);
+    expect(isWithinUsageRetention('2025-02-24', 15, now)).toBe(true);
+    expect(isWithinUsageRetention('2025-02-23', 15, now)).toBe(false); // starts before the cutoff
+    expect(isWithinUsageRetention('2024-12-01', 15, now)).toBe(false);
+    expect(isWithinUsageRetention('2024-12-01', 365, now)).toBe(true);
+  });
+
+  it('does not exclude a date it cannot parse', () => {
+    expect(isWithinUsageRetention('garbage', 15, now)).toBe(true);
+  });
+});
+
+describe('extractMaasSlice', () => {
+  const pastDay = new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10);
+  const metrics = (r: number, t: number, s: number) => ({
+    api_requests: r,
+    total_tokens: t,
+    prompt_tokens: t,
+    completion_tokens: 0,
+    spend: s,
+  });
+
+  async function maasDay() {
+    const { source } = setup((promql) =>
+      promql.includes('authorized_hits')
+        ? [
+            sample('litemaas-key-a', 'llama', 1000),
+            sample('litemaas-key-b', 'llama', 500),
+            sample('litemaas-key-a', 'granite-served', 200),
+          ]
+        : [
+            sample('litemaas-key-a', 'llama', 10),
+            sample('litemaas-key-b', 'llama', 5),
+            sample('litemaas-key-a', 'granite-served', 2),
+          ],
+    );
+    return (await source.getDayData(pastDay))!;
+  }
+
+  it('is the exact inverse of getDayData for a MaaS-only day (also after the JSON cache round trip)', async () => {
+    const day = await maasDay();
+    expect(extractMaasSlice(day)).toEqual(day);
+    expect(extractMaasSlice(JSON.parse(JSON.stringify(day)))).toEqual(day);
+  });
+
+  it('keeps only the maas: entries of a merged day and re-derives every total from them', async () => {
+    const maas = await maasDay();
+    const litellm: LiteLLMDayData = {
+      date: pastDay,
+      metrics: {
+        ...metrics(7, 70, 3),
+        prompt_tokens: 40,
+        completion_tokens: 30,
+        successful_requests: 6,
+        failed_requests: 1,
+      },
+      breakdown: {
+        models: {
+          'gpt-4': {
+            metrics: metrics(3, 30, 1),
+            api_keys: { 'sha-1': { metrics: metrics(3, 30, 1) } },
+          },
+          // same model name as a MaaS model: the entry mixes both backends
+          'ns/llama': {
+            metrics: metrics(4, 40, 2),
+            api_keys: { 'sha-2': { metrics: metrics(4, 40, 2) } },
+          },
+        },
+        api_keys: {},
+        providers: { openai: { metrics: metrics(7, 70, 3) } },
+      },
+    };
+    const merged = mergeDayData(litellm, maas)!;
+    expect(merged.breakdown.models['ns/llama'].metrics.api_requests).toBe(4 + 15);
+
+    const slice = extractMaasSlice(merged)!;
+
+    expect(slice).toEqual(maas);
+    expect(Object.keys(slice.breakdown.models['ns/llama'].api_keys).sort()).toEqual([
+      'maas:litemaas-key-a',
+      'maas:litemaas-key-b',
+    ]);
+    expect(slice.breakdown.providers).toEqual({ maas: expect.anything() });
+    expect(slice.breakdown.providers.openai).toBeUndefined();
+    // carrying it forward onto fresh LiteLLM data reproduces the original merged day
+    expect(mergeDayData(litellm, slice)!.metrics).toEqual(merged.metrics);
+  });
+
+  it('returns null when the day holds no MaaS usage or there is nothing to read', async () => {
+    const litellm: LiteLLMDayData = {
+      date: pastDay,
+      metrics: { ...metrics(3, 30, 1), successful_requests: 3, failed_requests: 0 },
+      breakdown: {
+        models: {
+          'gpt-4': {
+            metrics: metrics(3, 30, 1),
+            api_keys: { 'sha-1': { metrics: metrics(3, 30, 1) } },
+          },
+        },
+        api_keys: {},
+        providers: {},
+      },
+    };
+    expect(extractMaasSlice(litellm)).toBeNull();
+    expect(extractMaasSlice(null)).toBeNull();
+    expect(extractMaasSlice(undefined)).toBeNull();
+    expect(extractMaasSlice({} as LiteLLMDayData)).toBeNull();
+  });
+});
+
+describe('MaasUsageSource.syncModelProviders', () => {
+  // the registry is process-wide: earlier tests in this file load models too
+  beforeEach(() => setMaasModelIds([]));
+  afterEach(() => setMaasModelIds([]));
+
+  it('registers the MaaS model ids so admin usage reports them under the maas provider', async () => {
+    const { source } = setup(() => []);
+    // without the registration the namespace of the id reads as a provider
+    expect(extractProviderFromModel('ns/llama')).toBe('ns');
+
+    await source.syncModelProviders();
+
+    expect(extractProviderFromModel('ns/llama')).toBe('maas');
+    expect(extractProviderFromModel('ns/granite')).toBe('maas');
+    // LiteLLM names are untouched
+    expect(extractProviderFromModel('openai/gpt-4')).toBe('openai');
+    expect(extractProviderFromModel('gpt-4')).toBe('openai');
   });
 });

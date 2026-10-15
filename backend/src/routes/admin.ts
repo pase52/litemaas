@@ -238,12 +238,13 @@ const adminRoutes: FastifyPluginAsync = async (fastify) => {
           };
         }
 
-        // Fetch API keys for specified users
+        // Fetch API keys for specified users. The usage data is keyed by the LiteLLM alias, or by
+        // the subscription name for MaaS keys (they have no alias), so that is the filter id
         const apiKeys = await fastify.dbUtils.queryMany(
           `SELECT
             ak.id,
             ak.name,
-            ak.litellm_key_alias as "keyAlias",
+            COALESCE(ak.litellm_key_alias, ak.maas_subscription_name) as "keyAlias",
             ak.user_id as "userId",
             u.username,
             u.email

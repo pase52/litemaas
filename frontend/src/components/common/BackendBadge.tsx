@@ -23,15 +23,19 @@ export const BackendBadge: React.FC<BackendBadgeProps> = ({
 }) => {
   const { t } = useTranslation();
   if (backendType === 'maas') {
+    // An aria-label is not allowed on the label's plain <span> (axe: aria-prohibited-attr), so the
+    // short name stays visible and screen readers get the full description as hidden text instead.
     return (
       <Label
         color="purple"
         variant="outline"
         isCompact={isCompact}
         data-testid="backend-badge-maas"
-        aria-label={t('maas.backend.maasAria', 'Served through Red Hat OpenShift AI MaaS')}
       >
-        {t('maas.backend.maas', 'MaaS')}
+        <span aria-hidden="true">{t('maas.backend.maas', 'MaaS')}</span>
+        <span className="pf-v6-screen-reader">
+          {t('maas.backend.maasAria', 'Served through Red Hat OpenShift AI MaaS')}
+        </span>
       </Label>
     );
   }

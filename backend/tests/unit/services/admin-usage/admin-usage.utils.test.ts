@@ -1,11 +1,14 @@
 // backend/tests/unit/services/admin-usage/admin-usage.utils.test.ts
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
   calculateComparisonPeriod,
   parseDateAsUTC,
   isTodayUTC,
   isHistoricalDate,
+  extractProviderFromModel,
+  setMaasModelIds,
+  MAAS_PROVIDER,
   formatLargeNumber,
   formatCurrency,
   formatPercentage,
@@ -308,6 +311,44 @@ describe('admin-usage.utils', () => {
 
     it('should return true for far past dates', () => {
       expect(isHistoricalDate(new Date('2020-01-01'))).toBe(true);
+    });
+  });
+  // ============================================================================
+  // Provider attribution of MaaS model ids
+  // ============================================================================
+
+  describe('extractProviderFromModel with MaaS model ids', () => {
+    afterEach(() => setMaasModelIds([]));
+
+    it('is the plain LiteLLM rule while no MaaS model is registered (MaaS off)', () => {
+      expect(extractProviderFromModel('models-ns/llama')).toBe('models-ns');
+      expect(extractProviderFromModel('openai/gpt-4')).toBe('openai');
+      expect(extractProviderFromModel('gpt-4')).toBe('openai');
+      expect(extractProviderFromModel('claude-3')).toBe('anthropic');
+      expect(extractProviderFromModel('gemini-pro')).toBe('google');
+      expect(extractProviderFromModel('mystery')).toBe('unknown');
+    });
+
+    it('reports registered MaaS model ids under the maas provider and nothing else', () => {
+      setMaasModelIds(['models-ns/llama', 'other-ns/granite']);
+
+      expect(MAAS_PROVIDER).toBe('maas');
+      expect(extractProviderFromModel('models-ns/llama')).toBe('maas');
+      expect(extractProviderFromModel('other-ns/granite')).toBe('maas');
+      // LiteLLM names and unregistered ids keep following the LiteLLM rule
+      expect(extractProviderFromModel('openai/gpt-4')).toBe('openai');
+      expect(extractProviderFromModel('models-ns/unregistered')).toBe('models-ns');
+      expect(extractProviderFromModel('gpt-4')).toBe('openai');
+    });
+
+    it('replaces the registered set on every call and can be emptied again', () => {
+      setMaasModelIds(['models-ns/llama']);
+      setMaasModelIds(['other-ns/granite']);
+      expect(extractProviderFromModel('models-ns/llama')).toBe('models-ns');
+      expect(extractProviderFromModel('other-ns/granite')).toBe('maas');
+
+      setMaasModelIds([]);
+      expect(extractProviderFromModel('other-ns/granite')).toBe('other-ns');
     });
   });
 });

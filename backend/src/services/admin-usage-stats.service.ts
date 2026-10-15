@@ -6,6 +6,8 @@ import { format, eachDayOfInterval, parseISO } from 'date-fns';
 import {
   AdminUsageFilters,
   Analytics,
+  EnrichedDayData,
+  LiteLLMDayData,
   UserBreakdown,
   ModelBreakdown,
   ProviderBreakdown,
@@ -28,6 +30,7 @@ import {
   calculateComparisonPeriod,
   validateDateRange as validateDateRangeUtil,
 } from './admin-usage/admin-usage.utils.js';
+import { extractMaasSlice } from './maas/maas-usage.source.js';
 
 /**
  * AdminUsageStatsService
@@ -94,10 +97,7 @@ export class AdminUsageStatsService extends BaseService {
       this.validateDateRange(filters.startDate, filters.endDate);
 
       // 1. Collect and aggregate current period data
-      const dailyData = await this.aggregationService.collectDateRangeData(
-        filters.startDate,
-        filters.endDate,
-      );
+      const dailyData = await this.collectDailyData(filters.startDate, filters.endDate);
 
       if (dailyData.length === 0) {
         this.fastify.log.warn({ filters }, 'No data found for date range');
@@ -265,10 +265,7 @@ export class AdminUsageStatsService extends BaseService {
   private async getUserBreakdownInternal(filters: AdminUsageFilters): Promise<UserBreakdown[]> {
     this.validateDateRange(filters.startDate, filters.endDate);
 
-    const dailyData = await this.aggregationService.collectDateRangeData(
-      filters.startDate,
-      filters.endDate,
-    );
+    const dailyData = await this.collectDailyData(filters.startDate, filters.endDate);
 
     if (dailyData.length === 0) {
       return [];
@@ -358,10 +355,7 @@ export class AdminUsageStatsService extends BaseService {
   private async getModelBreakdownInternal(filters: AdminUsageFilters): Promise<ModelBreakdown[]> {
     this.validateDateRange(filters.startDate, filters.endDate);
 
-    const dailyData = await this.aggregationService.collectDateRangeData(
-      filters.startDate,
-      filters.endDate,
-    );
+    const dailyData = await this.collectDailyData(filters.startDate, filters.endDate);
 
     if (dailyData.length === 0) {
       return [];
@@ -457,10 +451,7 @@ export class AdminUsageStatsService extends BaseService {
   ): Promise<ProviderBreakdown[]> {
     this.validateDateRange(filters.startDate, filters.endDate);
 
-    const dailyData = await this.aggregationService.collectDateRangeData(
-      filters.startDate,
-      filters.endDate,
-    );
+    const dailyData = await this.collectDailyData(filters.startDate, filters.endDate);
 
     if (dailyData.length === 0) {
       return [];
@@ -545,9 +536,7 @@ export class AdminUsageStatsService extends BaseService {
       // Without this, getDailyActivity() would return stale cached data
       // even when the database cache is invalidated
       this.liteLLMService.clearActivityCache();
-      if (this.fastify.maasClients && this.fastify.backends?.has('maas')) {
-        (this.fastify.backends.get('maas').usage as { clearCache?: () => void }).clearCache?.();
-      }
+      this.clearMaasUsageCache();
 
       // Then invalidate database cache
       if (this.cacheManager) {
@@ -567,6 +556,12 @@ export class AdminUsageStatsService extends BaseService {
   /**
    * Re-sync usage data for a date range by deleting cached data and re-importing from LiteLLM.
    * Processes day-by-day sequentially to avoid overloading the system.
+   *
+   * MaaS usage only lives in Prometheus / Thanos for a limited time (MAAS_USAGE_RETENTION_DAYS)
+   * and a query for an older day returns an empty vector, not an error. The cached rows are
+   * therefore the only long-term copy of it: the MaaS slice of every cached day is read BEFORE
+   * the rows are deleted and carried forward into the re-imported day whenever Prometheus cannot
+   * provide it (older than the retention, so not even asked; empty result; failure).
    */
   async resyncDateRange(
     startDate: string,
@@ -587,6 +582,12 @@ export class AdminUsageStatsService extends BaseService {
       );
 
       this.liteLLMService.clearActivityCache();
+      this.clearMaasUsageCache();
+
+      // Before anything is deleted: a failure here aborts the resync with the cache untouched
+      const previousMaas = await this.readCachedMaasSlices(
+        days.map((day) => format(day, 'yyyy-MM-dd')),
+      );
 
       if (this.cacheManager) {
         const deleted = await this.cacheManager.deleteDateRange(startDate, endDate);
@@ -597,7 +598,9 @@ export class AdminUsageStatsService extends BaseService {
       for (const day of days) {
         const dateString = format(day, 'yyyy-MM-dd');
         try {
-          await this.aggregationService.refreshSingleDay(dateString);
+          await this.aggregationService.refreshSingleDay(dateString, {
+            previousMaas: previousMaas.get(dateString) ?? null,
+          });
           daysProcessed++;
           this.fastify.log.info(
             { dateString, progress: `${daysProcessed}/${daysTotal}` },
@@ -640,6 +643,7 @@ export class AdminUsageStatsService extends BaseService {
     try {
       this.validateDateRange(filters.startDate, filters.endDate);
 
+      await this.syncMaasProviders();
       return await this.aggregationService.getFilterOptions(filters.startDate, filters.endDate);
     } catch (error) {
       this.fastify.log.error(error, 'Failed to get filter options from usage data');
@@ -681,6 +685,66 @@ export class AdminUsageStatsService extends BaseService {
   // Private Helper Methods
   // ==========================================
 
+  /** True when MaaS usage is merged into the analytics */
+  private isMaasUsageEnabled(): boolean {
+    return !!this.fastify.maasClients && !!this.fastify.backends?.has('maas');
+  }
+
+  /** Drop the in-memory Prometheus results (and close its breaker) of the MaaS usage source */
+  private clearMaasUsageCache(): void {
+    if (this.isMaasUsageEnabled()) {
+      (this.fastify.backends.get('maas').usage as { clearCache?: () => void }).clearCache?.();
+    }
+  }
+
+  /**
+   * Load the MaaS models so the aggregation reports their usage under the `maas` provider
+   * instead of under the `<namespace>` prefix of their id. Best-effort: on failure the providers
+   * simply fall back to that prefix.
+   */
+  private async syncMaasProviders(): Promise<void> {
+    if (!this.isMaasUsageEnabled()) return;
+    try {
+      await (
+        this.fastify.backends.get('maas').usage as { syncModelProviders?: () => Promise<void> }
+      ).syncModelProviders?.();
+    } catch (error) {
+      this.fastify.log.warn(
+        { error: error instanceof Error ? error.message : error },
+        'Failed to load MaaS models for provider attribution',
+      );
+    }
+  }
+
+  /** Collect the daily data of a range (cache first) once the MaaS provider names are known */
+  private async collectDailyData(startDate: string, endDate: string): Promise<EnrichedDayData[]> {
+    await this.syncMaasProviders();
+    return this.aggregationService.collectDateRangeData(startDate, endDate);
+  }
+
+  /**
+   * MaaS slice (see extractMaasSlice) of the cached rows of the given days, keyed by date. Reads
+   * the stored row whatever its freshness: an incomplete row still holds the last MaaS usage
+   * that was seen for the day. Empty unless MaaS usage is enabled and a cache is in use.
+   */
+  private async readCachedMaasSlices(dates: string[]): Promise<Map<string, LiteLLMDayData>> {
+    const slices = new Map<string, LiteLLMDayData>();
+    if (!this.cacheManager || !this.isMaasUsageEnabled()) return slices;
+
+    for (const date of dates) {
+      // `sources ? 'maas'`: only days that were merged with MaaS usage carry the flag, so the
+      // (large) raw_data of the others is never transferred
+      const result = await this.executeQuery<{ rows: Array<{ raw_data: LiteLLMDayData | null }> }>(
+        `SELECT raw_data FROM daily_usage_cache WHERE date = $1 AND raw_data -> 'sources' ? 'maas'`,
+        [date],
+        'reading cached MaaS usage',
+      );
+      const slice = extractMaasSlice(result.rows[0]?.raw_data);
+      if (slice) slices.set(date, slice);
+    }
+    return slices;
+  }
+
   /**
    * Validate date range
    *
@@ -719,7 +783,7 @@ export class AdminUsageStatsService extends BaseService {
         filters.endDate,
       );
 
-      const comparisonDailyData = await this.aggregationService.collectDateRangeData(
+      const comparisonDailyData = await this.collectDailyData(
         comparisonStartDate,
         comparisonEndDate,
       );

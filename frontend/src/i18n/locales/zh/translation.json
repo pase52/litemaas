@@ -2142,6 +2142,8 @@
     "keys": {
       "backendHelp": "一个密钥只能用于同一后端的模型。请先选择后端,再选择其模型。",
       "backendLabel": "密钥后端",
+      "expiryNotLater": "新的过期时间不能晚于当前过期时间 ({{date}})。",
+      "expiryShortenOnly": "MaaS API密钥的过期时间只能缩短。",
       "graceBannerItem": "密钥“{{key}}”:{{models}} 在 {{date}} 之前仍可通过 LiteLLM 使用。请在此之前为这些模型创建 MaaS 密钥。",
       "graceBannerTitle": "您的部分密钥使用了正在迁移到 MaaS 的模型",
       "noSubscribedMaasModels": "您没有任何 MaaS 模型的有效订阅。",

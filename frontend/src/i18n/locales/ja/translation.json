@@ -2142,6 +2142,8 @@
     "keys": {
       "backendHelp": "キーは 1 つのバックエンドのモデルでのみ使用できます。先にバックエンドを選択し、そのモデルを選んでください。",
       "backendLabel": "キーのバックエンド",
+      "expiryNotLater": "新しい有効期限は現在の有効期限 ({{date}}) より後にはできません。",
+      "expiryShortenOnly": "MaaS APIキーの有効期限は短縮のみ可能です。",
       "graceBannerItem": "キー「{{key}}」: {{models}} は {{date}} まで LiteLLM で利用できます。それまでにこれらのモデル用の MaaS キーを作成してください。",
       "graceBannerTitle": "一部のキーは MaaS へ移行中のモデルを使用しています",
       "noSubscribedMaasModels": "MaaS モデルの有効なサブスクリプションがありません。",

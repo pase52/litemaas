@@ -3,8 +3,11 @@ import {
   getMigrationGraceUntil,
   getModelBaseUrl,
   getServedModelName,
+  isAfterMaasExpiry,
   isMaasModel,
   isMaasReauthError,
+  toLocalDay,
+  toUtcDay,
 } from '../../utils/modelBackend';
 
 describe('modelBackend utils', () => {
@@ -114,6 +117,55 @@ describe('modelBackend utils', () => {
           'https://litellm',
         ),
       ).toBe('https://litellm');
+    });
+  });
+
+  describe('toUtcDay', () => {
+    it('returns the UTC calendar day of an ISO string, a timestamp or a date', () => {
+      expect(toUtcDay('2030-06-15T23:30:00.000Z')).toBe('2030-06-15');
+      expect(toUtcDay(Date.UTC(2030, 5, 15, 0, 0, 1))).toBe('2030-06-15');
+      expect(toUtcDay(new Date('2030-06-16T00:00:00.000Z'))).toBe('2030-06-16');
+    });
+  });
+
+  describe('toLocalDay', () => {
+    it('returns the day the date picker shows, from the local date components', () => {
+      // The DatePicker parses "2030-06-05" as local midnight
+      expect(toLocalDay(new Date('2030-06-05T00:00:00'))).toBe('2030-06-05');
+      expect(toLocalDay(new Date(2030, 0, 9, 23, 59))).toBe('2030-01-09');
+    });
+  });
+
+  describe('isAfterMaasExpiry', () => {
+    const expiry = '2030-06-15T13:45:00.000Z';
+
+    it('is true for a day after the current expiry', () => {
+      expect(isAfterMaasExpiry('2030-06-16', expiry)).toBe(true);
+      expect(isAfterMaasExpiry('2031-01-01', expiry)).toBe(true);
+    });
+
+    it('is false for the same day or an earlier one (the backend treats the same day as a no-op)', () => {
+      expect(isAfterMaasExpiry('2030-06-15', expiry)).toBe(false);
+      expect(isAfterMaasExpiry('2030-06-14', expiry)).toBe(false);
+      expect(isAfterMaasExpiry('2029-12-31', expiry)).toBe(false);
+    });
+
+    it('compares by UTC calendar day, as the backend does', () => {
+      // 23:30 UTC on the 15th is still the 15th, whatever the browser time zone is
+      expect(isAfterMaasExpiry('2030-06-15', '2030-06-15T23:30:00.000Z')).toBe(false);
+      expect(isAfterMaasExpiry('2030-06-16', '2030-06-15T23:30:00.000Z')).toBe(true);
+    });
+
+    it('accepts any day for a key that never expires', () => {
+      expect(isAfterMaasExpiry('2099-01-01', undefined)).toBe(false);
+      expect(isAfterMaasExpiry('2099-01-01', null)).toBe(false);
+    });
+
+    it('does not judge a value that is not a complete YYYY-MM-DD day', () => {
+      expect(isAfterMaasExpiry('', expiry)).toBe(false);
+      expect(isAfterMaasExpiry('2031-1-1', expiry)).toBe(false);
+      expect(isAfterMaasExpiry('2031-01', expiry)).toBe(false);
+      expect(isAfterMaasExpiry('not a date', expiry)).toBe(false);
     });
   });
 });

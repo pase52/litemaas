@@ -359,39 +359,108 @@ export class K8sForeignObjectError extends Error {
 }
 
 /**
- * Create the object if absent, otherwise replace it (carrying over resourceVersion).
+ * True when every field of `desired` is present in `current` with an equal value: objects
+ * recursively, arrays element-wise with equal length, primitives strictly. Keys only present in
+ * `current` (server-added defaults, status, managed fields) are ignored, and key order never
+ * matters: the API server re-serialises objects with sorted keys, so a plain JSON comparison of
+ * what we built against what we read back would never match.
+ */
+export function isSubsetDeepEqual(desired: unknown, current: unknown): boolean {
+  if (Array.isArray(desired)) {
+    if (!Array.isArray(current) || current.length !== desired.length) return false;
+    return desired.every((d, i) => isSubsetDeepEqual(d, current[i]));
+  }
+  if (desired !== null && typeof desired === 'object') {
+    if (current === null || typeof current !== 'object' || Array.isArray(current)) return false;
+    const cur = current as Record<string, unknown>;
+    return Object.entries(desired as Record<string, unknown>).every(
+      ([k, v]) => v === undefined || isSubsetDeepEqual(v, cur[k]),
+    );
+  }
+  return desired === current;
+}
+
+/** True when the managed parts of `desired` (spec, labels, annotations) already hold on `current` */
+export function k8sObjectMatches(desired: K8sObject, current: K8sObject): boolean {
+  return (
+    isSubsetDeepEqual(desired.spec ?? {}, current.spec ?? {}) &&
+    isSubsetDeepEqual(desired.metadata.labels ?? {}, current.metadata.labels ?? {}) &&
+    isSubsetDeepEqual(desired.metadata.annotations ?? {}, current.metadata.annotations ?? {})
+  );
+}
+
+export interface ApplyK8sResult<T extends K8sObject = K8sObject> {
+  object: T;
+  action: 'created' | 'replaced' | 'unchanged';
+}
+
+/**
+ * Create the object if absent, otherwise replace it. The replacement keeps everything on the
+ * existing object that LiteMaaS does not manage (uid, finalizers, ownerReferences, other labels
+ * and annotations, status) and only overrides spec, our labels and our annotations.
+ * With `skipIfUnchanged` an object that already matches is not written at all (no spurious
+ * resourceVersion churn, and the reconciler can report a converged cluster).
  * Retries once when a concurrent writer wins the create/replace race.
  *
  * `ownershipGuard` is called with the existing object; a returned string refuses the overwrite
  * (K8sForeignObjectError) so objects LiteMaaS does not manage are never taken over.
  */
+export async function applyK8sObject<T extends K8sObject = K8sObject>(
+  client: IK8sClient,
+  ref: K8sResourceRef,
+  object: K8sObject,
+  namespace?: string,
+  ownershipGuard?: (existing: K8sObject) => string | null,
+  options: { skipIfUnchanged?: boolean } = {},
+): Promise<ApplyK8sResult<T>> {
+  const ns = namespace ?? object.metadata.namespace;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const existing = await client.get<T>(ref, object.metadata.name, ns);
+      if (!existing) {
+        return { object: await client.create<T>(ref, object, ns), action: 'created' };
+      }
+      const refusal = ownershipGuard?.(existing);
+      if (refusal)
+        throw new K8sForeignObjectError(object.kind ?? 'object', object.metadata.name, refusal);
+      if (options.skipIfUnchanged && k8sObjectMatches(object, existing)) {
+        return { object: existing, action: 'unchanged' };
+      }
+      const next: K8sObject = {
+        ...existing,
+        ...object,
+        metadata: {
+          ...existing.metadata,
+          ...object.metadata,
+          labels: { ...(existing.metadata.labels ?? {}), ...(object.metadata.labels ?? {}) },
+          annotations: {
+            ...(existing.metadata.annotations ?? {}),
+            ...(object.metadata.annotations ?? {}),
+          },
+          resourceVersion: existing.metadata.resourceVersion,
+        },
+      };
+      return {
+        object: await client.replace<T>(ref, object.metadata.name, next, ns),
+        action: 'replaced',
+      };
+    } catch (error) {
+      if (attempt === 0 && error instanceof K8sApiError && error.isConflict) continue;
+      throw error;
+    }
+  }
+}
+
+/** {@link applyK8sObject} returning only the resulting object */
 export async function upsertK8sObject<T extends K8sObject = K8sObject>(
   client: IK8sClient,
   ref: K8sResourceRef,
   object: K8sObject,
   namespace?: string,
   ownershipGuard?: (existing: K8sObject) => string | null,
+  options: { skipIfUnchanged?: boolean } = {},
 ): Promise<T> {
-  const ns = namespace ?? object.metadata.namespace;
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const existing = await client.get(ref, object.metadata.name, ns);
-      if (!existing) {
-        return await client.create<T>(ref, object, ns);
-      }
-      const refusal = ownershipGuard?.(existing);
-      if (refusal)
-        throw new K8sForeignObjectError(object.kind ?? 'object', object.metadata.name, refusal);
-      const next: K8sObject = {
-        ...object,
-        metadata: { ...object.metadata, resourceVersion: existing.metadata.resourceVersion },
-      };
-      return await client.replace<T>(ref, object.metadata.name, next, ns);
-    } catch (error) {
-      if (attempt === 0 && error instanceof K8sApiError && error.isConflict) continue;
-      throw error;
-    }
-  }
+  return (await applyK8sObject<T>(client, ref, object, namespace, ownershipGuard, options)).object;
 }
 
 // ---------------------------------------------------------------------------------------------

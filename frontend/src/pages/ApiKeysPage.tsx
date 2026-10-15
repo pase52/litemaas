@@ -77,8 +77,11 @@ import {
   getMigrationGraceUntil,
   getModelBaseUrl,
   getServedModelName,
+  isAfterMaasExpiry,
   isMaasModel,
   isMaasReauthError,
+  toLocalDay,
+  toUtcDay,
 } from '../utils/modelBackend';
 
 interface ModelLimits {
@@ -87,6 +90,13 @@ interface ModelLimits {
   rpm?: number;
   tpm?: number;
 }
+
+/** True when both lists hold the same model ids, whatever their order. */
+const haveSameModels = (a: string[], b: string[]): boolean => {
+  const left = [...new Set(a)].sort();
+  const right = [...new Set(b)].sort();
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+};
 
 const ApiKeysPage: React.FC = () => {
   const { t } = useTranslation();
@@ -443,6 +453,19 @@ const ApiKeysPage: React.FC = () => {
     : maasEnabled && newKeyBackend === 'maas';
   // A key is bound to one backend, so only models of that backend can be selected
   const selectableModels = models.filter((m) => isMaasModel(m) === isMaasKeyForm);
+  // maas-api cannot extend a key, so a MaaS key's expiration can only be shortened: in edit mode the
+  // expiration control only offers what the backend accepts (no "Never" and nothing later than the
+  // current expiry when the key has one)
+  const maasShortenOnly = isEditMode && isMaasKeyForm;
+  const maasExpiresAt = maasShortenOnly ? editingKey?.expiresAt : undefined;
+  const isPresetLaterThanMaasExpiry = (days: number) =>
+    isAfterMaasExpiry(toUtcDay(Date.now() + days * 24 * 60 * 60 * 1000), maasExpiresAt);
+  const maasExpiryNotLaterMessage = maasExpiresAt
+    ? t('maas.keys.expiryNotLater', {
+        date: toUtcDay(maasExpiresAt),
+        defaultValue: 'The new expiration cannot be later than the current one ({{date}}).',
+      })
+    : '';
 
   const handleBackendChange = (backend: 'litellm' | 'maas') => {
     if (backend === newKeyBackend) return;
@@ -567,6 +590,16 @@ const ApiKeysPage: React.FC = () => {
       }
     }
 
+    // MaaS keys can only have their expiration shortened: reject a custom date after the current one
+    if (
+      !errors.expiration &&
+      maasShortenOnly &&
+      newKeyExpiration === 'custom' &&
+      isAfterMaasExpiry(newKeyCustomExpiration, maasExpiresAt)
+    ) {
+      errors.expiration = maasExpiryNotLaterMessage;
+    }
+
     // Validate per-model limits against key-level limits and admin maximums
     for (const [modelId, limits] of Object.entries(newKeyModelLimits)) {
       if (!selectedModelIds.includes(modelId)) continue;
@@ -678,9 +711,15 @@ const ApiKeysPage: React.FC = () => {
             ? newKeyExpiration === 'custom' &&
               newKeyCustomExpiration === new Date(editingKey.expiresAt).toISOString().split('T')[0]
             : newKeyExpiration === 'never');
+        // MaaS keys: send modelIds only when the selection changed. A model whose MaaSModelRef is
+        // currently unavailable has no chip (GET /models only lists available models) but is still
+        // part of the key, so re-sending the unchanged set would fail every rename / TPM edit with
+        // "Models are currently unavailable".
+        const modelsUnchanged =
+          isMaasKeyForm && haveSameModels(selectedModelIds, editingKey.models ?? []);
         const updateRequest = {
           name: newKeyName,
-          modelIds: selectedModelIds,
+          ...(modelsUnchanged ? {} : { modelIds: selectedModelIds }),
           ...(expirationUnchanged
             ? {}
             : {
@@ -1566,32 +1605,54 @@ const ApiKeysPage: React.FC = () => {
                 }}
                 isDisabled={creatingKey}
                 validated={formErrors.expiration ? 'error' : 'default'}
+                aria-describedby={maasShortenOnly ? 'key-expiration-maas-help' : undefined}
               >
                 {quotaDefaults?.maximums?.expirationDays == null && (
                   <FormSelectOption
                     value="never"
                     label={t('pages.apiKeys.forms.expirationNever')}
+                    isDisabled={!!maasExpiresAt}
                   />
                 )}
                 {(quotaDefaults?.maximums?.expirationDays == null ||
                   30 <= quotaDefaults.maximums.expirationDays) && (
-                  <FormSelectOption value="30" label={t('pages.apiKeys.forms.expiration30')} />
+                  <FormSelectOption
+                    value="30"
+                    label={t('pages.apiKeys.forms.expiration30')}
+                    isDisabled={isPresetLaterThanMaasExpiry(30)}
+                  />
                 )}
                 {(quotaDefaults?.maximums?.expirationDays == null ||
                   60 <= quotaDefaults.maximums.expirationDays) && (
-                  <FormSelectOption value="60" label={t('pages.apiKeys.forms.expiration60')} />
+                  <FormSelectOption
+                    value="60"
+                    label={t('pages.apiKeys.forms.expiration60')}
+                    isDisabled={isPresetLaterThanMaasExpiry(60)}
+                  />
                 )}
                 {(quotaDefaults?.maximums?.expirationDays == null ||
                   90 <= quotaDefaults.maximums.expirationDays) && (
-                  <FormSelectOption value="90" label={t('pages.apiKeys.forms.expiration90')} />
+                  <FormSelectOption
+                    value="90"
+                    label={t('pages.apiKeys.forms.expiration90')}
+                    isDisabled={isPresetLaterThanMaasExpiry(90)}
+                  />
                 )}
                 {(quotaDefaults?.maximums?.expirationDays == null ||
                   180 <= quotaDefaults.maximums.expirationDays) && (
-                  <FormSelectOption value="180" label={t('pages.apiKeys.forms.expiration180')} />
+                  <FormSelectOption
+                    value="180"
+                    label={t('pages.apiKeys.forms.expiration180')}
+                    isDisabled={isPresetLaterThanMaasExpiry(180)}
+                  />
                 )}
                 {(quotaDefaults?.maximums?.expirationDays == null ||
                   365 <= quotaDefaults.maximums.expirationDays) && (
-                  <FormSelectOption value="365" label={t('pages.apiKeys.forms.expiration365')} />
+                  <FormSelectOption
+                    value="365"
+                    label={t('pages.apiKeys.forms.expiration365')}
+                    isDisabled={isPresetLaterThanMaasExpiry(365)}
+                  />
                 )}
                 <FormSelectOption
                   value="custom"
@@ -1614,6 +1675,9 @@ const ApiKeysPage: React.FC = () => {
                   validators={[
                     (date: Date) => {
                       if (date < new Date()) return 'Date must be in the future';
+                      if (isAfterMaasExpiry(toLocalDay(date), maasExpiresAt)) {
+                        return maasExpiryNotLaterMessage;
+                      }
                       if (quotaDefaults?.maximums?.expirationDays != null) {
                         const maxDate = new Date(
                           Date.now() + quotaDefaults.maximums.expirationDays * 24 * 60 * 60 * 1000,
@@ -1632,6 +1696,16 @@ const ApiKeysPage: React.FC = () => {
               {formErrors.expiration && (
                 <HelperText id="key-expiration-error">
                   <HelperTextItem variant="error">{formErrors.expiration}</HelperTextItem>
+                </HelperText>
+              )}
+              {maasShortenOnly && (
+                <HelperText id="key-expiration-maas-help">
+                  <HelperTextItem data-testid="maas-expiry-shorten-only">
+                    {t(
+                      'maas.keys.expiryShortenOnly',
+                      'MaaS API keys can only have their expiration shortened.',
+                    )}
+                  </HelperTextItem>
                 </HelperText>
               )}
               {quotaDefaults?.maximums?.expirationDays != null && (

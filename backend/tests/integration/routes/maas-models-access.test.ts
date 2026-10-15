@@ -8,12 +8,18 @@ import { createApp } from '../../../src/app';
 import { generateTestToken, createTestUsers, TEST_USER_IDS } from '../setup';
 import { LiteLLMService } from '../../../src/services/litellm.service';
 import { ModelSyncService } from '../../../src/services/model-sync.service';
-import { MaasModelSyncService } from '../../../src/services/maas/maas-model-sync.service';
+import {
+  MaasModelSyncService,
+  MAAS_SYNC_LOCK_ID,
+} from '../../../src/services/maas/maas-model-sync.service';
+import { MAAS_RECONCILER_LOCK_ID } from '../../../src/services/maas/maas-reconciler.service';
 import { MaasAccessService } from '../../../src/services/maas/maas-access.service';
 import {
   MAAS_AUTH_POLICY,
   MAAS_MODEL_REF,
   MAAS_SUBSCRIPTION,
+  LABEL_INSTANCE,
+  getManagedInstance,
 } from '../../../src/services/maas/maas-resources';
 import type { InMemoryK8sClient } from '../../../src/services/k8s/k8s-client';
 
@@ -323,6 +329,88 @@ describe('MaaS models, access hooks and reconciler (MAAS_ENABLED=true)', () => {
       expect(row.availability).toBe('available');
     });
 
+    it('the manual sync takes the shared sync lock: 409 while another sync holds it, nothing imported or audited', async () => {
+      const syncAudits = async () =>
+        Number(
+          (
+            await app.dbUtils.queryOne<any>(
+              `SELECT COUNT(*) AS n FROM audit_logs WHERE action = 'MAAS_MODEL_SYNC'`,
+            )
+          ).n,
+        );
+      const before = await syncAudits();
+
+      const holder = await app.pg.pool.connect();
+      try {
+        // what the periodic sync (any replica) holds while it runs
+        await holder.query('SELECT pg_advisory_lock($1)', [MAAS_SYNC_LOCK_ID]);
+        const blocked = await syncAsAdmin();
+        expect(blocked.statusCode).toBe(409);
+        const { error } = JSON.parse(blocked.body);
+        expect(error).toMatchObject({ code: 'RESOURCE_LOCKED', statusCode: 409 });
+        expect(error.message).toContain('already running');
+        expect(
+          await app.dbUtils.queryMany(`SELECT id FROM models WHERE id LIKE $1`, [`${NS}/%`]),
+        ).toHaveLength(0);
+        expect(await syncAudits()).toBe(before);
+      } finally {
+        await holder.query('SELECT pg_advisory_unlock($1)', [MAAS_SYNC_LOCK_ID]);
+        holder.release();
+      }
+
+      // once the other sync is done the manual one runs, and releases the lock again
+      const ok = await syncAsAdmin();
+      expect(ok.statusCode).toBe(200);
+      expect(JSON.parse(ok.body)).toMatchObject({ success: true, newModels: 3 });
+      expect(await syncAudits()).toBe(before + 1);
+      expect((await syncAsAdmin()).statusCode).toBe(200);
+    });
+
+    it('concurrent manual syncs never race into duplicate inserts', async () => {
+      const results = await Promise.all([syncAsAdmin(), syncAsAdmin(), syncAsAdmin()]);
+      const codes = results.map((r) => r.statusCode);
+      expect(codes.every((c) => c === 200 || c === 409)).toBe(true);
+      expect(codes).toContain(200);
+      for (const r of results.filter((x) => x.statusCode === 200)) {
+        expect(JSON.parse(r.body)).toMatchObject({ success: true, errors: [] });
+      }
+      expect(
+        await app.dbUtils.queryMany(`SELECT id FROM models WHERE id LIKE $1`, [`${NS}/%`]),
+      ).toHaveLength(3);
+    });
+
+    it('a failing cascade leaves a parked (Pending) model unavailable instead of flipping it visible', async () => {
+      await syncAsAdmin(); // QWEN is Pending on the cluster: parked as unavailable
+      await app.dbUtils.query(
+        `INSERT INTO subscriptions (user_id, model_id, status) VALUES ($1, $2, 'active')`,
+        [TEST_USER_IDS.USER, QWEN],
+      );
+      const availability = async () =>
+        (await app.dbUtils.queryOne<any>('SELECT availability FROM models WHERE id = $1', [QWEN]))
+          .availability;
+      expect(await availability()).toBe('unavailable');
+
+      vi.spyOn(ModelSyncService.prototype, 'markModelUnavailable').mockRejectedValueOnce(
+        new Error('cascade boom'),
+      );
+      await expect(new MaasModelSyncService(app).markUnavailableWithCascade(QWEN)).rejects.toThrow(
+        'cascade boom',
+      );
+      expect(await availability()).toBe('unavailable'); // never left available / subscribable
+      const stillActive = await app.dbUtils.queryOne<any>(
+        'SELECT status FROM subscriptions WHERE model_id = $1',
+        [QWEN],
+      );
+      expect(stillActive.status).toBe('active'); // the rolled-back cascade changed nothing
+
+      // a retry cascades the parked model's subscription and keeps it unavailable
+      vi.restoreAllMocks();
+      const stats = await new MaasModelSyncService(app).markUnavailableWithCascade(QWEN);
+      expect(stats.subscriptionsDeactivated).toBe(1);
+      expect(await availability()).toBe('unavailable');
+      await MaasModelSyncService.waitForBackground();
+    });
+
     it('LiteLLM sync ignores MaaS models (regression: no unavailable cascade)', async () => {
       await syncAsAdmin();
       await subscribe(LLAMA);
@@ -455,6 +543,58 @@ describe('MaaS models, access hooks and reconciler (MAAS_ENABLED=true)', () => {
       expect(await policyModels()).toEqual([LLAMA]);
     });
 
+    it('the owner cannot re-activate a pending / denied subscription by PATCH (no policy is granted); cancel still revokes', async () => {
+      await app.dbUtils.query(`UPDATE models SET restricted_access = true WHERE id = $1`, [LLAMA]);
+      const sub = JSON.parse((await subscribe(LLAMA)).body);
+      expect(sub.status).toBe('pending');
+      const patch = (status: string) =>
+        app.inject({
+          method: 'PATCH',
+          url: `/api/v1/subscriptions/${sub.id}`,
+          headers: { authorization: user() },
+          payload: { status },
+        });
+      const dbStatus = async () =>
+        (
+          await app.dbUtils.queryOne<any>('SELECT status FROM subscriptions WHERE id = $1', [
+            sub.id,
+          ])
+        ).status;
+
+      // pending: the approval an admin has not given
+      const pending = await patch('active');
+      expect(pending.statusCode).toBe(403);
+      expect(JSON.parse(pending.body).error.code).toBe('FORBIDDEN');
+      expect(await dbStatus()).toBe('pending');
+      expect(await policy()).toBeNull();
+
+      // denied by an admin: still not the owner's call
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/admin/subscriptions/deny',
+        headers: { authorization: admin() },
+        payload: { subscriptionIds: [sub.id], reason: 'no' },
+      });
+      expect((await patch('active')).statusCode).toBe(403);
+      expect(await dbStatus()).toBe('denied');
+      expect(await policy()).toBeNull();
+
+      // the admin decision path is unchanged: revert grants access, the owner may then cancel
+      const revert = await app.inject({
+        method: 'POST',
+        url: `/api/v1/admin/subscriptions/${sub.id}/revert`,
+        headers: { authorization: admin() },
+        payload: { newStatus: 'active' },
+      });
+      expect(revert.statusCode).toBe(200);
+      expect(await policyModels()).toEqual([LLAMA]);
+
+      const cancel = await patch('cancelled');
+      expect(cancel.statusCode).toBe(200);
+      expect(JSON.parse(cancel.body).status).toBe('cancelled');
+      expect(await policy()).toBeNull();
+    });
+
     it('admin delete of a subscription revokes access first', async () => {
       const sub = JSON.parse((await subscribe(LLAMA)).body);
       const res = await app.inject({
@@ -554,7 +694,23 @@ describe('MaaS models, access hooks and reconciler (MAAS_ENABLED=true)', () => {
           metadata: {
             name: 'litemaas-ghost',
             namespace: POLICY_NS,
-            labels: { 'app.kubernetes.io/managed-by': 'litemaas' },
+            labels: {
+              'app.kubernetes.io/managed-by': 'litemaas',
+              [LABEL_INSTANCE]: getManagedInstance()!,
+            },
+          },
+          spec: { subjects: { users: ['ghost'] }, modelRefs: [] },
+        },
+        POLICY_NS,
+      );
+      // Same label set but another LiteMaaS instance sharing the namespace: never ours to delete
+      await k8s.seed(
+        MAAS_AUTH_POLICY,
+        {
+          metadata: {
+            name: 'litemaas-other-instance',
+            namespace: POLICY_NS,
+            labels: { 'app.kubernetes.io/managed-by': 'litemaas', [LABEL_INSTANCE]: 'staging' },
           },
           spec: { subjects: { users: ['ghost'] }, modelRefs: [] },
         },
@@ -572,6 +728,7 @@ describe('MaaS models, access hooks and reconciler (MAAS_ENABLED=true)', () => {
       expect(data.policiesDeleted).toBe(1);
       expect(await k8s.get(MAAS_AUTH_POLICY, 'litemaas-ghost', POLICY_NS)).toBeNull();
       expect(await k8s.get(MAAS_AUTH_POLICY, 'hand-made', POLICY_NS)).not.toBeNull();
+      expect(await k8s.get(MAAS_AUTH_POLICY, 'litemaas-other-instance', POLICY_NS)).not.toBeNull();
     });
 
     it('applies MaaSSubscriptions for live MaaS keys with TPM limits and removes them when revoked', async () => {
@@ -626,6 +783,7 @@ describe('MaaS models, access hooks and reconciler (MAAS_ENABLED=true)', () => {
           namespace: POLICY_NS,
           labels: {
             'app.kubernetes.io/managed-by': 'litemaas',
+            [LABEL_INSTANCE]: getManagedInstance()!,
             'litemaas.io/api-key-id': name,
           },
           creationTimestamp: created,
@@ -651,6 +809,31 @@ describe('MaaS models, access hooks and reconciler (MAAS_ENABLED=true)', () => {
       );
       expect(row?.action).toBe('MAAS_RECONCILE');
     });
+
+    it('audits a normal pass as successful and a skipped pass (lock held elsewhere) as unsuccessful', async () => {
+      const lastAudit = () =>
+        app.dbUtils.queryOne<any>(
+          `SELECT success, metadata FROM audit_logs
+            WHERE action = 'MAAS_RECONCILE' ORDER BY created_at DESC LIMIT 1`,
+        );
+
+      expect(JSON.parse((await reconcile(admin())).body).data.ran).toBe(true);
+      expect((await lastAudit()).success).toBe(true);
+
+      const holder = await app.pg.pool.connect();
+      try {
+        await holder.query('SELECT pg_advisory_lock($1)', [MAAS_RECONCILER_LOCK_ID]);
+        const skipped = await reconcile(admin());
+        expect(skipped.statusCode).toBe(200);
+        expect(JSON.parse(skipped.body).data).toMatchObject({ ran: false, errors: [] });
+        const row = await lastAudit();
+        expect(row.metadata.ran).toBe(false);
+        expect(row.success).toBe(false); // nothing was reconciled: not a success
+      } finally {
+        await holder.query('SELECT pg_advisory_unlock($1)', [MAAS_RECONCILER_LOCK_ID]);
+        holder.release();
+      }
+    });
   });
 
   describe('low-severity review fixes', () => {
@@ -664,6 +847,37 @@ describe('MaaS models, access hooks and reconciler (MAAS_ENABLED=true)', () => {
       });
       expect(res.statusCode).toBeLessThan(300);
       expect(await policyModels()).toContain(LLAMA);
+    });
+
+    it('admin user routes refuse to activate a subscription on a migrating LiteLLM model', async () => {
+      const LEGACY = `${NS}/legacy-litellm`;
+      await app.dbUtils.query(
+        `INSERT INTO models (id, name, provider, category, features, availability, backend_type,
+                             migration_state, migration_grace_until)
+         VALUES ($1, 'Legacy', 'openai', 'Language Model', ARRAY['chat'], 'available', 'litellm',
+                 'migrating', NOW() + interval '7 days')`,
+        [LEGACY],
+      );
+      const sub = await app.inject({
+        method: 'POST',
+        url: `/api/v1/admin/users/${TEST_USER_IDS.USER}/subscriptions`,
+        headers: { authorization: admin() },
+        payload: { modelIds: [LEGACY] },
+      });
+      expect(sub.statusCode).toBe(400);
+      expect(sub.body).toMatch(/migrat/i);
+      const key = await app.inject({
+        method: 'POST',
+        url: `/api/v1/admin/users/${TEST_USER_IDS.USER}/api-keys`,
+        headers: { authorization: admin() },
+        payload: { name: 'legacy key', modelIds: [LEGACY] },
+      });
+      expect(key.statusCode).toBe(400);
+      const rows = await app.dbUtils.queryMany(
+        `SELECT id FROM subscriptions WHERE user_id = $1 AND model_id = $2`,
+        [TEST_USER_IDS.USER, LEGACY],
+      );
+      expect(rows).toHaveLength(0);
     });
 
     it('migrate-to-maas rejects dot-segment and malformed names with 400', async () => {
@@ -704,7 +918,7 @@ describe('MaaS models, access hooks and reconciler (MAAS_ENABLED=true)', () => {
     it('GET /health caches the MaaS checks between requests', async () => {
       const clients = app.maasClients!;
       const apiSpy = vi.spyOn(clients.maasApi, 'health');
-      const k8sSpy = vi.spyOn(clients.k8s, 'get');
+      const k8sSpy = vi.spyOn(clients.k8s, 'list');
       const promSpy = vi.spyOn(clients.prometheus, 'health');
       await app.inject({ method: 'GET', url: '/api/v1/health' });
       await app.inject({ method: 'GET', url: '/api/v1/health' });

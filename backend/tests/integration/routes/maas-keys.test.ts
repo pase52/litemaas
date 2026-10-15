@@ -992,6 +992,17 @@ describe('MaaS API keys (MAAS_ENABLED=true)', () => {
       expect(tpm.statusCode).toBe(200);
       expect(tpmByModel(await getSub(created.id))['llama-3-2-3b']).toBe(42);
 
+      // Admins are not capped: clearing the TPM (null) removes the token rate limit
+      const cleared = await app.inject({
+        method: 'PATCH',
+        url: adminUrl(`/${created.id}`),
+        headers: { authorization: admin(), 'content-type': 'application/json' },
+        payload: { tpmLimit: null },
+      });
+      expect(cleared.statusCode).toBe(200);
+      expect((await dbKey(created.id)).tpm_limit).toBeNull();
+      expect(tpmByModel(await getSub(created.id))['llama-3-2-3b']).toBeUndefined();
+
       const models = await app.inject({
         method: 'PATCH',
         url: adminUrl(`/${created.id}`),

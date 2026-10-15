@@ -26,7 +26,31 @@ export const LABEL_MANAGED_BY = 'app.kubernetes.io/managed-by';
 export const LABEL_MANAGED_BY_VALUE = 'litemaas';
 export const LABEL_USER_ID = 'litemaas.io/user-id';
 export const LABEL_API_KEY_ID = 'litemaas.io/api-key-id';
+/** Which LiteMaaS deployment owns the object (several instances may share one MaaS namespace) */
+export const LABEL_INSTANCE = 'litemaas.io/instance';
 export const MANAGED_SELECTOR = `${LABEL_MANAGED_BY}=${LABEL_MANAGED_BY_VALUE}`;
+
+let managedInstance: string | undefined;
+
+/**
+ * Set the instance id stamped on every object this deployment creates (label
+ * `litemaas.io/instance`) and required by {@link managedSelector} / {@link foreignObjectReason}.
+ * Without it (unit tests, builders used standalone) objects carry only the managed-by label.
+ */
+export function configureManagedInstance(id: string | undefined): void {
+  managedInstance = id?.trim() ? sanitizeLabelValue(id.trim()) : undefined;
+}
+
+export function getManagedInstance(): string | undefined {
+  return managedInstance;
+}
+
+/** Label selector matching the objects owned by THIS LiteMaaS instance */
+export function managedSelector(): string {
+  return managedInstance
+    ? `${MANAGED_SELECTOR},${LABEL_INSTANCE}=${managedInstance}`
+    : MANAGED_SELECTOR;
+}
 
 export const ANNOTATION_DISPLAY_NAME = 'openshift.io/display-name';
 export const ANNOTATION_DESCRIPTION = 'openshift.io/description';
@@ -114,6 +138,9 @@ export function foreignObjectReason(existing: K8sObject, userId?: string): strin
   if (labels[LABEL_MANAGED_BY] !== LABEL_MANAGED_BY_VALUE) {
     return `not labeled ${LABEL_MANAGED_BY}=${LABEL_MANAGED_BY_VALUE}`;
   }
+  if (managedInstance !== undefined && labels[LABEL_INSTANCE] !== managedInstance) {
+    return `owned by another LiteMaaS instance (${LABEL_INSTANCE}=${labels[LABEL_INSTANCE] ?? 'none'})`;
+  }
   if (userId !== undefined && labels[LABEL_USER_ID] !== sanitizeLabelValue(userId)) {
     return `owned by a different user (${LABEL_USER_ID})`;
   }
@@ -121,7 +148,11 @@ export function foreignObjectReason(existing: K8sObject, userId?: string): strin
 }
 
 function managedLabels(extra: Record<string, string>): Record<string, string> {
-  return { [LABEL_MANAGED_BY]: LABEL_MANAGED_BY_VALUE, ...extra };
+  return {
+    [LABEL_MANAGED_BY]: LABEL_MANAGED_BY_VALUE,
+    ...(managedInstance !== undefined && { [LABEL_INSTANCE]: managedInstance }),
+    ...extra,
+  };
 }
 
 function dedupe<T extends MaasModelRefTarget>(models: T[]): T[] {

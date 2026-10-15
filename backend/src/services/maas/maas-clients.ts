@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { ApplicationError } from '../../utils/errors.js';
 import { loadClusterCaBundle, type TlsOptions } from '../http/tls-fetch.js';
@@ -14,7 +15,21 @@ import {
   MAAS_MODEL_REF,
   ANNOTATION_DESCRIPTION,
   ANNOTATION_DISPLAY_NAME,
+  configureManagedInstance,
 } from './maas-resources.js';
+
+const SA_NAMESPACE_FILE = '/var/run/secrets/kubernetes.io/serviceaccount/namespace';
+
+/** Namespace this pod runs in (in-cluster only) */
+export function readInClusterNamespace(
+  readFile: (path: string) => string = (p) => readFileSync(p, 'utf-8'),
+): string | undefined {
+  try {
+    return readFile(SA_NAMESPACE_FILE).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
 import {
   MockPrometheusClient,
   PrometheusClient,
@@ -33,20 +48,30 @@ export interface MaasClients {
   serviceToken?: () => string | undefined;
 }
 
+const UNCONFIGURED = Symbol('maas-unconfigured-client');
+
 /**
  * A client for a service that is not configured outside dev/test: every call fails with a
  * 503 so misconfiguration is visible instead of silently serving mock data in production.
+ * Callers that can degrade gracefully (e.g. usage without Prometheus) can detect it with
+ * {@link isUnconfiguredClient}.
  */
-function unconfigured<T extends object>(service: string): T {
+export function createUnconfiguredClient<T extends object>(service: string): T {
   return new Proxy({} as T, {
     get(_t, prop) {
       if (prop === 'mock') return false;
+      if (prop === UNCONFIGURED) return true;
       if (prop === 'then' || typeof prop === 'symbol') return undefined;
       return async () => {
         throw ApplicationError.serviceUnavailable(`${service} (not configured)`);
       };
     },
   });
+}
+
+/** True for a client created by {@link createUnconfiguredClient} (endpoint not configured) */
+export function isUnconfiguredClient(client: unknown): boolean {
+  return !!client && typeof client === 'object' && (client as any)[UNCONFIGURED] === true;
 }
 
 /** Sample MaaSModelRefs exposed by the in-memory cluster in mock mode */
@@ -92,6 +117,12 @@ export function createMaasClients(fastify: FastifyInstance): MaasClients {
   const log = fastify.log;
   const mockAllowed = isDevOrTest();
 
+  // Objects created on the cluster are stamped with this deployment's id so that another
+  // LiteMaaS instance sharing the MaaS namespace neither overwrites nor garbage-collects them
+  const instanceId = config.instanceId ?? readInClusterNamespace() ?? 'default';
+  configureManagedInstance(instanceId);
+  log.info({ instanceId }, 'MaaS: managed-object instance id');
+
   // Kubernetes API
   let k8s: IK8sClient;
   const k8sCfg = resolveK8sClientConfig(cfg);
@@ -103,7 +134,7 @@ export function createMaasClients(fastify: FastifyInstance): MaasClients {
     k8s = mock;
     log.info('MaaS: Kubernetes API not configured - using in-memory mock cluster');
   } else {
-    k8s = unconfigured<IK8sClient>('Kubernetes API');
+    k8s = createUnconfiguredClient<IK8sClient>('Kubernetes API');
     log.error('MaaS: Kubernetes API not configured (set K8S_API_URL or run in-cluster)');
   }
 
@@ -131,7 +162,7 @@ export function createMaasClients(fastify: FastifyInstance): MaasClients {
     maasApi = new MockMaasApiClient();
     log.info('MaaS: MAAS_API_URL not set - using mock maas-api');
   } else {
-    maasApi = unconfigured<IMaasApiClient>('maas-api');
+    maasApi = createUnconfiguredClient<IMaasApiClient>('maas-api');
     log.error('MaaS: MAAS_API_URL is not set');
   }
 
@@ -145,6 +176,7 @@ export function createMaasClients(fastify: FastifyInstance): MaasClients {
         // Fall back to the k8s credentials (in-cluster SA token / K8S_TOKEN)
         tokenProvider: () => k8sCfg?.token ?? k8sCfg?.tokenProvider?.(),
         tls: clusterTls(cfg.PROMETHEUS_SKIP_TLS_VERIFY === 'true'),
+        timeoutMs: config.prometheusTimeoutMs,
       },
       log,
     );
@@ -152,8 +184,9 @@ export function createMaasClients(fastify: FastifyInstance): MaasClients {
     prometheus = new MockPrometheusClient();
     log.info('MaaS: PROMETHEUS_URL not set - using mock Prometheus');
   } else {
-    prometheus = unconfigured<IPrometheusClient>('Prometheus');
-    log.error('MaaS: PROMETHEUS_URL is not set');
+    prometheus = createUnconfiguredClient<IPrometheusClient>('Prometheus');
+    // Usage analytics degrade gracefully without Prometheus (no MaaS usage is merged)
+    log.warn('MaaS: PROMETHEUS_URL is not set - MaaS usage will not be collected');
   }
 
   const serviceToken = () => k8sCfg?.token ?? k8sCfg?.tokenProvider?.();

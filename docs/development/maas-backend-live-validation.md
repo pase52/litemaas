@@ -8,7 +8,7 @@ tested against **mocks only**: an in-memory Kubernetes API, a mock maas-api and 
 Every statement below about cluster behavior is an **assumption** taken from the RHOAI 3.4/3.5
 documentation.
 
-Each assumption has an ID (`A1`–`A31`, plus `F1`–`F3` for the frontend). Code comments and other docs
+Each assumption has an ID (`A1`–`A33`, plus `F1`–`F3` for the frontend). Code comments and other docs
 refer to these IDs, so keep them stable. Every entry follows the same layout:
 
 - **Assumption**: what the code expects.
@@ -380,13 +380,29 @@ PT=$(oc whoami -t)        # a cluster-admin token works; the SA uses cluster-mon
 curl -sk -H "Authorization: Bearer $PT" "$PROM_ROUTE/api/v1/label/__name__/values" | jq -r '.data[]' | grep -iE 'authorized|limitador'
 curl -sk -H "Authorization: Bearer $PT" --data-urlencode 'query=authorized_hits' "$PROM_ROUTE/api/v1/query" | jq '.data.result[].metric'
 curl -sk -H "Authorization: Bearer $PT" --data-urlencode 'query=authorized_calls' "$PROM_ROUTE/api/v1/query" | jq '.data.result[].metric'
+# LiteMaaS sends exactly this: a POST with a form-encoded body and partial_response=false
+curl -sk -H "Authorization: Bearer $PT" --data-urlencode 'query=sum(authorized_hits)' \
+  "$PROM_ROUTE/api/v1/query?partial_response=false" | jq '{status, warnings}'
 ```
 
+`--data-urlencode` makes curl send a POST with an `application/x-www-form-urlencoded` body, which is
+how the backend queries (the all-time subscription regex of a user with many keys is too long for a
+URL).
+
 **Expected.** Both metrics exist and carry `subscription` and `model` labels whose values match
-`litemaas-key-test` and the model.
+`litemaas-key-test` and the model. The last call answers `status: "success"` and has **no
+`warnings`** (or an empty array).
 
 **If different.**
 
+- Warnings in a successful answer (Thanos with a store down answers a partial result this way):
+  LiteMaaS treats the response as failed (`MAAS_ERROR`, "Prometheus returned a partial or degraded
+  response", the warnings are in `details.upstreamMessage`) because the numbers would be an
+  undercount that gets cached. Fix the store; there is no switch to ignore warnings.
+- 405, or a 403 that only the POST gets (the same GET works): the route or a proxy in front of
+  Thanos only allows GET, or authorizes by HTTP verb (kube-rbac-proxy maps POST to `create`). Use
+  an endpoint that allows POST (the default `:9091` Thanos Querier service is expected to; the curl
+  above verifies it) or allow the verb. The backend has no GET fallback.
 - Different metric names: set `MAAS_USAGE_HITS_METRIC` / `MAAS_USAGE_CALLS_METRIC`.
 - An extra label is needed to pick the right series: set `MAAS_USAGE_LABEL_MATCHERS`.
 - Different label names: change `MaasUsageSource.promql()` / `queryDayRows()`
@@ -400,8 +416,18 @@ curl -sk -H "Authorization: Bearer $PT" --data-urlencode 'query=authorized_calls
 
 - A UTC day is `increase(<metric>[86400s])` evaluated at the next 00:00:00Z. Today uses the
   seconds elapsed since 00:00:00Z.
-- Days older than retention return nothing.
+- Days older than retention return nothing. This is **silent**: `increase()` over a window that
+  reaches back past the oldest retained sample answers `status: "success"` with an empty, zero or
+  **partial** result, never an error. The daily cache is therefore the only long-term store of
+  MaaS usage.
 - Retention is about 15 days for platform Prometheus, longer when Thanos has object storage.
+  `MAAS_USAGE_RETENTION_DAYS` (default 15) must match it: the Usage Data Sync tool never queries
+  older days and carries their cached MaaS usage forward instead.
+- `increase()` misses the first increment of a brand-new series (Prometheus has no earlier sample
+  to compare with). The first requests of a new `(subscription, model)` pair are not counted,
+  which undercounts sparse users (a key that sent one request).
+- `GET /usage/budget` and the per-key usage read at most 120 days (`MAX_RANGE_DAYS`) and log a
+  `MaaS usage range truncated` warning when a longer range is cut to its most recent 120 days.
 
 **Verify.**
 
@@ -411,12 +437,31 @@ curl -sk -H "Authorization: Bearer $PT" --data-urlencode 'query=sum(increase(aut
   --data-urlencode "time=$END" "$PROM_ROUTE/api/v1/query" | jq '.data.result'
 oc -n openshift-monitoring get prometheus k8s -o jsonpath='{.spec.retention}{"\n"}'
 oc -n openshift-user-workload-monitoring get prometheus user-workload -o jsonpath='{.spec.retention}{"\n"}' 2>/dev/null
+
+# a day beyond the retention (adjust the 20 days): expect success with an empty or tiny result, NOT an error
+OLD=$(date -u -d "20 days ago" +%F); OLD_END=$(date -u -d "$OLD +1 day" +%s)
+curl -sk -H "Authorization: Bearer $PT" --data-urlencode 'query=sum(increase(authorized_hits[86400s]))' \
+  --data-urlencode "time=$OLD_END" "$PROM_ROUTE/api/v1/query" | jq '{status, result: .data.result}'
+
+# first increment of a new series: create a key, send exactly ONE request, wait two scrape intervals
+NEWSUB=litemaas-key-<id of the new key>
+curl -sk -H "Authorization: Bearer $PT" --data-urlencode "query=increase(authorized_calls{subscription=~\".*$NEWSUB\"}[10m])" \
+  "$PROM_ROUTE/api/v1/query" | jq '.data.result'
+# send a second request, wait again, and repeat the query
 ```
 
 **Expected.** A number close to the tokens you sent, and a known retention period. Write the
-retention down; it bounds what the Usage Data Sync tool can backfill.
+retention down and set `MAAS_USAGE_RETENTION_DAYS` to it. The old-day query succeeds with an empty
+or too small result instead of failing. For the new series the first query shows 0 (or no series)
+although one request was sent, and the repeat shows about 1: the first request is not counted.
 
-**If different.** Window logic is `dayWindow()` in `maas-usage.source.ts`.
+**If different.**
+
+- Window logic is `dayWindow()` in `maas-usage.source.ts`; the retention check is
+  `isWithinUsageRetention()`.
+- A longer retention (Thanos with object storage): raise `MAAS_USAGE_RETENTION_DAYS`, otherwise the
+  resync keeps the cached values of days Thanos could still answer.
+- If the first increment is counted, the undercount note in the feature Limitations can go.
 
 ### A28. Token accounting and streaming
 
@@ -448,10 +493,18 @@ curl -sk -H "Authorization: Bearer $PT" --data-urlencode 'query=count by (model,
   "$PROM_ROUTE/api/v1/query" | jq -r '.data.result[].metric | "\(.model) \(.subscription)"'
 ```
 
-**Expected.** The `model` values match one of the forms above.
+**Expected.** The `model` values match one of the forms above, and each resolves to exactly one
+MaaS model. Admin Usage lists the resolved models under the provider `maas`.
 
-**If different.** Extend the resolver in `MaasUsageSource.loadModels()` / `resolver()`
-(`maas-usage.source.ts`).
+**If different.**
+
+- Extend the resolver in `MaasUsageSource.loadModels()` / `buildResolver()`
+  (`maas-usage.source.ts`).
+- A bare label that several MaaS models claim at the same priority (two models with the same
+  served model name, or the same ref name in two namespaces) is ambiguous. LiteMaaS keeps the
+  usage under the raw label with cost 0 and logs `a Limitador model label matches several MaaS
+  models` once. Only the full `<namespace>/<name>` resolves in that case, so give the models
+  distinct served names.
 
 ### F1. Browser calls to the gateway (Playground CORS)
 
@@ -545,6 +598,10 @@ only, set `MAAS_API_SKIP_TLS_VERIFY=true` (insecure; independent of `K8S_API_SKI
   token on every request.
 - Prometheus uses the same token unless `PROMETHEUS_TOKEN` is set.
 - `/health` reports a `maas` section. That section never changes the overall status.
+- The `kubernetes` check **lists** `maasauthpolicies` in `$NS` with a label selector that matches
+  nothing. A list proves reachability and the `list` permission, and answers 404 when the
+  `MaaSAuthPolicy` CRD is not installed. (A `get` of a missing object returns "not found" on a
+  missing CRD as well, which would report a cluster without MaaS as healthy.)
 
 **Verify.**
 
@@ -553,6 +610,7 @@ LM=https://$(oc -n $LM_NS get route -o jsonpath='{.items[0].spec.host}')
 curl -sk $LM/api/v1/health | jq '{status, maas}'
 curl -sk $LM/api/v1/config | jq '{maasEnabled, maasGatewayUrl}'
 oc -n $LM_NS logs deploy/$RELEASE-backend | grep -i 'maas' | head
+oc -n $NS get maasauthpolicies.maas.opendatahub.io -l litemaas.io/healthcheck=never-matches   # the probe by hand
 ```
 
 **Expected.** `maas` reports `{enabled:true, maasApi:"healthy", kubernetes:"healthy",
@@ -562,8 +620,11 @@ more than one hour (token rotation): it must still be healthy.
 **If different.**
 
 - `mock:true` means an endpoint variable is empty. In production it surfaces as 503 errors.
-- `kubernetes:"unhealthy"`: the health check reads a non-existent policy, so this means RBAC
-  (A6).
+- `kubernetes:"unhealthy"`: the list was refused or failed. The backend log has a `MaaS health
+  check failed` line with the reason. A `forbidden` message means RBAC (A6: the Role needs the
+  `list` verb on `maasauthpolicies` in `$NS`); `MaaS CRD maasauthpolicies.maas.opendatahub.io was
+  not found` means the MaaS operator and its CRDs are not installed (or serve another API version).
+  The response carries the status only, never the reason, because `/health` is unauthenticated.
 - `prometheus` unhealthy: check `PROMETHEUS_URL`, `cluster-monitoring-view` and A5.
 
 The health check code is `checkMaasHealth` in `backend/src/routes/health.ts`.
@@ -750,8 +811,11 @@ key stops working and the new one works (A21).
 
 ### Reconciler (A15)
 
-**Assumption.** The desired spec is compared with the live spec using JSON equality. If the API
-server adds defaults, every pass rewrites every object.
+**Assumption.** The desired spec is compared with the live spec field by field (key order and
+server-added defaults such as `priority: 0` are ignored; array length and order matter). A pass only
+writes objects whose managed fields differ, and only objects labeled `litemaas.io/instance=<this
+deployment>` (`MAAS_INSTANCE_ID`, default: the pod namespace) are ever touched or deleted. Replacing an
+object keeps finalizers, ownerReferences, foreign labels/annotations and status.
 
 **Verify.**
 
@@ -762,10 +826,13 @@ for i in 1 2; do curl -sk -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Cont
 **Expected.** The second run reports `policiesApplied: 0` and `subscriptionsApplied: 0`.
 
 **If different.** Compare `oc get maassubscription <n> -o jsonpath='{.spec}'` with
-`buildSubscription()` / `buildAuthPolicy()` and normalize the difference. The comparison is in
-`MaasReconcilerService.reconcilePolicies()` / `reconcileSubscriptions()`
-(`maas-reconciler.service.ts`). Also confirm that no operator-created object carries
-`app.kubernetes.io/managed-by=litemaas`, because orphans with that label are deleted.
+`buildSubscription()` / `buildAuthPolicy()`: a field the operator rewrites (for example a normalised
+`window` value or a re-ordered `modelRefs` list) makes the comparison fail on every pass. Normalise
+it in the builders (`maas-resources.ts`) or in `k8sObjectMatches()` (`k8s-client.ts`). Also confirm
+that no operator-created object carries `app.kubernetes.io/managed-by=litemaas` together with this
+deployment's `litemaas.io/instance` label, because orphans with both labels are deleted, and that
+`oc get maassubscription -n $NS -o jsonpath='{.items[*].metadata.finalizers}'` still shows any
+operator finalizers after a pass.
 
 ### Revocation (A12, A19 in practice)
 
@@ -797,9 +864,15 @@ right user, with cost equal to tokens × the blended price.
 
 **Assumption.** **Migrate to MaaS** behaves as follows:
 
-- It copies the model and its **active** subscriptions, with no re-approval.
-- It blocks new subscriptions to the LiteLLM model.
+- It copies the model and its **active** subscriptions, with no re-approval, and its **pending**
+  requests as pending (the old pending rows are closed as `inactive`).
+- It blocks new subscriptions to the LiteLLM model, and any activation on it (approve, revert to
+  active, auto-approval, request review): the message names the MaaS model.
+- It answers after the database commit; the users' `MaaSAuthPolicy` objects follow within seconds
+  (background, 5 users at a time). A failed user is logged and converged by the reconciler.
 - LiteLLM access keeps working until the grace period ends.
+- The old and the copied subscription are independent: revoking or denying the old one leaves the
+  MaaS one (and its policy) untouched.
 - When the grace period ends, the reconciler removes the model from users' LiteLLM keys and marks
   the LiteLLM row `completed`.
 
@@ -809,20 +882,35 @@ right user, with cost equal to tokens × the blended price.
 curl -sk -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' \
   -d "{\"maasModelRef\":{\"name\":\"$MODEL_REF\",\"namespace\":\"$MODEL_NS\"},\"graceDays\":1}" \
   "$LM/api/v1/admin/models/<litellm-id-url-encoded>/migrate-to-maas" | jq .data
+sleep 10   # the policies are applied after the response
 oc -n $NS get maasauthpolicy -l app.kubernetes.io/managed-by=litemaas
+# a pending request of the old model: closed ('inactive') there, pending on the MaaS model
+PSQL "SELECT model_id, status, status_reason FROM subscriptions WHERE user_id='<pending-user-id>' AND model_id IN ('<litellm-id>','<maas-id>')"
+# ... and the old row can no longer be approved (activation on a migrating model is refused)
+curl -sk -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' \
+  -d '{"subscriptionIds":["<old-subscription-id>"]}' \
+  $LM/api/v1/admin/subscriptions/approve | jq '{successful, failed, errors}'
 PSQL "UPDATE models SET migration_grace_until = now() - interval '1 minute' WHERE id='<litellm-id>'"   # fast-forward
 curl -sk -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' -d '{}' $LM/api/v1/admin/maas/reconcile | jq '.data | {migrationsCompleted, migrationsPending}'
 ```
 
 **Expected.**
 
-- `subscriptionsCopied` equals the number of active subscriptions, and policies exist for those
-  users.
+- `subscriptionsCopied` equals the number of active subscriptions, `policiesScheduled` equals the
+  number of those users, and policies exist for them within a few seconds (otherwise within the
+  next reconcile pass). `pendingRequestsCopied` / `pendingRequestsClosed` count the pending
+  requests. `usersToNotify` is only a count handed to the notification hook, which has no
+  delivery channel: no one receives a message.
+- The pending user has `inactive` (reason `Migrated to MaaS model ...`) on the LiteLLM model and
+  `pending` on the MaaS model. Approving the old row returns `failed: 1` and an error naming the
+  MaaS model.
 - After the fast-forward, `migrationsCompleted` is 1 and the LiteLLM keys no longer list the
   model. The model still exists in LiteLLM itself; delete it there manually.
 
 **If different.** The logic is in `MaasMigrationService.migrate()` / `processExpiredGrace()`
-(`maas-migration.service.ts`).
+(`maas-migration.service.ts`). If the policies take longer than a reconcile pass to appear, look
+for `Migration: some MaaSAuthPolicies could not be applied` in the backend log: the grants run in
+the background and their failures are only logged.
 
 ### A9. Encryption key
 
@@ -855,8 +943,8 @@ reconciler retries `DELETE /v1/api-keys/{id}` until it succeeds. Verify that a r
 rejected on the gateway immediately and that the service-account token may revoke other users' keys.
 
 ```bash
-curl -s -X DELETE -H "Authorization: Bearer $(oc whoami -t)" "$MAAS_API_URL/v1/api-keys/$OLD_ID" -o /dev/null -w '%{http_code}\n'
-curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $OLD_SK" "$GATEWAY_URL/v1/models"   # expect 401/403
+curl -s -X DELETE -H "Authorization: Bearer $(oc whoami -t)" "$MAAS_API/v1/api-keys/<old maas_key_id>" -o /dev/null -w '%{http_code}\n'
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer <old plaintext key>" "$GATEWAY/v1/models"   # expect 401/403
 ```
 
 ### A33. Per-key subscriptions only contain models with an active LiteMaaS subscription
@@ -979,5 +1067,7 @@ Copy this table into the PR or issue and fill it in.
 | A29 model label | | |
 | A30 migration | | |
 | A31 health | | |
+| A32 old key after rotation | | |
+| A33 key models need a subscription | | |
 | F1 gateway CORS | | |
 | E2E `maas-acceptance.sh` | | log attached |

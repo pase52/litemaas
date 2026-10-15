@@ -62,6 +62,8 @@ data:
   {{- with .Values.maas.usage.labelMatchers }}
   MAAS_USAGE_LABEL_MATCHERS: {{ . | quote }}
   {{- end }}
+  MAAS_USAGE_RETENTION_DAYS: {{ .Values.maas.usage.retentionDays | quote }}
+  PROMETHEUS_TIMEOUT_MS: {{ .Values.maas.prometheus.timeoutMs | quote }}
   {{- with .Values.maas.prometheus.url }}
   PROMETHEUS_URL: {{ . | quote }}
   {{- end }}

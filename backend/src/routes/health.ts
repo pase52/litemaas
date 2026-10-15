@@ -1,5 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import { LiteLLMService } from '../services/litellm.service';
+import { K8sApiError } from '../services/k8s/k8s-client';
 import { MAAS_AUTH_POLICY } from '../services/maas/maas-resources';
 
 interface LiteLLMMetrics {
@@ -76,6 +77,8 @@ const healthRoutes: FastifyPluginAsync = async (fastify) => {
 
   // MaaS checks: each one is bounded by a timeout and failures only degrade the maas section
   const MAAS_CHECK_TIMEOUT_MS = 5000;
+  // Label selector that no object carries: the Kubernetes check lists policies with it
+  const MAAS_HEALTHCHECK_SELECTOR = 'litemaas.io/healthcheck=never-matches';
   const computeMaasHealth = async (): Promise<MaasHealth | undefined> => {
     const clients = fastify.maasClients;
     if (!clients) return undefined;
@@ -109,8 +112,23 @@ const healthRoutes: FastifyPluginAsync = async (fastify) => {
         async () => (await clients.maasApi.health()).healthy,
       ),
       guarded('kubernetes', clients.k8s.mock, async () => {
-        // A read of a (non-existent) policy name proves API reachability + RBAC
-        await clients.k8s.get(MAAS_AUTH_POLICY, 'litemaas-healthcheck', clients.config.namespace);
+        // List (not get): get maps a 404 to null, which would hide a missing CRD. A list whose
+        // selector matches nothing is cheap, proves API reachability + RBAC (list verb) and
+        // answers 404 when the MaaSAuthPolicy CRD is not installed.
+        try {
+          await clients.k8s.list(MAAS_AUTH_POLICY, {
+            namespace: clients.config.namespace,
+            labelSelector: MAAS_HEALTHCHECK_SELECTOR,
+          });
+        } catch (error) {
+          const status = error instanceof K8sApiError ? error.status : (error as any)?.status;
+          if (status === 404) {
+            throw new Error(
+              `MaaS CRD ${MAAS_AUTH_POLICY.plural}.${MAAS_AUTH_POLICY.group} was not found on the cluster: is the RHOAI MaaS operator installed? (namespace ${clients.config.namespace})`,
+            );
+          }
+          throw error;
+        }
         return true;
       }),
       guarded(

@@ -35,7 +35,8 @@ const adminMaasRoutes: FastifyPluginAsync = async (fastify) => {
           'MAAS',
           'reconcile',
           JSON.stringify(result),
-          result.errors.length === 0,
+          // A skipped pass (another replica holds the lock) did nothing: it is not a success
+          result.ran && result.errors.length === 0,
         ],
       );
 

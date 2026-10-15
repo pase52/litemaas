@@ -2142,6 +2142,8 @@
     "keys": {
       "backendHelp": "Una chiave funziona solo con i modelli di un unico backend. Scegliere prima il backend, poi selezionarne i modelli.",
       "backendLabel": "Backend della chiave",
+      "expiryNotLater": "La nuova scadenza non può essere successiva a quella attuale ({{date}}).",
+      "expiryShortenOnly": "La scadenza delle chiavi API MaaS può essere solo anticipata.",
       "graceBannerItem": "Chiave \"{{key}}\": {{models}} restano disponibili tramite LiteLLM fino al {{date}}. Creare una chiave MaaS per questi modelli prima di tale data.",
       "graceBannerTitle": "Alcune delle tue chiavi usano modelli in migrazione a MaaS",
       "noSubscribedMaasModels": "Non hai sottoscrizioni attive a modelli MaaS.",

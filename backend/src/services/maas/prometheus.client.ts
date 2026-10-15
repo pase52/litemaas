@@ -2,7 +2,11 @@ import type { FastifyBaseLogger } from 'fastify';
 import { ApplicationError } from '../../utils/errors.js';
 import { tlsFetch, type TlsOptions } from '../http/tls-fetch.js';
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+/**
+ * Per-request timeout when none is configured (PROMETHEUS_TIMEOUT_MS). Kept short: a black-holed
+ * Thanos would otherwise stall every analytics request for the full timeout.
+ */
+export const DEFAULT_PROMETHEUS_TIMEOUT_MS = 10_000;
 
 export interface PromSample {
   metric: Record<string, string>;
@@ -34,6 +38,7 @@ export interface PrometheusClientConfig {
   token?: string;
   tokenProvider?: () => string | undefined;
   tls?: TlsOptions;
+  /** Per-request timeout in ms (default {@link DEFAULT_PROMETHEUS_TIMEOUT_MS}) */
   timeoutMs?: number;
 }
 
@@ -50,30 +55,48 @@ export class PrometheusClient implements IPrometheusClient {
     private readonly log?: Pick<FastifyBaseLogger, 'debug' | 'warn'>,
   ) {}
 
-  private async get(path: string, params: Record<string, string>): Promise<any> {
-    const url = `${this.config.baseUrl}${path}?${new URLSearchParams(params).toString()}`;
-    const headers: Record<string, string> = { Accept: 'application/json' };
+  /**
+   * POST with an `application/x-www-form-urlencoded` body, which the Prometheus and Thanos HTTP
+   * APIs accept in place of GET. The all-time subscription regex of a user with many keys can
+   * exceed the URL length limits of the proxies in front of Thanos; a body has no such limit.
+   *
+   * `partial_response=false` (a URL parameter, ignored by plain Prometheus) makes Thanos fail the
+   * query instead of answering from the stores that are up; a `warnings` array in a successful
+   * answer is treated as a failure too (see below).
+   */
+  private async post(path: string, params: Record<string, string>): Promise<any> {
+    const url = `${this.config.baseUrl}${path}?partial_response=false`;
+    const requestBody = new URLSearchParams(params).toString();
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      // explicit so the custom-TLS path (https.request) sends a sized body, not chunked
+      'Content-Length': String(Buffer.byteLength(requestBody)),
+    };
     const token = this.config.token ?? this.config.tokenProvider?.();
     if (token) headers.Authorization = `Bearer ${token}`;
 
     let response: Response;
+    let text: string;
     try {
       response = await tlsFetch(
         url,
         {
-          method: 'GET',
+          method: 'POST',
           headers,
-          signal: AbortSignal.timeout(this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+          body: requestBody,
+          signal: AbortSignal.timeout(this.config.timeoutMs ?? DEFAULT_PROMETHEUS_TIMEOUT_MS),
         },
         this.config.tls,
       );
+      // The timeout also covers the body: reading it can fail (abort) after the headers arrived
+      text = await response.text();
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       this.log?.warn({ path, error: msg }, 'Prometheus request failed');
       throw ApplicationError.maasError('Failed to reach Prometheus', undefined, msg, true);
     }
 
-    const text = await response.text();
     let body: any;
     try {
       body = text ? JSON.parse(text) : undefined;
@@ -99,13 +122,25 @@ export class PrometheusClient implements IPrometheusClient {
         false,
       );
     }
+    // Thanos answers `success` + `warnings` when a store is down and partial responses are
+    // allowed: the data is then incomplete (an undercount that would be cached for good)
+    const warnings: string[] = Array.isArray(body.warnings) ? body.warnings.map(String) : [];
+    if (warnings.length > 0) {
+      this.log?.warn({ path, warnings }, 'Prometheus returned warnings - result treated as failed');
+      throw ApplicationError.maasError(
+        'Prometheus returned a partial or degraded response',
+        response.status,
+        warnings.join('; ').slice(0, 500),
+        true,
+      );
+    }
     return body.data;
   }
 
   async query(promql: string, time?: Date | number): Promise<PromSample[]> {
     const params: Record<string, string> = { query: promql };
     if (time !== undefined) params.time = String(toUnixSeconds(time));
-    const data = await this.get('/api/v1/query', params);
+    const data = await this.post('/api/v1/query', params);
     if (data?.resultType === 'vector') return data.result as PromSample[];
     if (data?.resultType === 'scalar') {
       return [{ metric: {}, value: data.result as [number, string] }];
@@ -119,7 +154,7 @@ export class PrometheusClient implements IPrometheusClient {
     end: Date | number,
     step: number | string,
   ): Promise<PromSeries[]> {
-    const data = await this.get('/api/v1/query_range', {
+    const data = await this.post('/api/v1/query_range', {
       query: promql,
       start: String(toUnixSeconds(start)),
       end: String(toUnixSeconds(end)),

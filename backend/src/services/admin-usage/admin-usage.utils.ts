@@ -349,8 +349,30 @@ export const UNKNOWN_USERNAME = 'Unknown User';
 // Model/Provider Utilities
 // ============================================================================
 
+/** Provider name MaaS usage is reported under (`breakdown.providers.maas`) */
+export const MAAS_PROVIDER = 'maas';
+
+/**
+ * LiteMaaS ids (`<namespace>/<name>`) of the MaaS models. Their usage is reported under the
+ * `maas` provider, but the `<namespace>/` prefix looks like a LiteLLM `provider/model` name, so
+ * the ids have to be known. Empty (so LiteLLM-only behavior is unchanged) unless the MaaS usage
+ * source registers them, see {@link setMaasModelIds}.
+ */
+let maasModelIds: ReadonlySet<string> = new Set();
+
+/**
+ * Replace the set of MaaS model ids that {@link extractProviderFromModel} attributes to `maas`.
+ * Process-wide: refreshed by the admin usage service from the models table before it aggregates.
+ */
+export function setMaasModelIds(ids: Iterable<string>): void {
+  maasModelIds = new Set(ids);
+}
+
 /**
  * Extract provider name from model name
+ *
+ * MaaS model ids registered with {@link setMaasModelIds} resolve to `maas`; everything else
+ * follows the LiteLLM rules below.
  *
  * @param modelName - Full model name (e.g., 'openai/gpt-4', 'anthropic/claude-3')
  * @returns Provider name
@@ -359,8 +381,12 @@ export const UNKNOWN_USERNAME = 'Unknown User';
  * extractProviderFromModel('openai/gpt-4') => 'openai'
  * extractProviderFromModel('gpt-4') => 'openai' (inferred)
  * extractProviderFromModel('unknown-model') => 'unknown'
+ * extractProviderFromModel('models-ns/llama-3') => 'maas' (when registered as a MaaS model id)
  */
 export function extractProviderFromModel(modelName: string): string {
+  if (maasModelIds.has(modelName)) {
+    return MAAS_PROVIDER;
+  }
   if (modelName.includes('/')) {
     return modelName.split('/')[0];
   }

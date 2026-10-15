@@ -32,7 +32,8 @@ describe('modelsService backend mapping', () => {
           id: 'ns/llama',
           backendType: 'maas',
           maasEndpoint: 'https://maas/x',
-          migrationState: 'migrated',
+          // 'migrating' while the grace period runs, 'completed' afterwards (models.migration_state)
+          migrationState: 'migrating',
           migrationGraceUntil: '2030-01-01T00:00:00Z',
         }),
       ],
@@ -41,8 +42,25 @@ describe('modelsService backend mapping', () => {
     const { models } = await modelsService.getModels();
     expect(models[0].backendType).toBe('maas');
     expect(models[0].maasEndpoint).toBe('https://maas/x');
-    expect(models[0].migrationState).toBe('migrated');
+    expect(models[0].migrationState).toBe('migrating');
     expect(models[0].migrationGraceUntil).toBe('2030-01-01T00:00:00Z');
+  });
+
+  it('maps a completed migration, whose grace period was cleared, to undefined fields', async () => {
+    vi.mocked(apiClient.get).mockResolvedValue({
+      data: [
+        backendModel({
+          migrationState: 'completed',
+          migrationGraceUntil: null,
+          maasEndpoint: '',
+        }),
+      ],
+      pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
+    });
+    const { models } = await modelsService.getModels();
+    expect(models[0].migrationState).toBe('completed');
+    expect(models[0].migrationGraceUntil).toBeUndefined();
+    expect(models[0].maasEndpoint).toBeUndefined();
   });
 
   it('defaults to litellm when the backend does not send backendType', async () => {

@@ -1,7 +1,10 @@
 import type { FastifyInstance } from 'fastify';
 import type { LiteLLMDayData } from '../../types/admin-usage.types.js';
+import { ApplicationError } from '../../utils/errors.js';
+import { MAAS_PROVIDER, setMaasModelIds } from '../admin-usage/admin-usage.utils.js';
 import type { UsageSource } from '../backends/backend.types.js';
 import type { MaasClients } from './maas-clients.js';
+import { MAAS_KEY_HASH_PREFIX } from './maas-key.service.js';
 import type { PromSample } from './prometheus.client.js';
 
 /**
@@ -30,14 +33,25 @@ import type { PromSample } from './prometheus.client.js';
  *    interpret the prompt/completion ratio of MaaS usage.
  *  - api_requests = authorized_calls; successful_requests = authorized_calls (Limitador only sees
  *    authorized calls, failures after authorization are not distinguishable), failed_requests = 0.
+ *
+ * Failure handling (Prometheus is a best-effort dependency of the usage pages):
+ *  - After a transport / timeout / 5xx / 429 / partial-response failure the endpoint is not queried
+ *    for {@link PROMETHEUS_BREAKER_COOLDOWN_MS}: calls fail at once with the error that opened the
+ *    breaker, so callers take their usual fallback without paying the timeout again.
+ *  - Prometheus keeps only a limited history (MAAS_USAGE_RETENTION_DAYS). Older windows are NOT an
+ *    error: `increase()` just returns partial or zero values, so the daily cache is the only
+ *    long-term store of MaaS usage (see {@link extractMaasSlice}).
  */
 
 export const SECONDS_PER_DAY = 86_400;
 const SUBSCRIPTION_PREFIX = 'litemaas-key-';
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const MODEL_CACHE_TTL_MS = 60_000;
 const DAY_QUERY_CONCURRENCY = 6;
 /** Hard cap on days per range request (protects Thanos) */
 export const MAX_RANGE_DAYS = 120;
+/** After a transport / 5xx failure Prometheus is left alone for this long */
+export const PROMETHEUS_BREAKER_COOLDOWN_MS = 60_000;
 
 export interface MaasUsageRow {
   /** Limitador `subscription` label with any `<namespace>/` prefix removed */
@@ -65,6 +79,8 @@ export interface ResolvedMaasModel {
   unitPrice: number;
   resolved: boolean;
 }
+
+export type MaasModelResolver = (label: string) => ResolvedMaasModel;
 
 export interface MaasUsageSummary {
   totalRequests: number;
@@ -113,6 +129,22 @@ export function dayWindow(
   return { evalTime: new Date(nowMs), windowSeconds, partial: true };
 }
 
+/**
+ * True when the whole UTC day lies inside the Prometheus / Thanos retention window, i.e. when
+ * the day's `increase()` window does not reach back past the oldest retained sample. Beyond that
+ * the query silently returns partial or zero values instead of failing. An unparsable date counts
+ * as retained (the regular path rejects it).
+ */
+export function isWithinUsageRetention(
+  date: string,
+  retentionDays: number,
+  now: Date = new Date(),
+): boolean {
+  const start = Date.parse(`${date}T00:00:00Z`);
+  if (Number.isNaN(start)) return true;
+  return start >= now.getTime() - retentionDays * SECONDS_PER_DAY * 1000;
+}
+
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -135,6 +167,15 @@ function emptyMetrics() {
     completion_tokens: 0,
     spend: 0,
   };
+}
+
+/**
+ * Whether a failed Prometheus call means the endpoint is down or overloaded (transport error,
+ * timeout, 5xx, 429, partial response: all `retryable`) rather than the request being wrong
+ * (4xx). Only the former opens the breaker. Errors of unknown kind count as outages.
+ */
+function isPrometheusOutage(error: unknown): boolean {
+  return !(error instanceof ApplicationError) || error.retryable;
 }
 
 /**
@@ -207,20 +248,109 @@ export function mergeDayData(
   return merged;
 }
 
+/**
+ * The MaaS part of a (possibly merged) day, in the exact shape {@link MaasUsageSource.getDayData}
+ * produces: the entries whose key hash is `maas:<subscription>`, with the model, provider and day
+ * totals re-derived from them (LiteLLM usage under the same model name is left out), plus the
+ * `sources.maas` data-quality flag. Null when the day holds no MaaS usage.
+ *
+ * Prometheus only keeps a limited history, so a cached day is the only long-term copy of its
+ * MaaS usage: callers that must rebuild a day (usage resync) read this slice first and merge it
+ * back when Prometheus can no longer provide it.
+ */
+export function extractMaasSlice(day: LiteLLMDayData | null | undefined): LiteLLMDayData | null {
+  const models = day?.breakdown?.models;
+  if (!day || !models) return null;
+
+  const slice: LiteLLMDayData = {
+    date: day.date,
+    metrics: { ...emptyMetrics(), successful_requests: 0, failed_requests: 0 },
+    breakdown: { models: {}, api_keys: {}, providers: {} },
+    sources: { maas: day.sources?.maas ?? { tokenSplitAvailable: false, costEstimated: true } },
+  };
+  const provider = { metrics: emptyMetrics() };
+
+  for (const [modelName, model] of Object.entries(models)) {
+    for (const [keyHash, key] of Object.entries(model.api_keys ?? {})) {
+      if (!keyHash.startsWith(MAAS_KEY_HASH_PREFIX) || !key?.metrics) continue;
+      const m = key.metrics;
+      const entry = (slice.breakdown.models[modelName] ??= {
+        metrics: emptyMetrics(),
+        api_keys: {},
+      });
+      entry.api_keys[keyHash] = { ...key, metrics: { ...m } };
+      for (const target of [entry.metrics, provider.metrics, slice.metrics]) {
+        target.api_requests += m.api_requests ?? 0;
+        target.total_tokens += m.total_tokens ?? 0;
+        target.prompt_tokens += m.prompt_tokens ?? 0;
+        target.completion_tokens += m.completion_tokens ?? 0;
+        target.spend += m.spend ?? 0;
+      }
+      slice.metrics.successful_requests += m.successful_requests ?? 0;
+      slice.metrics.failed_requests += m.failed_requests ?? 0;
+    }
+  }
+
+  if (slice.metrics.api_requests <= 0 && slice.metrics.total_tokens <= 0) return null;
+  slice.breakdown.providers[MAAS_PROVIDER] = provider;
+  return slice;
+}
+
 export class MaasUsageSource implements UsageSource {
   readonly type = 'maas' as const;
-  private modelCache?: { at: number; rows: MaasModelInfoRow[] };
-  private rowCache = new Map<string, { at: number; rows: MaasUsageRow[] }>();
+  private modelCache?: { at: number; rows: MaasModelInfoRow[]; resolve: MaasModelResolver };
+  private rowCache = new Map<
+    string,
+    {
+      at: number;
+      rows: MaasUsageRow[];
+      /** computed for a not yet finished day */ partial: boolean;
+    }
+  >();
+  /** Prometheus is skipped (the stored error is rethrown) until `until` */
+  private breaker?: { until: number; error: unknown };
+  private readonly warnedAmbiguous = new Set<string>();
 
   constructor(
     private readonly fastify: FastifyInstance,
     private readonly clients: MaasClients,
   ) {}
 
-  /** Drop cached query results (tests, admin resync) */
+  /**
+   * Drop cached query results and close the Prometheus breaker (tests, admin refresh / resync:
+   * an explicit refresh should talk to Prometheus again right away).
+   */
   clearCache(): void {
     this.rowCache.clear();
     this.modelCache = undefined;
+    this.breaker = undefined;
+  }
+
+  private warn(context: Record<string, unknown>, message: string): void {
+    this.fastify.log?.warn?.(context, message);
+  }
+
+  // ---------------------------------------------------------------- breaker
+
+  /** Throw the error that opened the breaker while it is open (no Prometheus call is made) */
+  private assertPrometheusAvailable(): void {
+    if (this.breaker && Date.now() < this.breaker.until) throw this.breaker.error;
+    // Cooldown over (or never opened): the next query probes the endpoint
+  }
+
+  private recordPrometheusFailure(error: unknown): void {
+    if (!isPrometheusOutage(error)) return;
+    const wasOpen = !!this.breaker && Date.now() < this.breaker.until;
+    this.breaker = { until: Date.now() + PROMETHEUS_BREAKER_COOLDOWN_MS, error };
+    if (!wasOpen) {
+      this.warn(
+        {
+          cooldownSeconds: PROMETHEUS_BREAKER_COOLDOWN_MS / 1000,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'MaaS usage: Prometheus unavailable - not querying it again until the cooldown is over',
+      );
+    }
   }
 
   // ---------------------------------------------------------------- queries
@@ -243,7 +373,11 @@ export class MaasUsageSource implements UsageSource {
     return `sum by (subscription, model) (increase(${metric}${this.matchers(subscriptions)}[${windowSeconds}s]))`;
   }
 
-  /** Per (subscription, model) tokens + calls for one UTC day. Future days yield []. */
+  /**
+   * Per (subscription, model) tokens + calls for one UTC day. Future days yield [].
+   * Throws when Prometheus fails (callers decide how to degrade) and, while the breaker is open,
+   * rethrows the error that opened it without calling Prometheus.
+   */
   async queryDayRows(
     date: string,
     subscriptions?: string[],
@@ -255,22 +389,32 @@ export class MaasUsageSource implements UsageSource {
     const cacheKey = `${date}|${(subscriptions ?? []).join(',')}`;
     const cached = this.rowCache.get(cacheKey);
     // Short in-memory cache (per-key/per-user ranges re-query the same days); the persistent
-    // per-day cache lives in the admin usage pipeline
-    if (cached && now.getTime() - cached.at < CACHE_TTL_MS) {
+    // per-day cache lives in the admin usage pipeline. A result computed for the partial window
+    // of a day that was still running is not valid once that day is complete.
+    if (cached && now.getTime() - cached.at < CACHE_TTL_MS && !(cached.partial && !win.partial)) {
       return cached.rows;
     }
 
+    this.assertPrometheusAvailable();
+
     const { prometheus, config } = this.clients;
-    const [hits, calls] = await Promise.all([
-      prometheus.query(
-        this.promql(config.usageHitsMetric, win.windowSeconds, subscriptions),
-        win.evalTime,
-      ),
-      prometheus.query(
-        this.promql(config.usageCallsMetric, win.windowSeconds, subscriptions),
-        win.evalTime,
-      ),
-    ]);
+    let hits: PromSample[];
+    let calls: PromSample[];
+    try {
+      [hits, calls] = await Promise.all([
+        prometheus.query(
+          this.promql(config.usageHitsMetric, win.windowSeconds, subscriptions),
+          win.evalTime,
+        ),
+        prometheus.query(
+          this.promql(config.usageCallsMetric, win.windowSeconds, subscriptions),
+          win.evalTime,
+        ),
+      ]);
+    } catch (error) {
+      this.recordPrometheusFailure(error);
+      throw error;
+    }
 
     const map = new Map<string, MaasUsageRow>();
     const add = (samples: PromSample[], field: 'tokens' | 'calls') => {
@@ -289,7 +433,7 @@ export class MaasUsageSource implements UsageSource {
     add(calls, 'calls');
 
     const rows = [...map.values()].filter((r) => r.tokens > 0 || r.calls > 0);
-    this.rowCache.set(cacheKey, { at: now.getTime(), rows });
+    this.rowCache.set(cacheKey, { at: now.getTime(), rows, partial: win.partial });
     if (this.rowCache.size > 500) {
       const oldest = this.rowCache.keys().next().value;
       if (oldest !== undefined) this.rowCache.delete(oldest);
@@ -299,16 +443,42 @@ export class MaasUsageSource implements UsageSource {
 
   // ---------------------------------------------------------------- models
 
-  private async loadModels(): Promise<MaasModelInfoRow[]> {
+  private async loadModels(): Promise<{
+    rows: MaasModelInfoRow[];
+    resolve: MaasModelResolver;
+  }> {
     const now = Date.now();
-    if (this.modelCache && now - this.modelCache.at < 60_000) return this.modelCache.rows;
+    if (this.modelCache && now - this.modelCache.at < MODEL_CACHE_TTL_MS) return this.modelCache;
+    // ORDER BY: the resolver result must not depend on the physical row order
     const rows = await this.fastify.dbUtils.queryMany<MaasModelInfoRow>(
       `SELECT id, name, backend_model_name, maas_model_ref_name, maas_model_ref_namespace,
               input_cost_per_token, output_cost_per_token
-         FROM models WHERE backend_type = 'maas'`,
+         FROM models WHERE backend_type = 'maas' ORDER BY id`,
     );
-    this.modelCache = { at: now, rows };
-    return rows;
+    const resolve = MaasUsageSource.buildResolver(rows, (label, modelIds) =>
+      this.warnAmbiguousLabel(label, modelIds),
+    );
+    this.modelCache = { at: now, rows, resolve };
+    return this.modelCache;
+  }
+
+  /** Warn once per label: the resolver is rebuilt every time the model cache expires */
+  private warnAmbiguousLabel(label: string, modelIds: string[]): void {
+    if (this.warnedAmbiguous.has(label)) return;
+    this.warnedAmbiguous.add(label);
+    this.warn(
+      { label, modelIds },
+      'MaaS usage: a Limitador model label matches several MaaS models - treated as unresolved (cost 0); rename the models or ensure the label is the full <namespace>/<name>',
+    );
+  }
+
+  /**
+   * Register the ids of all MaaS models so the admin usage views report them under the `maas`
+   * provider (their `<namespace>/` prefix would otherwise read as a LiteLLM provider).
+   */
+  async syncModelProviders(): Promise<void> {
+    const { rows } = await this.loadModels();
+    setMaasModelIds(rows.map((m) => m.id));
   }
 
   /** Blended price per token (see file header); 0 when no price is configured */
@@ -319,24 +489,57 @@ export class MaasUsageSource implements UsageSource {
     return input ?? output ?? 0;
   }
 
-  /** Build a resolver from Limitador `model` label to LiteMaaS model + price */
-  static buildResolver(models: MaasModelInfoRow[]): (label: string) => ResolvedMaasModel {
-    const byKey = new Map<string, MaasModelInfoRow>();
-    const put = (k: string | null | undefined, m: MaasModelInfoRow) => {
-      if (k && !byKey.has(k.toLowerCase())) byKey.set(k.toLowerCase(), m);
+  /**
+   * Build a resolver from Limitador `model` label to LiteMaaS model + price.
+   *
+   * A label is matched, case-insensitively, against (in priority order) the model id, the
+   * `<namespace>/<ref>` name, the MaaSModelRef name and the served model name; a stronger match
+   * wins over a looser one. A label that several models claim at the same priority (two models
+   * sharing a served name, the same ref name in two namespaces) is ambiguous: it stays
+   * unresolved instead of silently picking whichever model was listed first, and
+   * `onAmbiguous` is called once per such label.
+   */
+  static buildResolver(
+    models: MaasModelInfoRow[],
+    onAmbiguous?: (label: string, modelIds: string[]) => void,
+  ): MaasModelResolver {
+    // key -> owning model, or null when several models claim it at its priority tier
+    const byKey = new Map<string, MaasModelInfoRow | null>();
+    const tierOf = new Map<string, number>();
+    const claimants = new Map<string, Set<string>>();
+    const put = (tier: number, k: string | null | undefined, m: MaasModelInfoRow) => {
+      if (!k) return;
+      const key = k.toLowerCase();
+      const ownerTier = tierOf.get(key);
+      if (ownerTier === undefined) {
+        byKey.set(key, m);
+        tierOf.set(key, tier);
+        return;
+      }
+      if (ownerTier < tier) return; // an exact match already owns the key
+      const owner = byKey.get(key);
+      if (owner === null) {
+        claimants.get(key)?.add(m.id);
+      } else if (owner && owner.id !== m.id) {
+        byKey.set(key, null);
+        claimants.set(key, new Set([owner.id, m.id]));
+      }
     };
-    // id and `<ns>/<ref>` first so they win over looser name matches
-    for (const m of models) put(m.id, m);
+    for (const m of models) put(0, m.id, m);
     for (const m of models) {
       if (m.maas_model_ref_namespace && m.maas_model_ref_name) {
-        put(`${m.maas_model_ref_namespace}/${m.maas_model_ref_name}`, m);
+        put(1, `${m.maas_model_ref_namespace}/${m.maas_model_ref_name}`, m);
       }
     }
-    for (const m of models) put(m.maas_model_ref_name, m);
-    for (const m of models) put(m.backend_model_name, m);
+    for (const m of models) put(2, m.maas_model_ref_name, m);
+    for (const m of models) put(3, m.backend_model_name, m);
+    for (const [key, ids] of claimants) onAmbiguous?.(key, [...ids].sort());
+
     return (label: string) => {
       const lower = label.toLowerCase();
-      const hit = byKey.get(lower) ?? byKey.get(lower.slice(lower.lastIndexOf('/') + 1));
+      const stripped = lower.slice(lower.lastIndexOf('/') + 1);
+      // an ambiguous exact key must not fall through to the looser namespace-less lookup
+      const hit = byKey.has(lower) ? byKey.get(lower) : byKey.get(stripped);
       return hit
         ? { id: hit.id, unitPrice: MaasUsageSource.unitPrice(hit), resolved: true }
         : { id: label, unitPrice: 0, resolved: false };
@@ -344,7 +547,7 @@ export class MaasUsageSource implements UsageSource {
   }
 
   private async resolver() {
-    return MaasUsageSource.buildResolver(await this.loadModels());
+    return (await this.loadModels()).resolve;
   }
 
   // ---------------------------------------------------------------- UsageSource
@@ -369,7 +572,7 @@ export class MaasUsageSource implements UsageSource {
     for (const row of rows) {
       const model = resolve(row.model);
       const spend = row.tokens * model.unitPrice;
-      const keyHash = `maas:${row.subscription}`;
+      const keyHash = `${MAAS_KEY_HASH_PREFIX}${row.subscription}`;
 
       const entry = (day.breakdown.models[model.id] ??= { metrics: emptyMetrics(), api_keys: {} });
       entry.metrics.api_requests += row.calls;
@@ -387,7 +590,7 @@ export class MaasUsageSource implements UsageSource {
       k.metrics.spend += spend;
       k.metrics.successful_requests = (k.metrics.successful_requests ?? 0) + row.calls;
 
-      const prov = (day.breakdown.providers['maas'] ??= { metrics: emptyMetrics() });
+      const prov = (day.breakdown.providers[MAAS_PROVIDER] ??= { metrics: emptyMetrics() });
       prov.metrics.api_requests += row.calls;
       prov.metrics.total_tokens += row.tokens;
       prov.metrics.prompt_tokens += row.tokens;
@@ -405,6 +608,14 @@ export class MaasUsageSource implements UsageSource {
 
   // ---------------------------------------------------------------- ranges
 
+  /** Number of UTC days from start to end inclusive (0 for an invalid or inverted range) */
+  static countDays(startDate: string, endDate: string): number {
+    const start = Date.parse(`${startDate}T00:00:00Z`);
+    const end = Date.parse(`${endDate}T00:00:00Z`);
+    if (Number.isNaN(start) || Number.isNaN(end) || end < start) return 0;
+    return Math.round((end - start) / (SECONDS_PER_DAY * 1000)) + 1;
+  }
+
   /** UTC dates from start to end inclusive, capped at MAX_RANGE_DAYS (most recent days kept) */
   static listDates(startDate: string, endDate: string): string[] {
     const start = Date.parse(`${startDate}T00:00:00Z`);
@@ -420,7 +631,8 @@ export class MaasUsageSource implements UsageSource {
   /**
    * Usage over a date range for a set of subscriptions (one key, or all keys of a user).
    * Days are queried with limited concurrency. Throws on Prometheus failure so callers decide
-   * how to degrade.
+   * how to degrade. Ranges longer than MAX_RANGE_DAYS are cut to their most recent days (and a
+   * warning is logged): usage before the first returned `daily` date is not part of the totals.
    */
   async getUsageSummary(
     subscriptions: string[],
@@ -439,6 +651,19 @@ export class MaasUsageSource implements UsageSource {
     if (subscriptions.length === 0) return summary;
 
     const dates = MaasUsageSource.listDates(startDate, endDate);
+    const requestedDays = MaasUsageSource.countDays(startDate, endDate);
+    if (dates.length < requestedDays) {
+      this.warn(
+        {
+          startDate,
+          endDate,
+          requestedDays,
+          maxDays: MAX_RANGE_DAYS,
+          effectiveStartDate: dates[0],
+        },
+        `MaaS usage range truncated to the most recent ${MAX_RANGE_DAYS} days: usage before ${dates[0]} is not included`,
+      );
+    }
     const resolve = await this.resolver();
     const byModel = new Map<string, { requests: number; tokens: number; cost: number }>();
     const perDay = new Map<string, { requests: number; tokens: number; cost: number }>();

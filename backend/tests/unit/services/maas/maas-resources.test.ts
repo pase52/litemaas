@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
   sanitizeRfc1123Name,
   sanitizeLabelValue,
@@ -8,10 +8,69 @@ import {
   buildSubscription,
   parseModelRef,
   maasModelId,
+  configureManagedInstance,
+  getManagedInstance,
+  managedSelector,
+  foreignObjectReason,
   LABEL_MANAGED_BY,
   LABEL_USER_ID,
   LABEL_API_KEY_ID,
+  LABEL_INSTANCE,
+  MANAGED_SELECTOR,
 } from '../../../../src/services/maas/maas-resources';
+
+describe('managed instance', () => {
+  afterEach(() => configureManagedInstance(undefined));
+
+  it('behaves as before when no instance id is configured', () => {
+    expect(getManagedInstance()).toBeUndefined();
+    expect(managedSelector()).toBe(MANAGED_SELECTOR);
+    const p = buildAuthPolicy({ username: 'u', userId: 'uid', namespace: 'ns', models: [] });
+    expect(p.metadata.labels).not.toHaveProperty(LABEL_INSTANCE);
+    expect(
+      foreignObjectReason({ metadata: { name: 'x', labels: { [LABEL_MANAGED_BY]: 'litemaas' } } }),
+    ).toBeNull();
+  });
+
+  it('stamps the instance label on built objects and narrows the selector', () => {
+    configureManagedInstance('prod');
+    const p = buildAuthPolicy({ username: 'u', userId: 'uid', namespace: 'ns', models: [] });
+    const s = buildSubscription({
+      apiKeyId: 'k',
+      userId: 'uid',
+      username: 'u',
+      namespace: 'ns',
+      models: [],
+    });
+    expect(p.metadata.labels![LABEL_INSTANCE]).toBe('prod');
+    expect(s.metadata.labels![LABEL_INSTANCE]).toBe('prod');
+    expect(managedSelector()).toBe(`${MANAGED_SELECTOR},${LABEL_INSTANCE}=prod`);
+  });
+
+  it('treats objects of another instance, or without the label, as foreign', () => {
+    configureManagedInstance('prod');
+    const obj = (instance?: string) => ({
+      metadata: {
+        name: 'x',
+        labels: {
+          [LABEL_MANAGED_BY]: 'litemaas',
+          [LABEL_USER_ID]: 'uid',
+          ...(instance && { [LABEL_INSTANCE]: instance }),
+        },
+      },
+    });
+    expect(foreignObjectReason(obj('prod'), 'uid')).toBeNull();
+    expect(foreignObjectReason(obj('staging'), 'uid')).toMatch(/another LiteMaaS instance/);
+    expect(foreignObjectReason(obj(), 'uid')).toMatch(/another LiteMaaS instance/);
+  });
+
+  it('sanitises the configured id into a valid label value', () => {
+    configureManagedInstance('My Prod!');
+    expect(getManagedInstance()).toMatch(/^My-Prod-[0-9a-f]{8}$/);
+    configureManagedInstance('   ');
+    expect(getManagedInstance()).toBeUndefined();
+  });
+});
 
 const RFC1123 = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
 

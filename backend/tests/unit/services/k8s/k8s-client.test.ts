@@ -8,8 +8,36 @@ import {
   matchesLabelSelector,
   applyMergePatch,
   upsertK8sObject,
+  applyK8sObject,
+  isSubsetDeepEqual,
   type K8sResourceRef,
 } from '../../../../src/services/k8s/k8s-client';
+
+describe('isSubsetDeepEqual', () => {
+  it('ignores key order and keys only present on the current object', () => {
+    const desired = {
+      spec: { owner: { users: ['a'], groups: [] }, modelRefs: [{ name: 'm', namespace: 'ns' }] },
+    };
+    const current = {
+      spec: {
+        modelRefs: [{ namespace: 'ns', name: 'm' }],
+        owner: { groups: [], users: ['a'] },
+        priority: 0,
+      },
+      status: { phase: 'Ready' },
+    };
+    expect(isSubsetDeepEqual(desired, current)).toBe(true);
+  });
+
+  it('detects value, array length/order and type differences', () => {
+    expect(isSubsetDeepEqual({ a: [1, 2] }, { a: [2, 1] })).toBe(false);
+    expect(isSubsetDeepEqual({ a: [1] }, { a: [1, 2] })).toBe(false);
+    expect(isSubsetDeepEqual({ a: { b: 1 } }, { a: { b: 2 } })).toBe(false);
+    expect(isSubsetDeepEqual({ a: 1 }, {})).toBe(false);
+    expect(isSubsetDeepEqual({ a: {} }, { a: [] })).toBe(false);
+    expect(isSubsetDeepEqual({ a: undefined }, {})).toBe(true);
+  });
+});
 
 const REF: K8sResourceRef = {
   group: 'maas.opendatahub.io',
@@ -400,5 +428,63 @@ describe('upsertK8sObject', () => {
     await expect(
       upsertK8sObject(c, REF, { metadata: { name: 'a', namespace: 'ns' } }),
     ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('skipIfUnchanged writes nothing for a matching object (even with server-added fields)', async () => {
+    const c = new InMemoryK8sClient();
+    c.seed(REF, {
+      metadata: { name: 'a', namespace: 'ns', labels: { ours: 'v' } },
+      spec: { v: 1, serverDefault: true },
+      status: { phase: 'Ready' },
+    });
+    const replace = vi.spyOn(c, 'replace');
+    const res = await applyK8sObject(
+      c,
+      REF,
+      { metadata: { name: 'a', namespace: 'ns', labels: { ours: 'v' } }, spec: { v: 1 } },
+      'ns',
+      undefined,
+      { skipIfUnchanged: true },
+    );
+    expect(res.action).toBe('unchanged');
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it('replace keeps unmanaged metadata and status, overrides spec and merges labels', async () => {
+    const c = new InMemoryK8sClient();
+    c.seed(REF, {
+      metadata: {
+        name: 'a',
+        namespace: 'ns',
+        labels: { ours: 'old', theirs: 'keep' },
+        annotations: { other: 'keep' },
+        finalizers: ['their.io/finalizer'],
+      },
+      spec: { v: 1, stale: true },
+      status: { phase: 'Ready' },
+    });
+    const res = await applyK8sObject(
+      c,
+      REF,
+      {
+        metadata: {
+          name: 'a',
+          namespace: 'ns',
+          labels: { ours: 'new' },
+          annotations: { mine: 'x' },
+        },
+        spec: { v: 2 },
+      },
+      'ns',
+      undefined,
+      { skipIfUnchanged: true },
+    );
+    expect(res.action).toBe('replaced');
+    const got = (await c.get(REF, 'a', 'ns'))!;
+    expect(got.spec).toEqual({ v: 2 });
+    expect(got.status).toEqual({ phase: 'Ready' });
+    expect(got.metadata.finalizers).toEqual(['their.io/finalizer']);
+    expect(got.metadata.labels).toEqual({ ours: 'new', theirs: 'keep' });
+    expect(got.metadata.annotations).toEqual({ other: 'keep', mine: 'x' });
   });
 });

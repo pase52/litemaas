@@ -329,6 +329,7 @@ enabling it in production.
 | `MAAS_API_URL` | maas-api base URL, e.g. `https://maas.apps.<domain>/maas-api` | - | When enabled |
 | `MAAS_GATEWAY_URL` | Public OpenAI-compatible gateway URL shown to users (View Key, curl, Playground fallback) | - | Recommended |
 | `MAAS_NAMESPACE` | Namespace of MaaSAuthPolicy / MaaSSubscription objects | `models-as-a-service` | No |
+| `MAAS_INSTANCE_ID` | Value of the `litemaas.io/instance` label on objects this deployment creates; the reconciler only manages objects carrying it, so several LiteMaaS instances can share one MaaS namespace | pod namespace (or `default`) | No |
 | `MAAS_MODEL_NAMESPACES` | Comma-separated namespaces scanned for MaaSModelRef; empty = all namespaces | - | No |
 | `MAAS_SYNC_INTERVAL_MS` | MaaSModelRef → models sync interval | `300000` | No |
 | `MAAS_RECONCILE_INTERVAL_MS` | Reconciler interval (policies, subscriptions, key retries, expiry, migration grace) | `300000` | No |
@@ -336,9 +337,11 @@ enabling it in production.
 | `MAAS_USAGE_HITS_METRIC` | Limitador token counter metric | `authorized_hits` | No |
 | `MAAS_USAGE_CALLS_METRIC` | Limitador request counter metric | `authorized_calls` | No |
 | `MAAS_USAGE_LABEL_MATCHERS` | Extra PromQL matchers, e.g. `namespace="kuadrant-system"` | - | No |
+| `MAAS_USAGE_RETENTION_DAYS` | Days of history Prometheus/Thanos keeps; the usage resync never re-queries older days and carries their cached MaaS usage forward | `15` | No |
 | `PROMETHEUS_URL` | Thanos Querier / Prometheus URL for MaaS usage | - | For usage |
 | `PROMETHEUS_TOKEN` | Bearer token for Prometheus | `K8S_TOKEN` / in-cluster SA token | No |
 | `PROMETHEUS_SKIP_TLS_VERIFY` | Skip TLS verification for Prometheus | `false` | No |
+| `PROMETHEUS_TIMEOUT_MS` | Timeout of a single Prometheus query (ms); a transport failure pauses MaaS usage queries for 60 s | `10000` | No |
 | `K8S_API_URL` | Kubernetes API URL | in-cluster (`KUBERNETES_SERVICE_HOST`) | No |
 | `K8S_TOKEN` | Kubernetes bearer token | in-cluster SA token (re-read per request) | No |
 | `K8S_API_SKIP_TLS_VERIFY` | Skip TLS verification for the Kubernetes API (not maas-api) | `false` | No |

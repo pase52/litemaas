@@ -1,10 +1,10 @@
 import type { FastifyInstance } from 'fastify';
 import { BaseService } from '../base.service.js';
-import { upsertK8sObject, type K8sObject } from '../k8s/k8s-client.js';
+import { applyK8sObject, type K8sObject } from '../k8s/k8s-client.js';
 import type { MaasClients } from './maas-clients.js';
 import {
   LABEL_USER_ID,
-  MANAGED_SELECTOR,
+  managedSelector,
   foreignObjectReason,
   MAAS_AUTH_POLICY,
   MAAS_SUBSCRIPTION,
@@ -15,7 +15,8 @@ import {
 } from './maas-resources.js';
 
 export interface SyncPolicyResult {
-  action: 'upserted' | 'deleted' | 'noop';
+  /** `unchanged`: the cluster already held the desired policy, nothing was written */
+  action: 'upserted' | 'unchanged' | 'deleted' | 'noop';
   models: number;
   policyName?: string;
 }
@@ -153,9 +154,17 @@ export class MaasAccessService extends BaseService {
         namespace: config.namespace,
         models,
       });
-      await upsertK8sObject(k8s, MAAS_AUTH_POLICY, policy, config.namespace, (existing) =>
-        foreignObjectReason(existing, userId),
+      const applied = await applyK8sObject(
+        k8s,
+        MAAS_AUTH_POLICY,
+        policy,
+        config.namespace,
+        (existing) => foreignObjectReason(existing, userId),
+        { skipIfUnchanged: true },
       );
+      if (applied.action === 'unchanged') {
+        return { action: 'unchanged' as const, models: models.length, policyName: name };
+      }
       this.fastify.log.info(
         { userId, policy: name, models: models.length },
         'MaaS auth policy applied',
@@ -236,7 +245,7 @@ export class MaasAccessService extends BaseService {
     const { k8s, config } = this.clients;
     const subs = await k8s.list(MAAS_SUBSCRIPTION, {
       namespace: config.namespace,
-      labelSelector: `${MANAGED_SELECTOR},${LABEL_USER_ID}=${sanitizeLabelValue(userId)}`,
+      labelSelector: `${managedSelector()},${LABEL_USER_ID}=${sanitizeLabelValue(userId)}`,
     });
 
     for (const sub of subs) {

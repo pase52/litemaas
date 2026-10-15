@@ -3,6 +3,7 @@ import { randomBytes } from 'crypto';
 import { LiteLLMService } from './litellm.service';
 import { BaseService } from './base.service.js';
 import { NotificationService } from './notification.service.js';
+import type { ApplicationError } from '../utils/errors.js';
 import { LiteLLMSyncUtils } from '../utils/litellm-sync.utils.js';
 import { MaasAccessService } from './maas/maas-access.service.js';
 import {
@@ -28,6 +29,24 @@ import { PaginatedResponse } from '../types/common.types.js';
 
 // System user ID for automated status changes
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000001';
+
+/**
+ * Statuses the OWNER of a subscription may set directly (self-cancellation). Everything else is
+ * decided elsewhere: activation happens when the user (re)creates the subscription (restricted
+ * models start pending) or when an admin approves / reverts it; pending, denied, suspended and
+ * expired are set by admins or the system. Otherwise a user could re-activate a subscription an
+ * admin denied or suspended just by PATCHing its status.
+ */
+const OWNER_SETTABLE_STATUSES: ReadonlySet<string> = new Set(['cancelled', 'inactive']);
+
+/** Internal options of {@link SubscriptionService.updateSubscription} (never built from request data) */
+export interface UpdateSubscriptionOptions {
+  /**
+   * Trusted admin flows only (bulk operations): lets the caller set any status. The public
+   * PATCH route never passes options, so request bodies cannot reach this.
+   */
+  allowAnyStatus?: boolean;
+}
 
 export interface CreateSubscriptionRequest {
   modelId: string;
@@ -60,6 +79,8 @@ interface DatabaseSubscription {
   provider?: string;
   input_cost_per_token?: number;
   output_cost_per_token?: number;
+  model_backend_type?: string | null;
+  model_migration_state?: string | null;
 }
 
 interface CountResult {
@@ -401,6 +422,61 @@ export class SubscriptionService extends BaseService {
     await access.removeModelForUser(userId, modelId);
   }
 
+  /**
+   * Error for an attempt to subscribe to / activate a subscription on a LiteLLM model that is
+   * migrating to MaaS (or already migrated). The message names the MaaS model that replaces it.
+   */
+  private async createModelMigratingError(
+    modelId: string,
+    intent: 'subscribe' | 'activate',
+  ): Promise<ApplicationError> {
+    const target = await this.fastify.dbUtils.queryOne<{ id: string }>(
+      'SELECT id FROM models WHERE migrated_from_litellm_id = $1',
+      [modelId],
+    );
+    if (intent === 'subscribe') {
+      return this.createValidationError(
+        'Model is migrating to MaaS',
+        'modelId',
+        modelId,
+        target
+          ? `This model is being migrated; subscribe to '${target.id}' instead`
+          : 'This model is being migrated to MaaS and no longer accepts new subscriptions',
+      );
+    }
+    return this.createValidationError(
+      target
+        ? `Model '${modelId}' is migrating to MaaS: activate the subscription on '${target.id}' instead`
+        : `Model '${modelId}' is migrating to MaaS and no longer accepts activations`,
+      'modelId',
+      modelId,
+      target
+        ? `Pending requests were copied to '${target.id}'; approve or manage the subscription there`
+        : 'Subscriptions on a migrating model cannot be activated',
+    );
+  }
+
+  /** True when the joined model columns say the LiteLLM model is migrating (or migrated) to MaaS */
+  private isMigratingLiteLLMModel(row: DatabaseSubscription): boolean {
+    return !!row.model_migration_state && row.model_backend_type !== 'maas';
+  }
+
+  /**
+   * Refuses to activate a subscription on a LiteLLM model that is migrating to MaaS (or already
+   * migrated), pointing at the MaaS model that replaces it. No-op for MaaS models and for models
+   * that are not migrating. Call it before ANY path that sets a subscription active (approve,
+   * revert, update, auto-approval, admin assignment).
+   */
+  async assertModelNotMigrating(modelId: string): Promise<void> {
+    const model = await this.fastify.dbUtils.queryOne<{
+      backend_type?: string | null;
+      migration_state?: string | null;
+    }>('SELECT backend_type, migration_state FROM models WHERE id = $1', [modelId]);
+    if (model?.migration_state && model.backend_type !== 'maas') {
+      throw await this.createModelMigratingError(modelId, 'activate');
+    }
+  }
+
   async createSubscription(
     userId: string,
     request: EnhancedCreateSubscriptionDto,
@@ -432,18 +508,7 @@ export class SubscriptionService extends BaseService {
 
       // A LiteLLM model that is migrating to MaaS (or already migrated) takes no new subscriptions
       if (!isMaasModel && modelDetails?.migration_state) {
-        const target = await this.fastify.dbUtils.queryOne<{ id: string }>(
-          'SELECT id FROM models WHERE migrated_from_litellm_id = $1',
-          [modelId],
-        );
-        throw this.createValidationError(
-          'Model is migrating to MaaS',
-          'modelId',
-          modelId,
-          target
-            ? `This model is being migrated; subscribe to '${target.id}' instead`
-            : 'This model is being migrated to MaaS and no longer accepts new subscriptions',
-        );
+        throw await this.createModelMigratingError(modelId, 'subscribe');
       }
 
       if (isMaasModel) {
@@ -812,10 +877,19 @@ export class SubscriptionService extends BaseService {
     }
   }
 
+  /**
+   * Update a subscription owned by `userId`.
+   *
+   * Status: the owner may only cancel (see OWNER_SETTABLE_STATUSES). Any other status change is
+   * rejected with 403, so a user cannot re-activate a denied / pending / suspended subscription
+   * by PATCHing it. Trusted admin flows opt out with `options.allowAnyStatus`; they still cannot
+   * activate a subscription on a model that is migrating to MaaS.
+   */
   async updateSubscription(
     subscriptionId: string,
     userId: string,
     updates: EnhancedUpdateSubscriptionDto,
+    options: UpdateSubscriptionOptions = {},
   ): Promise<EnhancedSubscription> {
     try {
       // Validate subscription ownership
@@ -841,12 +915,26 @@ export class SubscriptionService extends BaseService {
         teamId,
       } = updates;
 
+      // A status equal to the current one is not a transition: it is ignored, never written
+      const statusChanging = status !== undefined && status !== existing.status;
+      if (statusChanging && !options.allowAnyStatus && !OWNER_SETTABLE_STATUSES.has(status)) {
+        throw this.createForbiddenError(
+          `You cannot change a subscription's status to '${status}'`,
+          undefined,
+          'Owners can only cancel their subscription (status "cancelled" or "inactive"). ' +
+            'Subscriptions are activated by requesting access again or by an administrator',
+        );
+      }
+      if (statusChanging && status === 'active') {
+        await this.assertModelNotMigrating(existing.modelId);
+      }
+
       // Build update query
       const updateFields: string[] = [];
       const params: any[] = [];
       let paramIndex = 1;
 
-      if (status !== undefined) {
+      if (statusChanging) {
         updateFields.push(`status = $${paramIndex++}`);
         params.push(status);
       }
@@ -910,7 +998,6 @@ export class SubscriptionService extends BaseService {
       params.push(subscriptionId, userId);
 
       // MaaS: revoke cluster access BEFORE the row stops being active
-      const statusChanging = status !== undefined && status !== existing.status;
       if (statusChanging && existing.status === 'active') {
         await this.maasRevoke(userId, existing.modelId);
       }
@@ -1953,14 +2040,20 @@ export class SubscriptionService extends BaseService {
         try {
           switch (operationType) {
             case 'suspend':
-              await this.updateSubscription(subscriptionId, adminUserId, {
-                status: SubscriptionStatus.SUSPENDED,
-              });
+              await this.updateSubscription(
+                subscriptionId,
+                adminUserId,
+                { status: SubscriptionStatus.SUSPENDED },
+                { allowAnyStatus: true },
+              );
               break;
             case 'activate':
-              await this.updateSubscription(subscriptionId, adminUserId, {
-                status: SubscriptionStatus.ACTIVE,
-              });
+              await this.updateSubscription(
+                subscriptionId,
+                adminUserId,
+                { status: SubscriptionStatus.ACTIVE },
+                { allowAnyStatus: true },
+              );
               break;
             case 'update_budget':
               if (params.maxBudget) {
@@ -2284,9 +2377,12 @@ export class SubscriptionService extends BaseService {
 
     for (const subscriptionId of subscriptionIds) {
       try {
-        // Get current subscription state
+        // Get current subscription state (with the model's migration state)
         const subscription = await this.fastify.dbUtils.queryOne<DatabaseSubscription>(
-          `SELECT * FROM subscriptions WHERE id = $1`,
+          `SELECT s.*, m.backend_type AS model_backend_type, m.migration_state AS model_migration_state
+             FROM subscriptions s
+             LEFT JOIN models m ON m.id = s.model_id
+            WHERE s.id = $1`,
           [subscriptionId],
         );
 
@@ -2294,6 +2390,11 @@ export class SubscriptionService extends BaseService {
           result.errors.push({ subscription: subscriptionId, error: 'Subscription not found' });
           result.failed++;
           continue;
+        }
+
+        // Nothing may be activated on a LiteLLM model that is migrating to MaaS
+        if (this.isMigratingLiteLLMModel(subscription)) {
+          throw await this.createModelMigratingError(subscription.model_id, 'activate');
         }
 
         const oldStatus = subscription.status;
@@ -2481,9 +2582,12 @@ export class SubscriptionService extends BaseService {
    * - non-existent → error
    */
   async requestReview(subscriptionId: string, userId: string): Promise<EnhancedSubscription> {
-    // Verify ownership and get current state
+    // Verify ownership and get current state (with the model's migration state)
     const subscription = await this.fastify.dbUtils.queryOne<DatabaseSubscription>(
-      `SELECT * FROM subscriptions WHERE id = $1 AND user_id = $2`,
+      `SELECT s.*, m.backend_type AS model_backend_type, m.migration_state AS model_migration_state
+         FROM subscriptions s
+         LEFT JOIN models m ON m.id = s.model_id
+        WHERE s.id = $1 AND s.user_id = $2`,
       [subscriptionId, userId],
     );
 
@@ -2518,6 +2622,11 @@ export class SubscriptionService extends BaseService {
         subscription.status,
         'Only denied subscriptions can be re-reviewed',
       );
+    }
+
+    // A migrating model takes no new requests: the user must ask for the MaaS model instead
+    if (this.isMigratingLiteLLMModel(subscription)) {
+      throw await this.createModelMigratingError(subscription.model_id, 'subscribe');
     }
 
     // Update denied → pending
@@ -2587,9 +2696,12 @@ export class SubscriptionService extends BaseService {
     adminUserId: string,
     reason?: string,
   ): Promise<SubscriptionWithDetails> {
-    // Get current subscription state
+    // Get current subscription state (with the model's migration state)
     const subscription = await this.fastify.dbUtils.queryOne<DatabaseSubscription>(
-      `SELECT * FROM subscriptions WHERE id = $1`,
+      `SELECT s.*, m.backend_type AS model_backend_type, m.migration_state AS model_migration_state
+         FROM subscriptions s
+         LEFT JOIN models m ON m.id = s.model_id
+        WHERE s.id = $1`,
       [subscriptionId],
     );
 
@@ -2618,6 +2730,11 @@ export class SubscriptionService extends BaseService {
         oldStatus,
         'Only active, denied, or pending subscriptions can be reverted',
       );
+    }
+
+    // Nothing may be activated on a LiteLLM model that is migrating to MaaS
+    if (newStatus === 'active' && this.isMigratingLiteLLMModel(subscription)) {
+      throw await this.createModelMigratingError(subscription.model_id, 'activate');
     }
 
     // MaaS: revoke cluster access BEFORE an active subscription is reverted
@@ -2870,6 +2987,19 @@ export class SubscriptionService extends BaseService {
    */
   async handleModelRestrictionChange(modelId: string, isNowRestricted: boolean): Promise<void> {
     if (!isNowRestricted) {
+      // Nothing may be auto-activated on a LiteLLM model that is migrating to MaaS
+      const model = await this.fastify.dbUtils.queryOne<{
+        backend_type?: string | null;
+        migration_state?: string | null;
+      }>('SELECT backend_type, migration_state FROM models WHERE id = $1', [modelId]);
+      if (model?.migration_state && model.backend_type !== 'maas') {
+        this.fastify.log.warn(
+          { modelId, migrationState: model.migration_state },
+          'Model is migrating to MaaS: pending subscriptions are not auto-approved',
+        );
+        return;
+      }
+
       // Model is no longer restricted - auto-approve all pending subscriptions
       const pendingSubscriptions = await this.fastify.dbUtils.queryMany<{
         id: string;

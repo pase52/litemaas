@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SubscriptionService } from '../../../src/services/subscription.service';
 import { LiteLLMService } from '../../../src/services/litellm.service';
+import { SubscriptionStatus } from '../../../src/types/subscription.types';
 import type { FastifyInstance } from 'fastify';
 import { mockUser } from '../../setup';
 
@@ -415,6 +416,166 @@ describe('SubscriptionService', () => {
           quotaRequests: 20000,
         }),
       ).rejects.toThrow("Subscription with ID 'non-existent' not found");
+    });
+  });
+
+  describe('updateSubscription status guard (owner cannot self-activate)', () => {
+    const existingWith = (status: string) => ({ ...mockSubscription, status });
+    const migrationCheck = (state: string | null, backend = 'litellm') => ({
+      backend_type: backend,
+      migration_state: state,
+    });
+
+    it.each(['denied', 'pending', 'suspended', 'inactive', 'cancelled', 'expired'])(
+      'rejects the owner re-activating a %s subscription with 403 and writes nothing',
+      async (status) => {
+        const queryOne = vi.fn().mockResolvedValueOnce(existingWith(status));
+        const query = vi.fn().mockResolvedValue({ rowCount: 1 });
+        mockFastify.dbUtils!.queryOne = queryOne;
+        mockFastify.dbUtils!.query = query;
+
+        await expect(
+          service.updateSubscription(mockSubscription.id, mockUser.id, {
+            status: SubscriptionStatus.ACTIVE,
+          }),
+        ).rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' });
+
+        expect(queryOne).toHaveBeenCalledTimes(1); // the ownership lookup only
+        expect(query).not.toHaveBeenCalled(); // no audit entry either
+      },
+    );
+
+    it.each([
+      SubscriptionStatus.PENDING,
+      SubscriptionStatus.DENIED,
+      SubscriptionStatus.SUSPENDED,
+      SubscriptionStatus.EXPIRED,
+    ])('rejects the owner setting an admin/system status (%s)', async (status) => {
+      mockFastify.dbUtils!.queryOne = vi.fn().mockResolvedValueOnce(existingWith('active'));
+      await expect(
+        service.updateSubscription(mockSubscription.id, mockUser.id, { status }),
+      ).rejects.toMatchObject({ statusCode: 403 });
+    });
+
+    it.each([
+      [SubscriptionStatus.CANCELLED, 'cancelled'],
+      [SubscriptionStatus.INACTIVE, 'inactive'],
+    ])('still lets the owner cancel (%s)', async (status, expected) => {
+      const queryOne = vi
+        .fn()
+        .mockResolvedValueOnce(existingWith('active'))
+        .mockResolvedValueOnce(existingWith(expected));
+      mockFastify.dbUtils!.queryOne = queryOne;
+      mockFastify.dbUtils!.query = vi.fn().mockResolvedValue({ rowCount: 1 });
+
+      const result = await service.updateSubscription(mockSubscription.id, mockUser.id, {
+        status,
+      });
+
+      expect(result.status).toBe(expected);
+      expect(queryOne).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining('UPDATE subscriptions SET status = $1'),
+        expect.arrayContaining([expected]),
+      );
+    });
+
+    it('ignores a status equal to the current one but still applies the other fields', async () => {
+      const queryOne = vi
+        .fn()
+        .mockResolvedValueOnce(existingWith('active'))
+        .mockResolvedValueOnce({ ...existingWith('active'), quota_requests: 5 });
+      mockFastify.dbUtils!.queryOne = queryOne;
+      mockFastify.dbUtils!.query = vi.fn().mockResolvedValue({ rowCount: 1 });
+
+      const result = await service.updateSubscription(mockSubscription.id, mockUser.id, {
+        status: SubscriptionStatus.ACTIVE,
+        quotaRequests: 5,
+      });
+
+      expect(result.quotaRequests).toBe(5);
+      const [sql] = queryOne.mock.calls[1];
+      expect(sql).toContain('quota_requests = $1');
+      expect(sql).not.toContain('status =');
+    });
+
+    it('is a no-op (no UPDATE) when only the current status is sent', async () => {
+      const queryOne = vi.fn().mockResolvedValueOnce(existingWith('pending'));
+      mockFastify.dbUtils!.queryOne = queryOne;
+      const result = await service.updateSubscription(mockSubscription.id, mockUser.id, {
+        status: SubscriptionStatus.PENDING,
+      });
+      expect(result.status).toBe('pending');
+      expect(queryOne).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets a trusted admin flow opt in with allowAnyStatus', async () => {
+      const queryOne = vi
+        .fn()
+        .mockResolvedValueOnce(existingWith('suspended'))
+        .mockResolvedValueOnce(migrationCheck(null))
+        .mockResolvedValueOnce(existingWith('active'));
+      mockFastify.dbUtils!.queryOne = queryOne;
+      mockFastify.dbUtils!.query = vi.fn().mockResolvedValue({ rowCount: 1 });
+
+      const result = await service.updateSubscription(
+        mockSubscription.id,
+        mockUser.id,
+        { status: SubscriptionStatus.ACTIVE },
+        { allowAnyStatus: true },
+      );
+      expect(result.status).toBe('active');
+    });
+
+    it('allowAnyStatus still cannot activate a subscription on a migrating model', async () => {
+      const queryOne = vi
+        .fn()
+        .mockResolvedValueOnce(existingWith('suspended'))
+        .mockResolvedValueOnce(migrationCheck('migrating'))
+        .mockResolvedValueOnce({ id: 'maas-demo/gpt-4' });
+      mockFastify.dbUtils!.queryOne = queryOne;
+      const query = vi.fn().mockResolvedValue({ rowCount: 1 });
+      mockFastify.dbUtils!.query = query;
+
+      await expect(
+        service.updateSubscription(
+          mockSubscription.id,
+          mockUser.id,
+          { status: SubscriptionStatus.ACTIVE },
+          { allowAnyStatus: true },
+        ),
+      ).rejects.toThrow(/maas-demo\/gpt-4/);
+      expect(queryOne).toHaveBeenCalledTimes(3); // lookup, migration check, target lookup
+      expect(query).not.toHaveBeenCalled();
+    });
+
+    it('bulk suspend / activate pass the explicit internal option', async () => {
+      const update = vi.spyOn(service, 'updateSubscription').mockResolvedValue({} as any);
+      mockFastify.dbUtils!.query = vi.fn().mockResolvedValue({ rowCount: 1 });
+
+      await service.bulkUpdateSubscriptions(
+        { subscriptionIds: ['s1'], operation: 'activate' } as any,
+        'admin-1',
+      );
+      await service.bulkUpdateSubscriptions(
+        { subscriptionIds: ['s2'], operation: 'suspend' } as any,
+        'admin-1',
+      );
+
+      expect(update).toHaveBeenNthCalledWith(
+        1,
+        's1',
+        'admin-1',
+        { status: SubscriptionStatus.ACTIVE },
+        { allowAnyStatus: true },
+      );
+      expect(update).toHaveBeenNthCalledWith(
+        2,
+        's2',
+        'admin-1',
+        { status: SubscriptionStatus.SUSPENDED },
+        { allowAnyStatus: true },
+      );
     });
   });
 
@@ -998,6 +1159,132 @@ describe('SubscriptionService', () => {
           call[0].includes('INSERT INTO subscription_status_history'),
         );
         expect(auditCalls.length).toBe(2);
+      });
+    });
+
+    describe('migrating LiteLLM models refuse activation', () => {
+      const TARGET = 'maas-demo/gpt-4';
+      const migrating = (over: Record<string, unknown> = {}) => ({
+        ...pendingSubscription,
+        model_backend_type: 'litellm',
+        model_migration_state: 'migrating',
+        ...over,
+      });
+
+      it('approveSubscriptions fails the subscription, names the MaaS model and writes nothing', async () => {
+        const queryOne = vi
+          .fn()
+          .mockResolvedValueOnce(migrating()) // subscription + model migration state
+          .mockResolvedValueOnce({ id: TARGET }); // migration target lookup
+        const query = vi.fn().mockResolvedValue({ rowCount: 1 });
+        mockFastify.dbUtils!.queryOne = queryOne;
+        mockFastify.dbUtils!.query = query;
+
+        const result = await service.approveSubscriptions([pendingSubscription.id], adminUserId);
+
+        expect(result.successful).toBe(0);
+        expect(result.failed).toBe(1);
+        expect(result.errors[0].subscription).toBe(pendingSubscription.id);
+        expect(result.errors[0].error).toContain(TARGET);
+        expect(queryOne).toHaveBeenCalledTimes(2); // no UPDATE
+        expect(query).not.toHaveBeenCalled(); // no status history / audit rows
+      });
+
+      it('approveSubscriptions still approves the other subscriptions of the batch', async () => {
+        mockFastify.dbUtils!.queryOne = vi
+          .fn()
+          .mockResolvedValueOnce(migrating({ id: 'sub-a' }))
+          .mockResolvedValueOnce({ id: TARGET })
+          .mockResolvedValueOnce({ ...pendingSubscription, id: 'sub-b' })
+          .mockResolvedValueOnce({ ...pendingSubscription, id: 'sub-b', status: 'active' });
+        mockFastify.dbUtils!.query = vi.fn().mockResolvedValue({ rowCount: 1 });
+
+        const result = await service.approveSubscriptions(['sub-a', 'sub-b'], adminUserId);
+        expect(result).toMatchObject({ successful: 1, failed: 1 });
+        expect(result.errors.map((e) => e.subscription)).toEqual(['sub-a']);
+      });
+
+      it('does not block a MaaS model that carries a stale migration_state', async () => {
+        mockFastify.dbUtils!.queryOne = vi
+          .fn()
+          .mockResolvedValueOnce(migrating({ model_backend_type: 'maas' }))
+          .mockResolvedValueOnce({ ...pendingSubscription, status: 'active' });
+        mockFastify.dbUtils!.query = vi.fn().mockResolvedValue({ rowCount: 1 });
+        const result = await service.approveSubscriptions([pendingSubscription.id], adminUserId);
+        expect(result.successful).toBe(1);
+      });
+
+      it('revertSubscription refuses to activate but not to deny', async () => {
+        mockFastify.dbUtils!.queryOne = vi
+          .fn()
+          .mockResolvedValueOnce(migrating({ status: 'denied' }))
+          .mockResolvedValueOnce({ id: TARGET });
+        await expect(
+          service.revertSubscription(pendingSubscription.id, 'active', adminUserId),
+        ).rejects.toThrow(new RegExp(TARGET));
+
+        // pending -> denied does not activate anything: it goes through
+        mockFastify.dbUtils!.queryOne = vi
+          .fn()
+          .mockResolvedValueOnce(migrating({ status: 'pending' }))
+          .mockResolvedValueOnce({ ...pendingSubscription, status: 'denied' })
+          .mockResolvedValueOnce({
+            ...pendingSubscription,
+            status: 'denied',
+            user_id: 'user-123',
+            model_id: 'gpt-4',
+            username: 'u',
+            email: 'u@example.com',
+            model_name: 'GPT-4',
+            provider: 'openai',
+            restricted_access: true,
+          });
+        mockFastify.dbUtils!.query = vi.fn().mockResolvedValue({ rowCount: 1 });
+        const reverted = await service.revertSubscription(
+          pendingSubscription.id,
+          'denied',
+          adminUserId,
+          'no',
+        );
+        expect(reverted.status).toBe('denied');
+      });
+
+      it('revertSubscription keeps the same-status error for an already active subscription', async () => {
+        mockFastify.dbUtils!.queryOne = vi
+          .fn()
+          .mockResolvedValueOnce(migrating({ status: 'active' }));
+        await expect(
+          service.revertSubscription(pendingSubscription.id, 'active', adminUserId),
+        ).rejects.toThrow(/same status/i);
+      });
+
+      it('requestReview refuses to re-queue a denied subscription on a migrating model', async () => {
+        const queryOne = vi
+          .fn()
+          .mockResolvedValueOnce(migrating({ status: 'denied' }))
+          .mockResolvedValueOnce({ id: TARGET });
+        mockFastify.dbUtils!.queryOne = queryOne;
+        mockFastify.dbUtils!.query = vi.fn().mockResolvedValue({ rowCount: 1 });
+
+        await expect(service.requestReview('sub-denied-123', mockUser.id)).rejects.toThrow(
+          /migrating to MaaS/,
+        );
+        expect(queryOne).toHaveBeenCalledTimes(2); // no UPDATE to pending
+      });
+
+      it('lifting the restriction does not auto-approve pending subscriptions of a migrating model', async () => {
+        mockFastify.dbUtils!.queryOne = vi
+          .fn()
+          .mockResolvedValue({ backend_type: 'litellm', migration_state: 'migrating' });
+        const queryMany = vi.fn().mockResolvedValue([{ id: 'sub-1' }]);
+        mockFastify.dbUtils!.queryMany = queryMany;
+        const query = vi.fn().mockResolvedValue({ rowCount: 1 });
+        mockFastify.dbUtils!.query = query;
+
+        await service.handleModelRestrictionChange('gpt-4', false);
+
+        expect(queryMany).not.toHaveBeenCalled();
+        expect(query).not.toHaveBeenCalled();
       });
     });
   });

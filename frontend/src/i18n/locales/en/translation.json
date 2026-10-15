@@ -2142,6 +2142,8 @@
     "keys": {
       "backendHelp": "A key works with models of one backend only. Choose the backend first, then select its models.",
       "backendLabel": "Key backend",
+      "expiryNotLater": "The new expiration cannot be later than the current one ({{date}}).",
+      "expiryShortenOnly": "MaaS API keys can only have their expiration shortened.",
       "graceBannerItem": "Key \"{{key}}\": {{models}} stay available through LiteLLM until {{date}}. Create a MaaS key for these models before then.",
       "graceBannerTitle": "Some of your keys use models that are migrating to MaaS",
       "noSubscribedMaasModels": "You have no active subscriptions to MaaS models.",

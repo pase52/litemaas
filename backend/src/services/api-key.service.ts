@@ -2208,7 +2208,11 @@ export class ApiKeyService extends BaseService {
       isActive: apiKey.is_active,
       createdAt: new Date(apiKey.created_at),
       revokedAt: apiKey.revoked_at ? new Date(apiKey.revoked_at) : undefined,
-      liteLLMKeyAlias: apiKey.litellm_key_alias,
+      // MaaS keys have no LiteLLM alias: usage is keyed (and filtered) by the subscription name
+      liteLLMKeyAlias:
+        apiKey.backend_type === 'maas'
+          ? (apiKey.litellm_key_alias ?? apiKey.maas_subscription_name)
+          : apiKey.litellm_key_alias,
       archivedAt: apiKey.archived_at ? new Date(apiKey.archived_at) : undefined,
       liteLLMKeyId: apiKey.lite_llm_key_value || liteLLMResponse?.key,
       lastSyncAt: apiKey.last_sync_at ? new Date(apiKey.last_sync_at) : undefined,
@@ -2416,7 +2420,11 @@ export class ApiKeyService extends BaseService {
         await client.query(
           `UPDATE api_keys
            SET is_active = false, archived_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
-               maas_sync_state = CASE WHEN backend_type = 'maas' AND maas_key_id IS NOT NULL THEN 'pending' ELSE maas_sync_state END
+               -- MaaS keys reached here after a successful cluster revoke (removeModelFromKey), which
+               -- already recorded synced/pending: only flag keys whose revoke is still outstanding
+               maas_sync_state = CASE WHEN backend_type = 'maas' AND maas_key_id IS NOT NULL
+                                       AND maas_sync_state IS DISTINCT FROM 'synced' THEN 'pending'
+                                      ELSE maas_sync_state END
            WHERE id = ANY($1)
              AND archived_at IS NULL
              AND id NOT IN (SELECT DISTINCT api_key_id FROM api_key_models)`,

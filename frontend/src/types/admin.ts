@@ -222,7 +222,12 @@ export interface MigrateToMaasResponse {
   created: boolean;
   graceUntil: string;
   subscriptionsCopied: number;
-  usersNotified: number;
-  /** Users whose MaaSAuthPolicy could not be synced (the reconciler retries). */
-  policyFailures: number;
+  /** Pending requests on the old model copied to the MaaS model as pending. */
+  pendingRequestsCopied: number;
+  /** Pending requests on the old model closed (inactive, "migrated to <target>"). */
+  pendingRequestsClosed: number;
+  /** Users handed to the notification hook (no delivery channel exists yet). */
+  usersToNotify: number;
+  /** Users whose MaaSAuthPolicy is applied in the background after the response. */
+  policiesScheduled: number;
 }

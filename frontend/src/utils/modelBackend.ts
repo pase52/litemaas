@@ -45,6 +45,34 @@ export const isMaasReauthError = (err: unknown): boolean => {
   return code === MAAS_REAUTH_REQUIRED;
 };
 
+/** UTC calendar day (YYYY-MM-DD) of a date, timestamp or ISO string. */
+export const toUtcDay = (value: string | number | Date): string =>
+  new Date(value).toISOString().split('T')[0];
+
+/**
+ * Calendar day (YYYY-MM-DD) a date-picker date refers to. PatternFly's DatePicker parses a typed
+ * or picked day as local midnight, so the local components are the ones the user chose.
+ */
+export const toLocalDay = (date: Date): string => {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+};
+
+/**
+ * maas-api cannot extend a key, so the expiration of a MaaS key can only be shortened. The backend
+ * compares expirations by UTC calendar day: a later day is rejected, the same day is a no-op.
+ * Returns true when `candidateDay` (YYYY-MM-DD) falls after the key's current expiry. A key that
+ * never expires accepts any day, and a value that is not a complete YYYY-MM-DD day is not judged
+ * here (the form's own date validation reports it).
+ */
+export const isAfterMaasExpiry = (
+  candidateDay: string,
+  currentExpiresAt?: string | null,
+): boolean =>
+  !!currentExpiresAt &&
+  /^\d{4}-\d{2}-\d{2}$/.test(candidateDay) &&
+  candidateDay > toUtcDay(currentExpiresAt);
+
 /**
  * Base URL (without a trailing "/v1") for OpenAI-compatible calls with a given key and model.
  * MaaS models expose their own route (MaaSModelRef status endpoint) which takes precedence over

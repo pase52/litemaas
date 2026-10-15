@@ -177,10 +177,11 @@ async function enrichWithUserMapping(rawData: any, fastify: any): Promise<Enrich
   let apiKeyMappings: ApiKeyUserMapping[] = [];
 
   if (keyAliases.length > 0) {
-    // Query database for API key → user mapping
+    // Query database for API key → user mapping. MaaS keys have no LiteLLM alias: their usage
+    // entries carry the subscription name as key_alias (same rule as the admin usage enrichment)
     const query = `
       SELECT
-        ak.litellm_key_alias,
+        COALESCE(ak.litellm_key_alias, ak.maas_subscription_name) AS litellm_key_alias,
         ak.user_id,
         ak.name as key_name,
         u.username,
@@ -188,7 +189,7 @@ async function enrichWithUserMapping(rawData: any, fastify: any): Promise<Enrich
         u.roles[1] as role
       FROM api_keys ak
       JOIN users u ON ak.user_id = u.id
-      WHERE ak.litellm_key_alias = ANY($1)
+      WHERE COALESCE(ak.litellm_key_alias, ak.maas_subscription_name) = ANY($1)
     `;
 
     try {

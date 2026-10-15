@@ -2142,6 +2142,8 @@
     "keys": {
       "backendHelp": "Ein Schlüssel funktioniert nur mit Modellen eines Backends. Wählen Sie zuerst das Backend und dann dessen Modelle aus.",
       "backendLabel": "Schlüssel-Backend",
+      "expiryNotLater": "Der neue Ablauf darf nicht nach dem aktuellen Ablauf ({{date}}) liegen.",
+      "expiryShortenOnly": "Der Ablauf von MaaS-API-Schlüsseln kann nur verkürzt werden.",
       "graceBannerItem": "Schlüssel „{{key}}“: {{models}} bleiben bis {{date}} über LiteLLM verfügbar. Erstellen Sie vorher einen MaaS-Schlüssel für diese Modelle.",
       "graceBannerTitle": "Einige Ihrer Schlüssel verwenden Modelle, die zu MaaS migriert werden",
       "noSubscribedMaasModels": "Sie haben keine aktiven Abonnements für MaaS-Modelle.",

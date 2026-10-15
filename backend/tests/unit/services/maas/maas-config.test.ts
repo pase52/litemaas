@@ -15,6 +15,8 @@ describe('getMaasConfig', () => {
       usageHitsMetric: 'authorized_hits',
       usageCallsMetric: 'authorized_calls',
       usageLabelMatchers: undefined,
+      usageRetentionDays: 15,
+      prometheusTimeoutMs: 10000,
     });
   });
 
@@ -52,6 +54,20 @@ describe('getMaasConfig', () => {
       usageCallsMetric: 'my_calls',
       usageLabelMatchers: 'namespace="kuadrant-system"',
     });
+  });
+
+  it('reads the usage retention and the Prometheus timeout', () => {
+    const c = getMaasConfig({ MAAS_USAGE_RETENTION_DAYS: '30', PROMETHEUS_TIMEOUT_MS: '2500' });
+    expect(c.usageRetentionDays).toBe(30);
+    expect(c.prometheusTimeoutMs).toBe(2500);
+  });
+
+  it('falls back to 15 days / 10 s for missing, zero, negative or non-numeric values', () => {
+    for (const bad of ['', '0', '-3', 'abc']) {
+      const c = getMaasConfig({ MAAS_USAGE_RETENTION_DAYS: bad, PROMETHEUS_TIMEOUT_MS: bad });
+      expect(c.usageRetentionDays).toBe(15);
+      expect(c.prometheusTimeoutMs).toBe(10000);
+    }
   });
 
   it('only "true" enables, and invalid numbers fall back to defaults', () => {

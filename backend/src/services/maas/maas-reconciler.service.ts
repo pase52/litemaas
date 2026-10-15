@@ -1,21 +1,23 @@
 import type { FastifyInstance } from 'fastify';
 import { BaseService } from '../base.service.js';
 import { withAdvisoryLock } from '../../utils/advisory-lock.utils.js';
-import { upsertK8sObject, type K8sObject } from '../k8s/k8s-client.js';
+import { applyK8sObject, k8sObjectMatches, type K8sObject } from '../k8s/k8s-client.js';
 import type { MaasClients } from './maas-clients.js';
+import { MaasAccessService } from './maas-access.service.js';
 import { revokeInMaasApi } from './maas-key.service.js';
 import { MaasMigrationService } from './maas-migration.service.js';
 import {
   LABEL_API_KEY_ID,
-  MANAGED_SELECTOR,
+  LABEL_USER_ID,
+  managedSelector,
   foreignObjectReason,
   MAAS_AUTH_POLICY,
   MAAS_SUBSCRIPTION,
+  authPolicyName,
   buildAuthPolicy,
   buildSubscription,
   sanitizeLabelValue,
   subscriptionName,
-  type MaasModelLimit,
   type MaasModelRefTarget,
 } from './maas-resources.js';
 
@@ -120,6 +122,7 @@ function createdLongAgo(obj: K8sObject, now: number): boolean {
 export class MaasReconcilerService extends BaseService {
   private readonly clients: MaasClients;
   private timer?: NodeJS.Timeout;
+  private initialTimer?: NodeJS.Timeout;
   private running = false;
 
   constructor(fastify: FastifyInstance, clients?: MaasClients) {
@@ -138,14 +141,17 @@ export class MaasReconcilerService extends BaseService {
         this.fastify.log.error({ error }, 'MaaS reconcile loop failed'),
       );
     // First pass shortly after startup (lets the initial model sync land first)
-    setTimeout(run, 30_000).unref?.();
+    this.initialTimer = setTimeout(run, 30_000);
+    this.initialTimer.unref?.();
     this.timer = setInterval(run, interval);
     this.timer.unref?.();
     this.fastify.log.info({ intervalMs: interval }, 'MaaS reconciler started');
   }
 
   stop(): void {
+    if (this.initialTimer) clearTimeout(this.initialTimer);
     if (this.timer) clearInterval(this.timer);
+    this.initialTimer = undefined;
     this.timer = undefined;
   }
 
@@ -218,44 +224,70 @@ export class MaasReconcilerService extends BaseService {
   }
 
   /**
-   * The pass works on a snapshot taken before slow cluster calls, while user-facing revocation
-   * runs concurrently. Right before granting, re-read the DB and report whether every model of
-   * the desired state is still granted; otherwise the upsert is skipped (the next pass converges).
+   * Re-check before deleting an apparently orphaned policy: true when the labeled user still
+   * has active MaaS subscriptions AND the policy carries that user's current name (a renamed
+   * user leaves an old-name policy behind, which must still go).
    */
-  private async policyStillGranted(userId: string, models: MaasModelRefTarget[]): Promise<boolean> {
+  private async policyStillDesired(userId: string, policyName: string): Promise<boolean> {
     const fresh = await this.loadPolicyRows(userId);
-    const keys = new Set(
-      fresh.map((r) => `${r.maas_model_ref_namespace}/${r.maas_model_ref_name}`),
-    );
-    return models.every((m) => keys.has(`${m.namespace}/${m.name}`));
+    return fresh.length > 0 && authPolicyName(fresh[0].username) === policyName;
   }
 
-  /** Same re-check for a per-key subscription: key still live and every model still active */
-  private async keyStillGranted(
-    keyId: string,
-    userId: string,
-    limits: MaasModelLimit[],
-  ): Promise<boolean> {
-    const fresh = await this.fastify.dbUtils.queryOne<{ ok: boolean }>(
-      `SELECT (is_active AND revoked_at IS NULL AND archived_at IS NULL
-               AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)) AS ok
-         FROM api_keys WHERE id = $1`,
+  /**
+   * The pass works on a snapshot taken before slow cluster calls, while users and admins keep
+   * changing keys. Right before writing a subscription the key is re-read: null when it is no
+   * longer live (or has no entitled model left), otherwise the fresh row and its models, so
+   * the object written reflects the current TPM limits, model set, expiry and owner name
+   * rather than the stale snapshot.
+   */
+  private async loadLiveKey(keyId: string): Promise<{ key: KeyRow; models: KeyModelRow[] } | null> {
+    const key = await this.fastify.dbUtils.queryOne<KeyRow & { live: boolean }>(
+      `SELECT ak.id, ak.user_id, u.username, ak.tpm_limit, ak.model_tpm_limit, ak.maas_key_id,
+              ak.maas_subscription_name, ak.maas_sync_state, ak.maas_pending_revoke_ids,
+              ak.is_active, ak.revoked_at, ak.archived_at, ak.expires_at, ak.created_at,
+              (ak.is_active AND ak.revoked_at IS NULL AND ak.archived_at IS NULL
+               AND (ak.expires_at IS NULL OR ak.expires_at > CURRENT_TIMESTAMP)) AS live
+         FROM api_keys ak
+         JOIN users u ON u.id = ak.user_id
+        WHERE ak.id = $1 AND ak.backend_type = 'maas'`,
       [keyId],
     );
-    if (!fresh?.ok) return false;
-    const rows = await this.fastify.dbUtils.queryMany<KeyModelRow>(
+    if (!key?.live) return null;
+    const models = await this.fastify.dbUtils.queryMany<KeyModelRow>(
       `SELECT akm.api_key_id, akm.model_id, m.maas_model_ref_name, m.maas_model_ref_namespace
          FROM api_key_models akm
          JOIN models m ON m.id = akm.model_id
         WHERE akm.api_key_id = $1
+          AND m.backend_type = 'maas'
+          AND m.maas_model_ref_name IS NOT NULL
+          AND m.maas_model_ref_namespace IS NOT NULL
           AND EXISTS (
             SELECT 1 FROM subscriptions s
              WHERE s.user_id = $2 AND s.model_id = akm.model_id AND s.status = 'active'
           )`,
-      [keyId, userId],
+      [keyId, key.user_id],
     );
-    const keys = new Set(rows.map((r) => `${r.maas_model_ref_namespace}/${r.maas_model_ref_name}`));
-    return limits.every((l) => keys.has(`${l.namespace}/${l.name}`));
+    if (models.length === 0) return null;
+    return { key, models };
+  }
+
+  /** Desired MaaSSubscription of a key (models + TPM token limits), under the recorded name */
+  private buildKeySubscription(key: KeyRow, models: KeyModelRow[], name: string): K8sObject {
+    const desired = buildSubscription({
+      apiKeyId: key.id,
+      userId: key.user_id,
+      username: key.username,
+      namespace: this.clients.config.namespace,
+      models: models.map((m) => ({
+        name: m.maas_model_ref_name,
+        namespace: m.maas_model_ref_namespace,
+        tpm: key.model_tpm_limit?.[m.model_id] ?? null,
+      })),
+      globalTpm: key.tpm_limit,
+    });
+    // Honour a name recorded at creation time
+    desired.metadata.name = name;
+    return desired;
   }
 
   // ------------------------------------------------------------------ policies
@@ -274,41 +306,50 @@ export class MaasReconcilerService extends BaseService {
 
       const existing = await k8s.list(MAAS_AUTH_POLICY, {
         namespace: config.namespace,
-        labelSelector: MANAGED_SELECTOR,
+        labelSelector: managedSelector(),
       });
       const existingByName = new Map(existing.map((o) => [o.metadata.name, o]));
       const desiredNames = new Set<string>();
+      const now = Date.now();
+      const access = new MaasAccessService(this.fastify, this.clients);
 
       for (const [userId, { username, models }] of byUser) {
-        const desired = buildAuthPolicy({
+        const snapshot = buildAuthPolicy({
           username,
           userId,
           namespace: config.namespace,
           models,
         });
-        desiredNames.add(desired.metadata.name);
+        desiredNames.add(snapshot.metadata.name);
         try {
-          const current = existingByName.get(desired.metadata.name);
-          if (current && JSON.stringify(current.spec) === JSON.stringify(desired.spec)) continue;
-          if (!(await this.policyStillGranted(userId, models))) {
-            this.fastify.log.info(
-              { userId },
-              'MaaS reconcile: grant changed during the pass - skipping stale policy upsert',
-            );
-            continue;
-          }
-          await upsertK8sObject(k8s, MAAS_AUTH_POLICY, desired, config.namespace, (e) =>
-            foreignObjectReason(e, userId),
-          );
-          result.policiesApplied++;
+          const current = existingByName.get(snapshot.metadata.name);
+          if (current && k8sObjectMatches(snapshot, current)) continue;
+          // Snapshot and cluster differ: recompute from the database right now (under the
+          // per-user mutex), so a grant, revocation or rename that landed after the snapshot
+          // is applied rather than undone by stale data
+          const applied = await access.syncUserAuthPolicy(userId);
+          if (applied.action === 'upserted') result.policiesApplied++;
+          else if (applied.action === 'deleted') result.policiesDeleted++;
         } catch (error) {
-          result.errors.push(`policy ${desired.metadata.name}: ${errMsg(error)}`);
+          result.errors.push(`policy ${snapshot.metadata.name}: ${errMsg(error)}`);
         }
       }
 
-      for (const [name] of existingByName) {
+      // Orphans: labeled policies with no desired state. A policy may have been created by a
+      // grant that landed after the DB snapshot above, so (as for subscriptions) a fresh object
+      // is never deleted, and the owner's desired state is re-read right before deleting.
+      for (const [name, obj] of existingByName) {
         if (desiredNames.has(name)) continue;
+        if (!createdLongAgo(obj, now)) continue;
         try {
+          const labelUserId = obj.metadata.labels?.[LABEL_USER_ID];
+          if (labelUserId && (await this.policyStillDesired(labelUserId, name))) {
+            this.fastify.log.info(
+              { policy: name },
+              'MaaS reconcile: policy granted during the pass - skipping stale orphan delete',
+            );
+            continue;
+          }
           await k8s.delete(MAAS_AUTH_POLICY, name, config.namespace);
           result.policiesDeleted++;
         } catch (error) {
@@ -356,7 +397,7 @@ export class MaasReconcilerService extends BaseService {
 
       const existing = await k8s.list(MAAS_SUBSCRIPTION, {
         namespace: config.namespace,
-        labelSelector: MANAGED_SELECTOR,
+        labelSelector: managedSelector(),
       });
       const existingByName = new Map(existing.map((o) => [o.metadata.name, o]));
       const desiredNames = new Set<string>();
@@ -390,7 +431,10 @@ export class MaasReconcilerService extends BaseService {
               `DELETE FROM api_keys WHERE id = $1 AND maas_key_id IS NULL AND maas_sync_state = 'pending'`,
               [key.id],
             );
-            this.fastify.log.warn({ keyId: key.id }, 'MaaS reconcile: removed abandoned key creation');
+            this.fastify.log.warn(
+              { keyId: key.id },
+              'MaaS reconcile: removed abandoned key creation',
+            );
           } catch (error) {
             result.errors.push(`abandoned key ${key.id}: ${errMsg(error)}`);
           }
@@ -424,35 +468,30 @@ export class MaasReconcilerService extends BaseService {
 
         try {
           if (live) {
-            const limits: MaasModelLimit[] = models.map((m) => ({
-              name: m.maas_model_ref_name,
-              namespace: m.maas_model_ref_namespace,
-              tpm: key.model_tpm_limit?.[m.model_id] ?? null,
-            }));
-            const desired = buildSubscription({
-              apiKeyId: key.id,
-              userId: key.user_id,
-              username: key.username,
-              namespace: config.namespace,
-              models: limits,
-              globalTpm: key.tpm_limit,
-            });
-            // Honour a name recorded at creation time
-            desired.metadata.name = name;
+            const snapshot = this.buildKeySubscription(key, models, name);
             desiredNames.add(name);
             const current = existingByName.get(name);
-            if (!current || JSON.stringify(current.spec) !== JSON.stringify(desired.spec)) {
-              if (!(await this.keyStillGranted(key.id, key.user_id, limits))) {
+            if (!current || !k8sObjectMatches(snapshot, current)) {
+              // Re-read right before writing so a TPM, model or expiry change made after the
+              // snapshot wins over the stale snapshot
+              const fresh = await this.loadLiveKey(key.id);
+              if (!fresh) {
                 this.fastify.log.info(
                   { keyId: key.id },
                   'MaaS reconcile: key changed during the pass - skipping stale subscription upsert',
                 );
                 continue;
               }
-              await upsertK8sObject(k8s, MAAS_SUBSCRIPTION, desired, config.namespace, (e) =>
-                foreignObjectReason(e, key.user_id),
+              const desired = this.buildKeySubscription(fresh.key, fresh.models, name);
+              const applied = await applyK8sObject(
+                k8s,
+                MAAS_SUBSCRIPTION,
+                desired,
+                config.namespace,
+                (e) => foreignObjectReason(e, key.user_id),
+                { skipIfUnchanged: true },
               );
-              result.subscriptionsApplied++;
+              if (applied.action !== 'unchanged') result.subscriptionsApplied++;
             }
           } else if (existingByName.has(name)) {
             await k8s.delete(MAAS_SUBSCRIPTION, name, config.namespace);

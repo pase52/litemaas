@@ -24,6 +24,7 @@ import {
 import { ErrorResponseSchema } from '../schemas/common';
 import { ApplicationError } from '../utils/errors';
 import { MaasAccessService } from '../services/maas/maas-access.service';
+import { SubscriptionService } from '../services/subscription.service';
 import { LITELLM_UNLIMITED } from '../config/litellm';
 
 interface AdminUserApiKeysQuery {
@@ -76,6 +77,13 @@ const adminUsersRoutes: FastifyPluginAsync = async (fastify) => {
         400,
         `The following model IDs do not exist: ${invalidModelIds.join(', ')}`,
       );
+    }
+
+    // A LiteLLM model migrating to (or retired in favour of) MaaS takes no new activations,
+    // from admins included: checked up front so nothing is created for a rejected request
+    const subscriptionService = new SubscriptionService(fastify);
+    for (const modelId of modelIds) {
+      await subscriptionService.assertModelNotMigrating(modelId);
     }
 
     // Get existing subscriptions for user/model combinations
@@ -1080,8 +1088,11 @@ const adminUsersRoutes: FastifyPluginAsync = async (fastify) => {
 
         for (const key of quotaKeys) {
           if (key in body) {
-            // Convert null to undefined for the service layer (which expects undefined to mean "clear")
-            quotaFields[key] = (body as Record<string, unknown>)[key] ?? undefined;
+            // Convert null to undefined for the LiteLLM service layer (which expects undefined
+            // to mean "clear"). The MaaS service treats undefined as "unchanged" and null as
+            // "no limit", so null is kept for MaaS keys (admins may clear a TPM limit).
+            quotaFields[key] =
+              (body as Record<string, unknown>)[key] ?? (isMaasKey ? null : undefined);
           }
         }
 

@@ -38,6 +38,9 @@ CURL=(curl -sS)
 [ "${INSECURE:-0}" = "1" ] && CURL+=(-k)
 ENC_ID=$(jq -rn --arg v "$MODEL_ID" '$v|@uri')
 TODAY=$(date -u +%F)
+# Private temp files (the usage export contains every user's analytics)
+RESP=$(mktemp); USAGE=$(mktemp)
+trap 'rm -f "$RESP" "$USAGE"' EXIT
 
 pass() { printf '\033[32mPASS\033[0m %s\n' "$*"; }
 fail() { printf '\033[31mFAIL\033[0m %s\n' "$*"; exit 1; }
@@ -126,13 +129,13 @@ BASE="${BASE%/}"; BASE="${BASE%/v1}"
 URL="$BASE/v1/chat/completions"
 BODY="{\"model\":\"$SERVED\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one word.\"}],\"max_tokens\":16}"
 for i in $(seq 1 30); do # the controller / Authorino may need a few seconds after key creation
-  CODE=$("${CURL[@]}" -o /tmp/maas-acceptance-resp.json -w '%{http_code}' -X POST "$URL" \
+  CODE=$("${CURL[@]}" -o "$RESP" -w '%{http_code}' -X POST "$URL" \
     -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d "$BODY" || true)
   [ "$CODE" = "200" ] && break
   sleep 2
 done
-[ "$CODE" = "200" ] || { cat /tmp/maas-acceptance-resp.json; fail "inference returned $CODE at $URL"; }
-jq '{model, usage}' /tmp/maas-acceptance-resp.json
+[ "$CODE" = "200" ] || { cat "$RESP"; fail "inference returned $CODE at $URL"; }
+jq '{model, usage}' "$RESP"
 pass "inference OK at $URL (first success after ~$((i * 2))s)"
 
 step "9. View Key returns the same plaintext"
@@ -167,9 +170,9 @@ done
 api "$USER_JWT" GET /usage/budget | jq '{currentSpend, maasSpend, maasTokens}'
 pass "user budget reports $TOKENS MaaS tokens this month"
 api "$ADMIN_JWT" POST /admin/usage/refresh-today '{}' >/dev/null || true
-api "$ADMIN_JWT" POST /admin/usage/analytics "{\"startDate\":\"$TODAY\",\"endDate\":\"$TODAY\"}" >/tmp/maas-acceptance-usage.json
-grep -q "${MODEL_ID#*/}" /tmp/maas-acceptance-usage.json && pass "admin analytics contain $MODEL_ID" ||
-  echo "WARN: $MODEL_ID not found in /admin/usage/analytics output (see /tmp/maas-acceptance-usage.json, A29)"
+api "$ADMIN_JWT" POST /admin/usage/analytics "{\"startDate\":\"$TODAY\",\"endDate\":\"$TODAY\"}" >"$USAGE"
+grep -q "${MODEL_ID#*/}" "$USAGE" && pass "admin analytics contain $MODEL_ID" ||
+  echo "WARN: $MODEL_ID not found in /admin/usage/analytics output (A29)"
 
 step "12. Reconciler converges"
 api "$ADMIN_JWT" POST /admin/maas/reconcile '{}' | jq '.data'

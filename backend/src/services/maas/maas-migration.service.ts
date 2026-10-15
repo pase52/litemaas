@@ -9,7 +9,13 @@ import type { MaasClients } from './maas-clients.js';
 import { MaasAccessService } from './maas-access.service.js';
 import { MAAS_MODEL_REF, parseModelRef, type ParsedModelRef } from './maas-resources.js';
 import type { DatabaseClient } from '../../types/common.types.js';
-import { MAAS_PROVIDER } from './maas-model-sync.service.js';
+import {
+  MAAS_POLICY_CONCURRENCY,
+  MAAS_PROVIDER,
+  runBounded,
+  runInBackground,
+  waitForMaasBackground,
+} from './maas-model-sync.service.js';
 
 /** models.migration_state values */
 export type MigrationState = 'migrating' | 'completed';
@@ -31,10 +37,23 @@ export interface MigrateToMaasResult {
   /** True when a new MaaS model row was created, false when an existing (synced) row was reused */
   created: boolean;
   graceUntil: string;
+  /** Active subscriptions that now exist (active) on the MaaS model */
   subscriptionsCopied: number;
-  usersNotified: number;
-  /** Users whose MaaSAuthPolicy could not be applied now (reconciler converges them) */
-  policyFailures: number;
+  /** Pending requests carried over to the MaaS model as pending (deduplicated per user) */
+  pendingRequestsCopied: number;
+  /** Pending requests closed on the old model ('inactive', reason names the MaaS model) */
+  pendingRequestsClosed: number;
+  /**
+   * Users handed to the notification hook. NotificationService has no delivery channel yet
+   * (every hook only logs), so nobody is actually notified: users learn about the migration from
+   * the "migrating until" label and banner in the UI.
+   */
+  usersToNotify: number;
+  /**
+   * Users whose MaaSAuthPolicy is being applied in the background (bounded concurrency, after the
+   * database commit). Failures are logged and converged by the reconciler.
+   */
+  policiesScheduled: number;
 }
 
 export interface GraceJobResult {
@@ -55,9 +74,13 @@ function errMsg(e: unknown): string {
  * Per-model migration LiteLLM -> MaaS.
  *
  *  1. migrate(): copies the LiteLLM model row to a MaaS model row (or reuses the synced one),
- *     copies active subscriptions, blocks NEW subscriptions on the old model
- *     (migration_state='migrating'), applies MaaSAuthPolicies and notifies affected users.
+ *     copies active subscriptions as active and pending requests as pending (the old pending
+ *     requests are closed: nothing can be activated on the old model any more), blocks NEW
+ *     subscriptions on the old model (migration_state='migrating'), then - after the commit and
+ *     off the request path - applies the MaaSAuthPolicies with bounded concurrency.
  *     LiteLLM access keeps working until migration_grace_until.
+ *     The old and the copied subscription are independent rows: changing one never touches the
+ *     other (admins must act on the MaaS subscription to remove MaaS access).
  *  2. processExpiredGrace(): run by the reconciler. After the grace period it removes the model
  *     from users' LiteLLM keys (LiteLLM first), deactivates the old subscriptions and marks the
  *     old row unavailable with migration_state='completed'. A model whose keys could not all be
@@ -86,6 +109,14 @@ export class MaasMigrationService extends BaseService {
     return (this.notifications ??= new NotificationService(this.fastify));
   }
 
+  /**
+   * Wait for the background cluster work started by migrate() (policy grants). The request
+   * returns before it finishes; tests and graceful shutdown use this to wait for it.
+   */
+  static waitForBackground(): Promise<void> {
+    return waitForMaasBackground();
+  }
+
   // ---------------------------------------------------------------- migrate
 
   async migrate(request: MigrateToMaasRequest): Promise<MigrateToMaasResult> {
@@ -97,6 +128,18 @@ export class MaasMigrationService extends BaseService {
         'graceDays',
         graceDays,
         `graceDays must be an integer between 1 and ${MAX_GRACE_DAYS}`,
+      );
+    }
+
+    // The model sync only scans MAAS_MODEL_NAMESPACES: a ref outside them would never get phase
+    // or endpoint updates, so it is not a valid target
+    const scanned = this.clients.config.modelNamespaces;
+    if (scanned.length > 0 && !scanned.includes(request.maasModelRef.namespace)) {
+      throw ApplicationError.validation(
+        `MaaSModelRef namespace '${request.maasModelRef.namespace}' is not synced (MAAS_MODEL_NAMESPACES: ${scanned.join(', ')})`,
+        'maasModelRef.namespace',
+        request.maasModelRef.namespace,
+        `Choose a MaaSModelRef in one of the configured namespaces: ${scanned.join(', ')}`,
       );
     }
 
@@ -205,13 +248,82 @@ export class MaasMigrationService extends BaseService {
           );
           subscriptionId = ins.rows[0].id;
         }
-        await client.query<any>(
-          `INSERT INTO subscription_status_history
-             (subscription_id, old_status, new_status, reason, changed_by)
-           VALUES ($1, $2, 'active', $3, $4)`,
-          [subscriptionId, oldStatus, reason, adminUserId],
-        );
+        await this.recordHistory(client, subscriptionId, oldStatus, 'active', reason, adminUserId);
         userIds.push(s.user_id);
+      }
+
+      // Carry PENDING requests over as pending and close them on the old model: activation on a
+      // migrating model is refused (approve / revert / update), so they could never be decided
+      // there. Deduplicated against the user's existing subscription on the target.
+      const pendingSubs = await client.query<any>(
+        `SELECT id, user_id, team_id, quota_requests, quota_tokens, expires_at
+           FROM subscriptions WHERE model_id = $1 AND status = 'pending'`,
+        [old.id],
+      );
+      let pendingCopied = 0;
+      const copyReason = `Migrated from LiteLLM model ${old.id}`;
+      const closeReason = `Migrated to MaaS model ${ref.id}`;
+      for (const p of pendingSubs.rows) {
+        const prev = await client.query<any>(
+          'SELECT id, status FROM subscriptions WHERE user_id = $1 AND model_id = $2',
+          [p.user_id, ref.id],
+        );
+        if (!prev.rows[0]) {
+          const ins = await client.query<any>(
+            `INSERT INTO subscriptions (
+               user_id, model_id, team_id, status, quota_requests, quota_tokens, expires_at,
+               status_reason, status_changed_at, status_changed_by
+             ) VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, CURRENT_TIMESTAMP, $8)
+             RETURNING id`,
+            [
+              p.user_id,
+              ref.id,
+              p.team_id,
+              p.quota_requests,
+              p.quota_tokens,
+              p.expires_at,
+              copyReason,
+              adminUserId,
+            ],
+          );
+          await this.recordHistory(
+            client,
+            ins.rows[0].id,
+            null,
+            'pending',
+            copyReason,
+            adminUserId,
+          );
+          pendingCopied++;
+        } else if (prev.rows[0].status === 'inactive') {
+          // The user cancelled an earlier subscription on the target: re-queue the request
+          await client.query<any>(
+            `UPDATE subscriptions
+                SET status = 'pending', status_reason = $2, status_changed_at = CURRENT_TIMESTAMP,
+                    status_changed_by = $3, updated_at = CURRENT_TIMESTAMP
+              WHERE id = $1`,
+            [prev.rows[0].id, copyReason, adminUserId],
+          );
+          await this.recordHistory(
+            client,
+            prev.rows[0].id,
+            'inactive',
+            'pending',
+            copyReason,
+            adminUserId,
+          );
+          pendingCopied++;
+        }
+        // Any other status (active, pending, denied, ...) is the user's existing decision on the
+        // target and is kept as is.
+        await client.query<any>(
+          `UPDATE subscriptions
+              SET status = 'inactive', status_reason = $2, status_changed_at = CURRENT_TIMESTAMP,
+                  status_changed_by = $3, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1`,
+          [p.id, closeReason, adminUserId],
+        );
+        await this.recordHistory(client, p.id, 'pending', 'inactive', closeReason, adminUserId);
       }
 
       await client.query<any>(
@@ -232,33 +344,37 @@ export class MaasMigrationService extends BaseService {
             newModelId: ref.id,
             graceUntil: graceUntil.toISOString(),
             subscriptionsCopied: userIds.length,
+            pendingRequestsCopied: pendingCopied,
+            pendingRequestsClosed: pendingSubs.rows.length,
             created,
           }),
         ],
       );
 
-      return { created, userIds };
+      return {
+        created,
+        userIds,
+        pendingCopied,
+        pendingClosed: pendingSubs.rows.length,
+      };
     });
 
-    // Cluster + notification work happens after the commit and never fails the migration
-    let policyFailures = 0;
-    for (const userId of outcome.userIds) {
-      const res = await this.getAccess().grantModelToUser(userId, ref.id);
-      if (!res) policyFailures++;
-    }
-    try {
-      await this.getNotifications().notifyUsersModelMigration(
-        modelId,
-        ref.id,
-        outcome.userIds,
-        graceUntil,
-      );
-    } catch (error) {
-      this.fastify.log.warn({ error: errMsg(error), modelId }, 'Migration notification failed');
+    // Cluster + notification work happens after the commit, off the request path: with many users
+    // the per-user policy calls would outlast proxy timeouts. Nothing here can fail the migration;
+    // failures are logged and the reconciler converges the policies within its interval.
+    const { userIds } = outcome;
+    if (userIds.length > 0) {
+      this.scheduleFollowUp(modelId, ref.id, userIds, graceUntil);
     }
 
     this.fastify.log.info(
-      { oldModelId: modelId, newModelId: ref.id, users: outcome.userIds.length },
+      {
+        oldModelId: modelId,
+        newModelId: ref.id,
+        users: userIds.length,
+        pendingCopied: outcome.pendingCopied,
+        pendingClosed: outcome.pendingClosed,
+      },
       'Model migration to MaaS started',
     );
 
@@ -267,10 +383,70 @@ export class MaasMigrationService extends BaseService {
       newModelId: ref.id,
       created: outcome.created,
       graceUntil: graceUntil.toISOString(),
-      subscriptionsCopied: outcome.userIds.length,
-      usersNotified: outcome.userIds.length,
-      policyFailures,
+      subscriptionsCopied: userIds.length,
+      pendingRequestsCopied: outcome.pendingCopied,
+      pendingRequestsClosed: outcome.pendingClosed,
+      usersToNotify: userIds.length,
+      policiesScheduled: userIds.length,
     };
+  }
+
+  /** Apply the users' MaaSAuthPolicies (bounded concurrency) and call the notification hook */
+  private scheduleFollowUp(
+    oldModelId: string,
+    newModelId: string,
+    userIds: string[],
+    graceUntil: Date,
+  ): void {
+    runInBackground(this.fastify.log, `MaaS migration follow-up for ${oldModelId}`, async () => {
+      const applyPolicies = async () => {
+        const access = this.getAccess();
+        // grantModelToUser never throws; null means the policy could not be applied
+        let failed = 0;
+        const unexpected = await runBounded(userIds, MAAS_POLICY_CONCURRENCY, async (userId) => {
+          if (!(await access.grantModelToUser(userId, newModelId))) failed++;
+        });
+        failed += unexpected.length;
+        if (failed > 0) {
+          this.fastify.log.warn(
+            { oldModelId, newModelId, failed, users: userIds.length },
+            'Migration: some MaaSAuthPolicies could not be applied - the reconciler will converge them',
+          );
+        }
+      };
+      const notify = async () => {
+        try {
+          await this.getNotifications().notifyUsersModelMigration(
+            oldModelId,
+            newModelId,
+            userIds,
+            graceUntil,
+          );
+        } catch (error) {
+          this.fastify.log.warn(
+            { error: errMsg(error), oldModelId },
+            'Migration notification failed',
+          );
+        }
+      };
+      await Promise.all([applyPolicies(), notify()]);
+    });
+  }
+
+  private async recordHistory(
+    client: DatabaseClient,
+    subscriptionId: string,
+    oldStatus: string | null,
+    newStatus: string,
+    reason: string,
+    changedBy: string,
+  ): Promise<void> {
+    await client.query<any>(
+      `INSERT INTO subscription_status_history
+         (subscription_id, old_status, new_status, reason, changed_by)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [subscriptionId, oldStatus, newStatus, reason, changedBy],
+    );
   }
 
   private async loadRef(name: string, namespace: string): Promise<ParsedModelRef> {

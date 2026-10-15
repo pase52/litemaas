@@ -43,7 +43,7 @@ import { useNotifications } from '../../contexts/NotificationContext';
 import { useCurrency } from '../../contexts/ConfigContext';
 import { formatDate } from '../../utils/formatters';
 import { BackendBadge } from '../common/BackendBadge';
-import { isMaasModel } from '../../utils/modelBackend';
+import { isAfterMaasExpiry, isMaasModel, toLocalDay, toUtcDay } from '../../utils/modelBackend';
 import {
   UserApiKey,
   CreateApiKeyForUserRequest,
@@ -447,6 +447,20 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
       }
     }
 
+    // MaaS keys can only have their expiration shortened: reject a custom date after the current one
+    if (
+      editingMaasKey &&
+      editExpiration === 'custom' &&
+      isAfterMaasExpiry(editCustomExpiration, maasExpiresAt)
+    ) {
+      addNotification({
+        title: t('users.apiKeys.form.validationError', 'Validation Error'),
+        description: maasExpiryNotLaterMessage,
+        variant: 'danger',
+      });
+      return;
+    }
+
     // Build per-model limits
     const modelMaxBudget: Record<string, { budgetLimit: number; timePeriod: string }> = {};
     const modelRpmLimit: Record<string, number> = {};
@@ -716,6 +730,19 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
   const editingMaasKey =
     keyToEdit?.backendType === 'maas' ||
     (keyToEdit?.models ?? []).some((id) => isMaasModel(availableModels.find((m) => m.id === id)));
+
+  // maas-api cannot extend a key, so a MaaS key's expiration can only be shortened: the expiration
+  // control only offers what the backend accepts (no "Never" and nothing later than the current
+  // expiry when the key has one)
+  const maasExpiresAt = editingMaasKey ? keyToEdit?.expiresAt : undefined;
+  const isPresetLaterThanMaasExpiry = (days: number) =>
+    isAfterMaasExpiry(toUtcDay(Date.now() + days * 24 * 60 * 60 * 1000), maasExpiresAt);
+  const maasExpiryNotLaterMessage = maasExpiresAt
+    ? t('maas.keys.expiryNotLater', {
+        date: toUtcDay(maasExpiresAt),
+        defaultValue: 'The new expiration cannot be later than the current one ({{date}}).',
+      })
+    : '';
 
   // Shared form fields renderer for both create and edit modals
   const renderQuotaFields = (
@@ -1442,30 +1469,37 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
                   if (value !== 'custom') setEditCustomExpiration('');
                 }}
                 isDisabled={updateMutation.isLoading || !canEdit}
+                aria-describedby={editingMaasKey ? 'edit-key-expiration-maas-help' : undefined}
               >
                 <FormSelectOption
                   value="never"
                   label={t('users.apiKeys.form.expirationNever', 'Never')}
+                  isDisabled={!!maasExpiresAt}
                 />
                 <FormSelectOption
                   value="30"
                   label={t('users.apiKeys.form.expiration30', '30 days')}
+                  isDisabled={isPresetLaterThanMaasExpiry(30)}
                 />
                 <FormSelectOption
                   value="60"
                   label={t('users.apiKeys.form.expiration60', '60 days')}
+                  isDisabled={isPresetLaterThanMaasExpiry(60)}
                 />
                 <FormSelectOption
                   value="90"
                   label={t('users.apiKeys.form.expiration90', '90 days')}
+                  isDisabled={isPresetLaterThanMaasExpiry(90)}
                 />
                 <FormSelectOption
                   value="180"
                   label={t('users.apiKeys.form.expiration180', '6 months')}
+                  isDisabled={isPresetLaterThanMaasExpiry(180)}
                 />
                 <FormSelectOption
                   value="365"
                   label={t('users.apiKeys.form.expiration365', '1 year')}
+                  isDisabled={isPresetLaterThanMaasExpiry(365)}
                 />
                 <FormSelectOption
                   value="custom"
@@ -1484,15 +1518,28 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
                   validators={[
                     (date: Date) => {
                       if (date < new Date()) return 'Date must be in the future';
+                      if (isAfterMaasExpiry(toLocalDay(date), maasExpiresAt)) {
+                        return maasExpiryNotLaterMessage;
+                      }
                       return '';
                     },
                   ]}
                 />
               )}
+              {editingMaasKey && (
+                <HelperText id="edit-key-expiration-maas-help">
+                  <HelperTextItem data-testid="maas-expiry-shorten-only">
+                    {t(
+                      'maas.keys.expiryShortenOnly',
+                      'MaaS API keys can only have their expiration shortened.',
+                    )}
+                  </HelperTextItem>
+                </HelperText>
+              )}
             </FormGroup>
 
-            {/* Current Spend with Progress Bar and Reset Button */}
-            {keyToEdit && (
+            {/* Current Spend with Progress Bar and Reset Button (MaaS keys have no budget) */}
+            {keyToEdit && !editingMaasKey && (
               <FormGroup
                 label={t('users.apiKeys.currentSpend', 'Current Spend')}
                 fieldId="edit-current-spend"

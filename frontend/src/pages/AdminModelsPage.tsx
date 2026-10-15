@@ -142,12 +142,13 @@ const AdminModelsPage: React.FC = () => {
   const editingMaasModel =
     !isCreateModalOpen && (isEditModalOpen || isViewModalOpen) && isMaasModel(selectedModel);
 
-  // Fetch models data
+  // Fetch models data. The table has no pagination, so ask for the largest page the backend
+  // allows (GET /models caps limit at 1000): the default page of 20 would hide every later model.
   const {
     data: modelsResponse,
     isLoading,
     error,
-  } = useQuery(['admin-models'], () => modelsService.getModels(), {
+  } = useQuery(['admin-models'], () => modelsService.getModels(1, 1000), {
     enabled: canReadModels,
     onError: (err: any) => {
       console.error(t('models.admin.failedToLoadModels') + ': ', err);
@@ -282,6 +283,17 @@ const AdminModelsPage: React.FC = () => {
     (restoreRemoved: boolean) => adminModelsService.syncMaasModels(restoreRemoved),
     {
       onSuccess: async (result) => {
+        // The backend answers 200 with { success: false, errors } when the cluster list or the
+        // sync itself fails; some rows may still have changed, so refresh the table either way
+        if (result?.success === false) {
+          addNotification({
+            title: t('maas.admin.syncError', 'MaaS synchronization failed'),
+            description: (result.errors ?? []).join('; '),
+            variant: 'danger',
+          });
+          await queryClient.refetchQueries(['admin-models']);
+          return;
+        }
         addNotification({
           title: t('maas.admin.syncSuccessTitle', 'MaaS models synchronized'),
           description: t('maas.admin.syncSuccessDesc', {

@@ -72,7 +72,9 @@ Code map (backend):
 
 The model sync runs at startup and then every `MAAS_SYNC_INTERVAL_MS`. It lists `MaaSModelRef`
 objects in `MAAS_MODEL_NAMESPACES`, or in all namespaces when that is empty. Admins can also run it
-with **Sync MaaS models** on the Models admin page (`POST /api/v1/admin/models/maas/sync`).
+with **Sync MaaS models** on the Models admin page (`POST /api/v1/admin/models/maas/sync`). The
+manual sync takes the same lock as the periodic one (on any replica), so the two never race into
+duplicate inserts; while one is running the endpoint answers HTTP 409 `RESOURCE_LOCKED`.
 
 | MaaSModelRef | LiteMaaS `models` row |
 | --- | --- |
@@ -109,7 +111,11 @@ spec:
 The policy is recomputed from the database on every change: approve, revert, auto-approve when a
 model is no longer restricted, cancel, deny, delete, or a model becoming restricted. It is deleted
 when no active MaaS subscription remains. The restricted-model approval workflow is unchanged: a
-policy only names models whose subscription is `active`.
+policy only names models whose subscription is `active`. The owner's
+`PATCH /api/v1/subscriptions/:id` can only cancel (`cancelled` or `inactive`) and answers 403 to any
+other status change, so a user cannot activate a pending, denied or suspended subscription and
+grant themselves a policy; activation comes from creating an unrestricted subscription or from an
+admin approving or reverting it.
 
 ### API keys → MaaSSubscription + maas-api key
 
@@ -143,7 +149,7 @@ the usage pipeline map usage to users.
 | Create / rotate | Needs a valid stored user token, else HTTP 403 `MAAS_REAUTH_REQUIRED`. The UI shows a re-login button. |
 | TPM and per-model TPM edit | Patches `tokenRateLimits` (cluster first, then database) |
 | Model add / remove | Rewrites `spec.modelRefs`; removing the last model revokes the key |
-| Expiry | Can only be **shortened**: maas-api has no extend call. LiteMaaS enforces expiry itself (cleanup job and reconciler). |
+| Expiry | Can only be **shortened**: maas-api has no extend call. LiteMaaS enforces expiry itself (cleanup job and reconciler); the edit forms disable later presets and "Never" and explain why. |
 | Revoke, delete, archive | Deletes the `MaaSSubscription` first, then revokes in maas-api (user token, falling back to the service account token). A refused maas-api revoke leaves the key `pending` for the reconciler; the key is already inert without its subscription. |
 | Budget, RPM, budget duration, soft budget, parallel requests, reset spend | Not supported (HTTP 400). The UI hides these fields. |
 | Admin creating keys for a user | MaaS models can't be selected (MaaS keys need the user's own token). Admins can view keys, edit TPM, shorten expiry and revoke. |
@@ -154,9 +160,15 @@ the usage pipeline map usage to users.
 under a Postgres advisory lock so only one replica runs it. Admins can also trigger it with
 `POST /api/v1/admin/maas/reconcile` (permission `admin:maas`, admin only). Each pass:
 
-1. Re-applies every user's `MaaSAuthPolicy` and every live key's `MaaSSubscription`.
-2. Deletes labeled orphans. Subscriptions younger than 120 s are spared, so keys being created
-   are left alone.
+1. Re-applies every user's `MaaSAuthPolicy` and every live key's `MaaSSubscription`, writing only
+   objects whose managed fields differ (field-by-field comparison, so API-server defaults and key
+   order never cause rewrites) and always from a fresh database read taken right before the write.
+   Objects are stamped with `litemaas.io/instance=<MAAS_INSTANCE_ID>` (default: the pod namespace);
+   the reconciler only manages objects carrying this deployment's label, so several LiteMaaS
+   instances can share one MaaS namespace.
+2. Deletes labeled orphans. Objects younger than 120 s are spared (a key or grant may still be
+   mid-creation), and before deleting a policy the owner's desired state is re-read from the
+   database, so a grant that landed during the pass is never undone.
 3. Retries keys in `pending` or `error` state.
 4. Deactivates expired keys and revokes them in maas-api.
 5. Completes migrations whose grace period has ended.
@@ -172,23 +184,79 @@ and maps the series as follows:
 - `model` → LiteMaaS model id (matching is case-insensitive).
 - cost = tokens × blended price, where the blended price is (input + output price) / 2.
 
-The results merge into the admin usage analytics and the daily cache. A day where the MaaS
-query failed is not cached. `GET /usage/budget` reports `maasSpend` and `maasTokens` for the current
-month as **estimates, separate from** the LiteLLM `currentSpend`, because MaaS keys have no budget.
+The results merge into the admin usage analytics and the daily cache (`daily_usage_cache`, one row
+per UTC day). MaaS models appear under the provider `maas`, and a MaaS key is identified in the
+usage key filters by its subscription name (`litemaas-key-<id>`), which the key list returns as
+`liteLLMKeyAlias`. `GET /usage/budget` reports `maasSpend` and `maasTokens` for the current month as
+**estimates, separate from** the LiteLLM `currentSpend`, because MaaS keys have no budget.
+
+**Failure handling.** Prometheus is a best-effort dependency, and an outage must not stall the
+usage pages:
+
+- A request times out after `PROMETHEUS_TIMEOUT_MS` (default 10000). A transport error, timeout,
+  5xx or 429 opens a **60 s breaker**: for the next minute MaaS queries fail at once with the same
+  error instead of waiting for the timeout again, while results already in the 5-minute query cache
+  are still served. Refresh today and the usage resync close the breaker.
+- LiteMaaS sends `partial_response=false`, and a response that carries `warnings` (Thanos with a
+  store down) is treated as a failure: its numbers would be an undercount that is then cached.
+- A day whose MaaS query failed keeps its LiteLLM data and is cached as **incomplete**: it is served
+  for the current-day TTL and re-fetched afterwards, never frozen without its MaaS usage. Refresh
+  today and the resync do the same.
+- A UTC day that is still running counts as the current day, even when the server timezone has
+  already moved on to the next date.
+- `GET /usage/budget` waits at most 2 s for the MaaS part and otherwise omits `maasSpend` and
+  `maasTokens`.
+
+**Retention and the usage resync.** Prometheus keeps only about `MAAS_USAGE_RETENTION_DAYS`
+(default 15) days, and a query for an older day returns an empty result **without an error**. The
+daily cache is therefore the only long-term store of MaaS usage. The Usage Data Sync tool (resync)
+reads the MaaS part of every cached day before it deletes the rows, does not query Prometheus for
+days older than the retention, and merges the kept MaaS usage back into the re-imported day when
+Prometheus returns nothing or fails. A non-empty fresh result replaces the cached one. Set
+`MAAS_USAGE_RETENTION_DAYS` to the real retention of your Thanos (see the live validation runbook,
+A27).
 
 ### Migration from LiteLLM
 
 **Migrate to MaaS** on a LiteLLM model (`POST /api/v1/admin/models/:id/migrate-to-maas`, body
-`{maasModelRef: {name, namespace}, graceDays}`) runs in one transaction:
+`{maasModelRef: {name, namespace}, graceDays}`) first checks the `MaaSModelRef`: it must exist on
+the cluster and, when `MAAS_MODEL_NAMESPACES` is set, live in one of those namespaces. The model
+sync scans only those namespaces, so a ref elsewhere would never get phase or endpoint updates;
+it is refused with HTTP 400 and a message that names the configured namespaces. Then one
+transaction:
 
 1. Copies the model metadata to the MaaS row `<ns>/<name>`, or fills the empty fields of an
    already-synced row.
 2. Copies the **active** subscriptions as active, with no re-approval.
-3. Marks the old row `migration_state='migrating'` with `migration_grace_until` (default
+3. Copies the **pending** requests as pending and closes the old ones (`inactive`, status reason
+   `Migrated to MaaS model <ns>/<name>`): nothing can be activated on the old model any more, so
+   they could never be decided there. A user who already has a subscription on the MaaS model keeps
+   it (an active, pending, denied, ... row is never overwritten); only a cancelled (`inactive`) one
+   is re-queued. Every change writes a `subscription_status_history` row.
+4. Marks the old row `migration_state='migrating'` with `migration_grace_until` (default
    `MAAS_MIGRATION_GRACE_DAYS`, 14).
 
-After the commit it syncs the users' policies. New subscriptions to the old model are refused.
-Users see a "migrating until" label and a banner on the API Keys page, and create a new MaaS key.
+The call returns after the commit. The users' `MaaSAuthPolicy` objects are then applied **in the
+background**, at most 5 users at a time, so a large user base does not outlast proxy timeouts. A
+failed user is logged and converged by the reconciler within `MAAS_RECONCILE_INTERVAL_MS`; LiteLLM
+access is unaffected meanwhile. The response reports what was done:
+
+| Field | Meaning |
+| --- | --- |
+| `subscriptionsCopied` | active subscriptions now present (active) on the MaaS model |
+| `pendingRequestsCopied` / `pendingRequestsClosed` | pending requests carried over / closed on the old model |
+| `policiesScheduled` | users whose policy is being applied in the background (failures are not known yet) |
+| `usersToNotify` | users handed to the notification hook. **Nobody is messaged:** `NotificationService` has no delivery channel yet (it only logs), so users learn about the migration from the "migrating until" label and the banner on the API Keys page |
+
+While the model is migrating, and after, **nothing can be activated on the old row**: new
+subscriptions, bulk approve, revert to active, auto-approval when a restriction is lifted and a
+user's request for review, and the admin user-management routes that assign subscriptions or key
+models to a user, are all refused with a message that names the MaaS model.
+
+**Old and copied subscriptions are independent.** During the grace period the LiteLLM subscription
+and its MaaS copy are separate rows: denying, revoking or deleting the old one does not touch the
+MaaS one, and neither does the grace job (it only deactivates the old rows). To remove a user's
+MaaS access, act on the subscription of the **MaaS** model.
 
 When the grace period ends, the reconciler removes the model from users' LiteLLM keys,
 deactivates the old subscriptions and marks the row `completed`. The model is **not** deleted
@@ -256,14 +324,20 @@ maas-api and Thanos isn't blocked.
 | `GET /api/v1/api-keys` | `backendType`, plus `baseUrl`, `maasKeyId`, `maasSyncState` for MaaS keys; `modelDetails[]` include `backendType`, `backendModelName`, `migrationState`, `migrationGraceUntil` |
 | `POST /api/v1/api-keys/:id/reveal` | `keyType: 'maas'` and `baseUrl` for MaaS keys |
 | `GET /api/v1/usage/budget` | `maasSpend`, `maasTokens` (estimated, current UTC month) |
-| `POST /api/v1/admin/models/maas/sync` | body `{restoreRemoved?}`; admin |
+| `POST /api/v1/admin/models/maas/sync` | body `{restoreRemoved?}`; admin; 409 `RESOURCE_LOCKED` while another sync is running |
 | `GET /api/v1/admin/models/maas/refs` | cluster `MaaSModelRef` list with an `imported` flag |
-| `POST /api/v1/admin/models/:id/migrate-to-maas` | returns `{data: {oldModelId, newModelId, created, graceUntil, subscriptionsCopied, usersNotified, policyFailures}}` |
+| `POST /api/v1/admin/models/:id/migrate-to-maas` | returns `{data: {oldModelId, newModelId, created, graceUntil, subscriptionsCopied, pendingRequestsCopied, pendingRequestsClosed, usersToNotify, policiesScheduled}}`; policies are applied in the background |
 | `POST /api/v1/admin/maas/reconcile` | `admin:maas` (admin only) |
-| `GET /api/v1/health` | `maas: {enabled, maasApi, kubernetes, prometheus, mock}`; never affects the overall status |
+| `GET /api/v1/health` | `maas: {enabled, maasApi, kubernetes, prometheus, mock}`; never affects the overall status. `kubernetes` lists `maasauthpolicies` in `MAAS_NAMESPACE`: a missing CRD (404) or missing RBAC reports `unhealthy` (reason in the backend log) |
 
 Error codes: `MAAS_REAUTH_REQUIRED` (403, the user must log in again) and `MAAS_ERROR` (502, upstream
-failure, retryable for 5xx and 429).
+failure, retryable for 5xx and 429). A request that maas-api itself rejects (400/422, for example
+an expiration above the tenant maximum) is returned as a 400 `VALIDATION_ERROR` carrying the
+upstream message in `details.upstreamMessage`.
+
+Subscription suspension (quota exceeded) and expiry revoke the model on the cluster only: the key's
+model associations stay in the database, like LiteLLM keys, and the reconciler restores them once the
+subscription is active again.
 
 ## Limitations
 
@@ -271,7 +345,19 @@ failure, retryable for 5xx and 429).
 - Limitador reports total tokens only. MaaS usage shows all tokens as prompt tokens, with
   `rawData.sources.maas.tokenSplitAvailable=false`.
 - Usage older than the Prometheus/Thanos retention (about 15 days on the platform Prometheus)
-  can't be backfilled.
+  can't be backfilled. `increase()` over a window older than the retention does **not** fail: it
+  silently returns partial or zero values, so the days at the edge of the retention can be
+  undercounted. The usage resync therefore never queries older days (see Usage).
+- `increase()` misses the first increment of a brand-new series: Prometheus has no earlier sample
+  to compare with, so the first requests of a new `(subscription, model)` pair (a new key, or the
+  first use of a model) are not counted. The error is small for busy keys and **an undercount for
+  sparse users**, for example a key that sent a single request.
+- `GET /usage/budget` and the per-key usage query at most 120 days (`MAX_RANGE_DAYS`). A longer
+  range is cut to its most recent 120 days, so the totals leave out everything before the first
+  returned day. The backend logs a warning (`MaaS usage range truncated ...`).
+- MaaS models are matched by the Limitador `model` label. A label that several MaaS models claim
+  (the same served model name on two models, the same ref name in two namespaces) stays
+  unresolved: the usage is kept under the raw label with cost 0, and a warning is logged once.
 - Key expiry can only be shortened. Rotate to extend it.
 - Key creation needs the user's own OpenShift token. Users must have logged in recently (token
   lifetime, 24 h by default), and admins can't create MaaS keys for users.

@@ -56,6 +56,7 @@ const envSchema = Type.Object({
   MAAS_API_URL: Type.Optional(Type.String()),
   MAAS_GATEWAY_URL: Type.Optional(Type.String()),
   MAAS_NAMESPACE: Type.String({ default: 'models-as-a-service' }),
+  MAAS_INSTANCE_ID: Type.Optional(Type.String()), // label value identifying this deployment; default: pod namespace
   MAAS_MODEL_NAMESPACES: Type.Optional(Type.String()), // comma-separated; empty = all namespaces
   MAAS_SYNC_INTERVAL_MS: Type.String({ default: '300000' }),
   MAAS_RECONCILE_INTERVAL_MS: Type.String({ default: '300000' }),
@@ -63,11 +64,13 @@ const envSchema = Type.Object({
   MAAS_USAGE_HITS_METRIC: Type.String({ default: 'authorized_hits' }), // Limitador token counter
   MAAS_USAGE_CALLS_METRIC: Type.String({ default: 'authorized_calls' }), // Limitador request counter
   MAAS_USAGE_LABEL_MATCHERS: Type.Optional(Type.String()), // extra PromQL matchers, e.g. namespace="kuadrant-system"
+  MAAS_USAGE_RETENTION_DAYS: Type.String({ default: '15' }), // Prometheus/Thanos retention; older days are never queried by the usage resync
   K8S_API_URL: Type.Optional(Type.String()),
   K8S_TOKEN: Type.Optional(Type.String()),
   PROMETHEUS_URL: Type.Optional(Type.String()),
   PROMETHEUS_TOKEN: Type.Optional(Type.String()),
   PROMETHEUS_SKIP_TLS_VERIFY: Type.Optional(Type.String()),
+  PROMETHEUS_TIMEOUT_MS: Type.String({ default: '10000' }), // per-request timeout of Prometheus / Thanos queries
   MAAS_API_SKIP_TLS_VERIFY: Type.Optional(Type.String()),
 
   // Usage Cache

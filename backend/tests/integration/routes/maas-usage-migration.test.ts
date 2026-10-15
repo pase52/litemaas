@@ -9,13 +9,17 @@ import { generateTestToken, createTestUsers, TEST_USER_IDS } from '../setup';
 import { AdminUsageAggregationService } from '../../../src/services/admin-usage/admin-usage-aggregation.service';
 import { UsageStatsService } from '../../../src/services/usage-stats.service';
 import { MaasMigrationService } from '../../../src/services/maas/maas-migration.service';
+import { MaasAccessService } from '../../../src/services/maas/maas-access.service';
 import { MaasReconcilerService } from '../../../src/services/maas/maas-reconciler.service';
+import { NotificationService } from '../../../src/services/notification.service';
+import { SubscriptionService } from '../../../src/services/subscription.service';
 import {
   MAAS_AUTH_POLICY,
   MAAS_MODEL_REF,
   MAAS_SUBSCRIPTION,
 } from '../../../src/services/maas/maas-resources';
 import { MockPrometheusClient } from '../../../src/services/maas/prometheus.client';
+import { createUnconfiguredClient } from '../../../src/services/maas/maas-clients';
 import type { InMemoryK8sClient } from '../../../src/services/k8s/k8s-client';
 
 const NS = 'maas-demo-models';
@@ -59,6 +63,7 @@ describe('MaaS usage, migration and health', () => {
       `${NS}/%`,
       OLD_MODEL,
     ]);
+    await app.dbUtils.query(`DELETE FROM users WHERE username LIKE 'migr-bulk-%'`);
   }
 
   async function seedCluster() {
@@ -130,6 +135,7 @@ describe('MaaS usage, migration and health', () => {
 
   afterAll(async () => {
     if (app) {
+      await MaasMigrationService.waitForBackground();
       app.maasClients!.prometheus = originalPrometheus;
       await cleanDb();
       await app.close();
@@ -140,6 +146,9 @@ describe('MaaS usage, migration and health', () => {
   });
 
   beforeEach(async () => {
+    // migrate() applies the policies in the background: let the previous test's work finish
+    // before the database and the mock cluster are reset
+    await MaasMigrationService.waitForBackground();
     vi.restoreAllMocks();
     app.maasClients!.prometheus = originalPrometheus;
     (app.backends.get('maas').usage as any).clearCache();
@@ -240,7 +249,7 @@ describe('MaaS usage, migration and health', () => {
       );
     });
 
-    it('does not block on MaaS errors and does not cache the incomplete day', async () => {
+    it('does not block on MaaS errors and caches the day as incomplete (re-fetched after the TTL)', async () => {
       await seedMaasUsageModelAndKey();
       app.maasClients!.prometheus = new MockPrometheusClient({
         query: () => {
@@ -257,7 +266,27 @@ describe('MaaS usage, migration and health', () => {
 
       expect(days).toHaveLength(1);
       expect(days[0].metrics.api_requests).toBe(4);
-      expect(cache.saveToDailyCache).not.toHaveBeenCalled();
+      // historical day, but stored with is_complete=false so it is retried instead of being
+      // either lost for good or re-fetched from LiteLLM on every request
+      expect(cache.saveToDailyCache).toHaveBeenCalledTimes(1);
+      expect(cache.saveToDailyCache.mock.calls[0][2]).toBe(true);
+    });
+
+    it('caches a historical day normally when Prometheus is not configured', async () => {
+      await seedMaasUsageModelAndKey();
+      app.maasClients!.prometheus = createUnconfiguredClient('Prometheus');
+      const cache = {
+        getCachedDailyData: vi.fn().mockResolvedValue(null),
+        saveToDailyCache: vi.fn().mockResolvedValue(undefined),
+      } as any;
+      const service = new AdminUsageAggregationService(app, liteLLM(4), cache);
+
+      const days = await service.collectDateRangeData(yesterday, yesterday);
+
+      expect(days).toHaveLength(1);
+      expect(days[0].metrics.api_requests).toBe(4);
+      expect(cache.saveToDailyCache).toHaveBeenCalledTimes(1);
+      expect(cache.saveToDailyCache.mock.calls[0][2]).toBe(false);
     });
 
     it('still surfaces LiteLLM errors (only MaaS is non-blocking)', async () => {
@@ -358,7 +387,7 @@ describe('MaaS usage, migration and health', () => {
     it('copies the model and active subscriptions, marks the old model migrating and applies policies', async () => {
       await insertOldModel({ restricted: true });
       await subscribeDirect(TEST_USER_IDS.USER, OLD_MODEL, 'active');
-      await subscribeDirect(TEST_USER_IDS.ADMIN, OLD_MODEL, 'pending'); // not copied
+      await subscribeDirect(TEST_USER_IDS.ADMIN, OLD_MODEL, 'pending'); // carried over as pending
 
       const res = await migrate(OLD_MODEL, {
         maasModelRef: { name: 'llama-3-2-3b', namespace: NS },
@@ -371,8 +400,16 @@ describe('MaaS usage, migration and health', () => {
         newModelId: MAAS_MODEL,
         created: true,
         subscriptionsCopied: 1,
-        policyFailures: 0,
+        pendingRequestsCopied: 1,
+        pendingRequestsClosed: 1,
+        usersToNotify: 1,
+        policiesScheduled: 1,
       });
+      // the old names promised more than the service can know: no delivery channel exists and
+      // the policy failures are only known to the background job
+      expect(data).not.toHaveProperty('usersNotified');
+      expect(data).not.toHaveProperty('policyFailures');
+      await MaasMigrationService.waitForBackground();
       const graceMs = new Date(data.graceUntil).getTime() - Date.now();
       expect(graceMs).toBeGreaterThan(6.9 * 86_400_000);
       expect(graceMs).toBeLessThan(7.1 * 86_400_000);
@@ -398,10 +435,13 @@ describe('MaaS usage, migration and health', () => {
       expect(Number(fresh.input_cost_per_token)).toBeCloseTo(1e-6, 12);
 
       const subs = await app.dbUtils.queryMany<any>(
-        'SELECT user_id, status FROM subscriptions WHERE model_id = $1',
+        'SELECT user_id, status FROM subscriptions WHERE model_id = $1 ORDER BY user_id',
         [MAAS_MODEL],
       );
-      expect(subs).toEqual([{ user_id: TEST_USER_IDS.USER, status: 'active' }]);
+      expect(subs).toEqual([
+        { user_id: TEST_USER_IDS.USER, status: 'active' },
+        { user_id: TEST_USER_IDS.ADMIN, status: 'pending' },
+      ]);
       const history = await app.dbUtils.queryMany<any>(
         `SELECT h.reason FROM subscription_status_history h
            JOIN subscriptions s ON s.id = h.subscription_id WHERE s.model_id = $1`,
@@ -552,6 +592,369 @@ describe('MaaS usage, migration and health', () => {
       const body = { maasModelRef: { name: 'llama-3-2-3b', namespace: NS } };
       expect((await migrate(OLD_MODEL, body, user())).statusCode).toBe(403);
       expect((await migrate(OLD_MODEL, body, readonly())).statusCode).toBe(403);
+    });
+
+    it('rejects a MaaSModelRef outside MAAS_MODEL_NAMESPACES and names the configured namespaces', async () => {
+      await insertOldModel();
+      const config = app.maasClients!.config as { modelNamespaces: string[] };
+      const configured = config.modelNamespaces;
+      config.modelNamespaces = ['team-a-models', 'team-b-models'];
+      try {
+        const getRef = vi.spyOn(app.maasClients!.k8s, 'get');
+        const res = await migrate(OLD_MODEL, {
+          maasModelRef: { name: 'llama-3-2-3b', namespace: NS },
+        });
+        expect(res.statusCode).toBe(400);
+        const { error } = JSON.parse(res.body);
+        expect(error.code).toBe('VALIDATION_ERROR');
+        expect(error.message).toContain('team-a-models, team-b-models');
+        expect(error.details.suggestion).toContain('team-a-models, team-b-models');
+        // refused before the cluster was read or anything was written
+        expect(getRef).not.toHaveBeenCalled();
+        const old = await app.dbUtils.queryOne<any>(
+          'SELECT migration_state FROM models WHERE id = $1',
+          [OLD_MODEL],
+        );
+        expect(old.migration_state).toBeNull();
+
+        // a ref inside one of the configured namespaces is accepted
+        config.modelNamespaces = [NS];
+        expect(
+          (await migrate(OLD_MODEL, { maasModelRef: { name: 'llama-3-2-3b', namespace: NS } }))
+            .statusCode,
+        ).toBe(200);
+      } finally {
+        config.modelNamespaces = configured;
+      }
+    });
+
+    it('carries pending requests over as pending, closes the old ones and dedupes per user', async () => {
+      await insertOldModel({ restricted: true });
+      await app.dbUtils.query(
+        `INSERT INTO models (id, name, provider, category, features, availability, backend_type,
+           maas_model_ref_name, maas_model_ref_namespace, restricted_access)
+         VALUES ($1, 'x', 'maas', 'Language Model', ARRAY['chat'], 'available', 'maas',
+                 'llama-3-2-3b', $2, true)`,
+        [MAAS_MODEL, NS],
+      );
+      await subscribeDirect(TEST_USER_IDS.USER, OLD_MODEL, 'pending'); // nothing on the target
+      await subscribeDirect(TEST_USER_IDS.ADMIN, OLD_MODEL, 'pending'); // denied on the target
+      await subscribeDirect(TEST_USER_IDS.ADMIN_READONLY, OLD_MODEL, 'pending'); // cancelled there
+      await subscribeDirect(TEST_USER_IDS.ADMIN, MAAS_MODEL, 'denied');
+      await subscribeDirect(TEST_USER_IDS.ADMIN_READONLY, MAAS_MODEL, 'inactive');
+
+      const res = await migrate(OLD_MODEL, {
+        maasModelRef: { name: 'llama-3-2-3b', namespace: NS },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).data).toMatchObject({
+        created: false,
+        subscriptionsCopied: 0,
+        pendingRequestsCopied: 2,
+        pendingRequestsClosed: 3,
+        policiesScheduled: 0,
+      });
+
+      // target: new pending copy, the existing denial untouched, the cancelled one re-queued
+      const target = await app.dbUtils.queryMany<any>(
+        'SELECT user_id, status, status_reason FROM subscriptions WHERE model_id = $1 ORDER BY user_id',
+        [MAAS_MODEL],
+      );
+      expect(target.map((r) => [r.user_id, r.status])).toEqual([
+        [TEST_USER_IDS.USER, 'pending'],
+        [TEST_USER_IDS.ADMIN, 'denied'],
+        [TEST_USER_IDS.ADMIN_READONLY, 'pending'],
+      ]);
+      expect(target[0].status_reason).toContain(OLD_MODEL);
+
+      // old: every pending request is closed and points at the MaaS model
+      const old = await app.dbUtils.queryMany<any>(
+        'SELECT id, status, status_reason FROM subscriptions WHERE model_id = $1',
+        [OLD_MODEL],
+      );
+      expect(old).toHaveLength(3);
+      for (const row of old) {
+        expect(row.status).toBe('inactive');
+        expect(row.status_reason).toContain(MAAS_MODEL);
+      }
+
+      // history: pending -> inactive on the old rows, creation / re-queue on the target rows
+      const history = await app.dbUtils.queryMany<any>(
+        `SELECT s.model_id, h.old_status, h.new_status
+           FROM subscription_status_history h JOIN subscriptions s ON s.id = h.subscription_id
+          WHERE s.model_id IN ($1, $2)
+          ORDER BY s.model_id, h.old_status NULLS FIRST`,
+        [OLD_MODEL, MAAS_MODEL],
+      );
+      expect(history.filter((h) => h.model_id === OLD_MODEL)).toEqual(
+        Array(3).fill({ model_id: OLD_MODEL, old_status: 'pending', new_status: 'inactive' }),
+      );
+      expect(history.filter((h) => h.model_id === MAAS_MODEL)).toEqual([
+        { model_id: MAAS_MODEL, old_status: null, new_status: 'pending' },
+        { model_id: MAAS_MODEL, old_status: 'inactive', new_status: 'pending' },
+      ]);
+
+      // a pending request grants nothing on the cluster...
+      await MaasMigrationService.waitForBackground();
+      expect(await k8s.list(MAAS_AUTH_POLICY)).toHaveLength(0);
+
+      // ...and the admin can decide the carried-over request on the MaaS model
+      const copy = target[0];
+      const approve = await app.inject({
+        method: 'POST',
+        url: '/api/v1/admin/subscriptions/approve',
+        headers: { authorization: admin() },
+        payload: {
+          subscriptionIds: [
+            (
+              await app.dbUtils.queryOne<any>(
+                'SELECT id FROM subscriptions WHERE user_id = $1 AND model_id = $2',
+                [copy.user_id, MAAS_MODEL],
+              )
+            ).id,
+          ],
+        },
+      });
+      expect(JSON.parse(approve.body)).toMatchObject({ successful: 1, failed: 0 });
+      const policy = await k8s.get(MAAS_AUTH_POLICY, 'litemaas-testuser', POLICY_NS);
+      expect(policy?.spec?.modelRefs).toEqual([{ name: 'llama-3-2-3b', namespace: NS }]);
+    });
+
+    it('applies the policies in the background with bounded concurrency, after responding', async () => {
+      await insertOldModel();
+      const extra = Array.from(
+        { length: 12 },
+        (_, i) => `00000000-0000-4000-8000-0000000b00${String(i).padStart(2, '0')}`,
+      );
+      for (const [i, id] of extra.entries()) {
+        await app.dbUtils.query(
+          `INSERT INTO users (id, username, email, full_name, oauth_provider, oauth_id, roles, is_active)
+           VALUES ($1::uuid, $2, $3, 'Bulk', 'test', $1::text, ARRAY['user'], true)
+           ON CONFLICT (id) DO NOTHING`,
+          [id, `migr-bulk-${i}`, `migr-bulk-${i}@example.com`],
+        );
+      }
+      for (const id of [TEST_USER_IDS.USER, ...extra]) {
+        await subscribeDirect(id, OLD_MODEL, 'active');
+      }
+
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let inFlight = 0;
+      let peak = 0;
+      let calls = 0;
+      const grant = MaasAccessService.prototype.grantModelToUser;
+      vi.spyOn(MaasAccessService.prototype, 'grantModelToUser').mockImplementation(async function (
+        this: MaasAccessService,
+        userId: string,
+        modelId: string,
+      ) {
+        calls++;
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await gate; // held closed: the grants cannot finish before the response
+        inFlight--;
+        return grant.call(this, userId, modelId);
+      });
+
+      // resolves although every grant is still blocked => the fan-out is off the request path
+      const res = await migrate(OLD_MODEL, {
+        maasModelRef: { name: 'llama-3-2-3b', namespace: NS },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).data).toMatchObject({
+        subscriptionsCopied: 13,
+        policiesScheduled: 13,
+        usersToNotify: 13,
+      });
+      expect(await k8s.list(MAAS_AUTH_POLICY)).toHaveLength(0);
+
+      await vi.waitFor(() => expect(inFlight).toBe(5)); // exactly the bound, not 13
+      release();
+      await MaasMigrationService.waitForBackground();
+
+      expect(calls).toBe(13);
+      expect(peak).toBe(5);
+      expect(await k8s.list(MAAS_AUTH_POLICY)).toHaveLength(13);
+    });
+
+    it('hands the affected users to the notification hook (which only logs) from the background job', async () => {
+      await insertOldModel();
+      await subscribeDirect(TEST_USER_IDS.USER, OLD_MODEL, 'active');
+      await subscribeDirect(TEST_USER_IDS.ADMIN, OLD_MODEL, 'active');
+      const hook = vi.spyOn(NotificationService.prototype, 'notifyUsersModelMigration');
+
+      const res = await migrate(OLD_MODEL, {
+        maasModelRef: { name: 'llama-3-2-3b', namespace: NS },
+      });
+      expect(JSON.parse(res.body).data.usersToNotify).toBe(2);
+      await MaasMigrationService.waitForBackground();
+
+      expect(hook).toHaveBeenCalledTimes(1);
+      const [oldId, newId, users, graceUntil] = hook.mock.calls[0];
+      expect([oldId, newId]).toEqual([OLD_MODEL, MAAS_MODEL]);
+      expect([...users].sort()).toEqual([TEST_USER_IDS.USER, TEST_USER_IDS.ADMIN].sort());
+      expect(graceUntil).toBeInstanceOf(Date);
+    });
+
+    it('never fails the migration when a grant or the notification fails in the background', async () => {
+      await insertOldModel();
+      await subscribeDirect(TEST_USER_IDS.USER, OLD_MODEL, 'active');
+      vi.spyOn(MaasAccessService.prototype, 'grantModelToUser').mockResolvedValue(null);
+      vi.spyOn(NotificationService.prototype, 'notifyUsersModelMigration').mockRejectedValue(
+        new Error('smtp down'),
+      );
+
+      const res = await migrate(OLD_MODEL, {
+        maasModelRef: { name: 'llama-3-2-3b', namespace: NS },
+      });
+      expect(res.statusCode).toBe(200);
+      await expect(MaasMigrationService.waitForBackground()).resolves.toBeUndefined();
+
+      // committed regardless
+      const old = await app.dbUtils.queryOne<any>(
+        'SELECT migration_state FROM models WHERE id = $1',
+        [OLD_MODEL],
+      );
+      expect(old.migration_state).toBe('migrating');
+      const sub = await app.dbUtils.queryOne<any>(
+        'SELECT status FROM subscriptions WHERE model_id = $1',
+        [MAAS_MODEL],
+      );
+      expect(sub.status).toBe('active');
+      // the reconciler converges the policy the failed grant did not apply
+      const pass = await new MaasReconcilerService(app).reconcile();
+      expect(pass.policiesApplied).toBe(1);
+      expect(await k8s.get(MAAS_AUTH_POLICY, 'litemaas-testuser', POLICY_NS)).not.toBeNull();
+    });
+
+    it('keeps the old and the copied subscription independent during the grace period', async () => {
+      await insertOldModel();
+      const oldSub = await subscribeDirect(TEST_USER_IDS.USER, OLD_MODEL, 'active');
+      await migrate(OLD_MODEL, { maasModelRef: { name: 'llama-3-2-3b', namespace: NS } });
+      await MaasMigrationService.waitForBackground();
+      expect(await k8s.get(MAAS_AUTH_POLICY, 'litemaas-testuser', POLICY_NS)).not.toBeNull();
+
+      // denying the old (LiteLLM) subscription does not touch the MaaS copy or its policy
+      const deny = await app.inject({
+        method: 'POST',
+        url: '/api/v1/admin/subscriptions/deny',
+        headers: { authorization: admin() },
+        payload: { subscriptionIds: [oldSub], reason: 'abuse' },
+      });
+      expect(JSON.parse(deny.body)).toMatchObject({ successful: 1, failed: 0 });
+      const copy = await app.dbUtils.queryOne<any>(
+        'SELECT status FROM subscriptions WHERE user_id = $1 AND model_id = $2',
+        [TEST_USER_IDS.USER, MAAS_MODEL],
+      );
+      expect(copy.status).toBe('active');
+      const policy = await k8s.get(MAAS_AUTH_POLICY, 'litemaas-testuser', POLICY_NS);
+      expect(policy?.spec?.modelRefs).toEqual([{ name: 'llama-3-2-3b', namespace: NS }]);
+    });
+  });
+
+  // -------------------------------------------- activation on a migrating model
+
+  describe('a migrating model refuses activation (approve / revert / update / request-review)', () => {
+    let pendingId: string;
+    let deniedId: string;
+
+    beforeEach(async () => {
+      await insertOldModel({ restricted: true });
+      expect(
+        (await migrate(OLD_MODEL, { maasModelRef: { name: 'llama-3-2-3b', namespace: NS } }))
+          .statusCode,
+      ).toBe(200);
+      // rows that appear on the old model after the migration started (a race, or a decision
+      // the migration does not copy)
+      pendingId = await subscribeDirect(TEST_USER_IDS.USER, OLD_MODEL, 'pending');
+      deniedId = await subscribeDirect(TEST_USER_IDS.ADMIN, OLD_MODEL, 'denied');
+    });
+
+    const statusOf = async (id: string) =>
+      (await app.dbUtils.queryOne<any>('SELECT status FROM subscriptions WHERE id = $1', [id]))
+        .status;
+
+    it('bulk approve fails the subscription and names the MaaS model', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/admin/subscriptions/approve',
+        headers: { authorization: admin() },
+        payload: { subscriptionIds: [pendingId] },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body).toMatchObject({ successful: 0, failed: 1 });
+      expect(body.errors[0]).toMatchObject({ subscription: pendingId });
+      expect(body.errors[0].error).toContain(MAAS_MODEL);
+      expect(await statusOf(pendingId)).toBe('pending');
+    });
+
+    it('revert to active is a 400 pointing at the MaaS model; deny / pending still work', async () => {
+      for (const id of [pendingId, deniedId]) {
+        const res = await app.inject({
+          method: 'POST',
+          url: `/api/v1/admin/subscriptions/${id}/revert`,
+          headers: { authorization: admin() },
+          payload: { newStatus: 'active', reason: 'override' },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(JSON.parse(res.body).error.message).toContain(MAAS_MODEL);
+      }
+      expect(await statusOf(pendingId)).toBe('pending');
+      expect(await statusOf(deniedId)).toBe('denied');
+
+      // not an activation: allowed
+      const toPending = await app.inject({
+        method: 'POST',
+        url: `/api/v1/admin/subscriptions/${deniedId}/revert`,
+        headers: { authorization: admin() },
+        payload: { newStatus: 'pending' },
+      });
+      expect(toPending.statusCode).toBe(200);
+      expect(await statusOf(deniedId)).toBe('pending');
+    });
+
+    it('the owner cannot re-queue a denied request on the migrating model', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/subscriptions/${deniedId}/request-review`,
+        headers: { authorization: admin() }, // the ADMIN user owns the denied row
+      });
+      expect(res.statusCode).toBe(400);
+      const { error } = JSON.parse(res.body);
+      expect(error.message).toContain('migrating to MaaS');
+      expect(error.details.suggestion).toContain(MAAS_MODEL);
+      expect(await statusOf(deniedId)).toBe('denied');
+    });
+
+    it('an internal update to active (allowAnyStatus) is refused too', async () => {
+      const service = new SubscriptionService(app);
+      await expect(
+        service.updateSubscription(
+          pendingId,
+          TEST_USER_IDS.USER,
+          { status: 'active' as any },
+          { allowAnyStatus: true },
+        ),
+      ).rejects.toThrow(new RegExp(MAAS_MODEL));
+      expect(await statusOf(pendingId)).toBe('pending');
+    });
+
+    it('lifting the restriction does not auto-approve pending requests of the migrating model', async () => {
+      await new SubscriptionService(app).handleModelRestrictionChange(OLD_MODEL, false);
+      expect(await statusOf(pendingId)).toBe('pending');
+    });
+
+    it('denying is still possible (nothing is activated)', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/admin/subscriptions/deny',
+        headers: { authorization: admin() },
+        payload: { subscriptionIds: [pendingId], reason: 'not needed' },
+      });
+      expect(JSON.parse(res.body)).toMatchObject({ successful: 1, failed: 0 });
+      expect(await statusOf(pendingId)).toBe('denied');
     });
   });
 

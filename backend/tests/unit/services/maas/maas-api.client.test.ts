@@ -88,17 +88,31 @@ describe('MaasApiClient', () => {
     },
   );
 
-  it('maps other failures to MAAS_ERROR with upstream details and retryability', async () => {
+  it('maps 400/422 to a VALIDATION_ERROR carrying the upstream reason', async () => {
     fetchMock.mockResolvedValueOnce(json(400, { error: { message: 'subscription not found' } }));
     const e400 = await client()
       .createKey('t', { name: 'n', subscription: 's' })
       .catch((e) => e);
-    expect(e400.code).toBe('MAAS_ERROR');
+    expect(e400.code).toBe('VALIDATION_ERROR');
+    expect(e400.statusCode).toBe(400);
+    expect(e400.message).toContain('subscription not found');
     expect(e400.details).toMatchObject({
       upstreamStatus: 400,
       upstreamMessage: 'subscription not found',
     });
-    expect(e400.retryable).toBe(false);
+  });
+
+  it('maps other failures to MAAS_ERROR with upstream details and retryability', async () => {
+    fetchMock.mockResolvedValueOnce(json(409, { error: { message: 'duplicate name' } }));
+    const e409 = await client()
+      .createKey('t', { name: 'n', subscription: 's' })
+      .catch((e) => e);
+    expect(e409.code).toBe('MAAS_ERROR');
+    expect(e409.details).toMatchObject({
+      upstreamStatus: 409,
+      upstreamMessage: 'duplicate name',
+    });
+    expect(e409.retryable).toBe(false);
 
     fetchMock.mockResolvedValueOnce(json(503, { message: 'down' }));
     const e503 = await client()

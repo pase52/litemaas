@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `GET /api/v1/api-keys/:id` returned 500 because the response omitted the required `keyPrefix` and `isActive` fields
+- Admin models page listed only the first 20 models (no pagination); it now requests up to the API maximum
+
+### Security
+
+- Subscription owners could set their own subscription to `active` through `PATCH /api/v1/subscriptions/:id`, bypassing the approval workflow for restricted models. Owners may now only cancel or deactivate; activation goes through subscription requests and admin approval
 
 ## [0.5.1] - 2026-08-12
 

@@ -18,8 +18,10 @@ describe('adminModelsService MaaS endpoints', () => {
       created: true,
       graceUntil: '2030-01-01T00:00:00.000Z',
       subscriptionsCopied: 3,
-      usersNotified: 3,
-      policyFailures: 0,
+      pendingRequestsCopied: 1,
+      pendingRequestsClosed: 1,
+      usersToNotify: 3,
+      policiesScheduled: 3,
     };
     vi.mocked(apiClient.post).mockResolvedValue({
       data,

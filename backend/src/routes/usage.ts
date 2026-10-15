@@ -10,6 +10,22 @@ import { Type } from '@sinclair/typebox';
 import type { AdminUsageFilters } from '../types/admin-usage.types';
 import { validateDateRangeSize, suggestDateRanges } from '../utils/date-validation';
 
+/**
+ * Upper bound for the optional MaaS part of `GET /usage/budget`. Prometheus may be slow or
+ * unreachable (the client timeout alone would hold the response for seconds, per queried day);
+ * past this the response simply omits `maasSpend` / `maasTokens`.
+ */
+const MAAS_BUDGET_SUMMARY_TIMEOUT_MS = 2000;
+
+/** Reject with a timeout error when `promise` has not settled within `ms` (the timer is cleared) */
+function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 const usageRoutes: FastifyPluginAsync = async (fastify) => {
   // Initialize admin services for user analytics endpoint
   const liteLLMService = new LiteLLMService(fastify);
@@ -67,7 +83,8 @@ const usageRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       // MaaS usage (estimated from tokens x model pricing, current UTC month). Reported next to
-      // the LiteLLM spend, not added to it: MaaS keys carry no budget. Never blocks the response.
+      // the LiteLLM spend, not added to it: MaaS keys carry no budget. Never blocks the response:
+      // on a Prometheus failure or after MAAS_BUDGET_SUMMARY_TIMEOUT_MS it is left out.
       let maasSpend: number | undefined;
       let maasTokens: number | undefined;
       if (fastify.maasClients && fastify.backends?.has('maas')) {
@@ -77,10 +94,14 @@ const usageRoutes: FastifyPluginAsync = async (fastify) => {
           if (subscriptions.length > 0) {
             const now = new Date();
             const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-            const summary = await source.getUsageSummary(
-              subscriptions,
-              start.toISOString().slice(0, 10),
-              now.toISOString().slice(0, 10),
+            const summary = await withTimeout(
+              source.getUsageSummary(
+                subscriptions,
+                start.toISOString().slice(0, 10),
+                now.toISOString().slice(0, 10),
+              ),
+              MAAS_BUDGET_SUMMARY_TIMEOUT_MS,
+              'MaaS usage summary',
             );
             maasSpend = summary.totalCost;
             maasTokens = summary.totalTokens;
@@ -190,9 +211,11 @@ const usageRoutes: FastifyPluginAsync = async (fastify) => {
 
         // Validate that provided API key IDs belong to the user
         if (queryFilters.apiKeyIds && queryFilters.apiKeyIds.length > 0) {
-          // Query user's API keys from database
+          // Query user's API keys from database. The usage data is keyed by the LiteLLM alias,
+          // or by the subscription name for MaaS keys (they have no alias)
           const userApiKeysResult = await fastify.dbUtils.query<{ litellm_key_alias: string }>(
-            `SELECT litellm_key_alias FROM api_keys WHERE user_id = $1 AND is_active = true`,
+            `SELECT COALESCE(litellm_key_alias, maas_subscription_name) AS litellm_key_alias
+               FROM api_keys WHERE user_id = $1 AND is_active = true`,
             [userId],
           );
 
@@ -539,7 +562,8 @@ const usageRoutes: FastifyPluginAsync = async (fastify) => {
         // Validate API key ownership (same pattern as POST /analytics)
         if (exportRequest.apiKeyIds && exportRequest.apiKeyIds.length > 0) {
           const userApiKeysResult = await fastify.dbUtils.query<{ litellm_key_alias: string }>(
-            `SELECT litellm_key_alias FROM api_keys WHERE user_id = $1 AND is_active = true`,
+            `SELECT COALESCE(litellm_key_alias, maas_subscription_name) AS litellm_key_alias
+               FROM api_keys WHERE user_id = $1 AND is_active = true`,
             [userId],
           );
 

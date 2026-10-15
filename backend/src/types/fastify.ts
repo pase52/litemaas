@@ -54,6 +54,7 @@ declare module 'fastify' {
       MAAS_API_URL?: string;
       MAAS_GATEWAY_URL?: string;
       MAAS_NAMESPACE: string;
+      MAAS_INSTANCE_ID?: string;
       MAAS_MODEL_NAMESPACES?: string;
       MAAS_SYNC_INTERVAL_MS: string;
       MAAS_RECONCILE_INTERVAL_MS: string;
@@ -61,11 +62,13 @@ declare module 'fastify' {
       MAAS_USAGE_HITS_METRIC: string;
       MAAS_USAGE_CALLS_METRIC: string;
       MAAS_USAGE_LABEL_MATCHERS?: string;
+      MAAS_USAGE_RETENTION_DAYS: string;
       K8S_API_URL?: string;
       K8S_TOKEN?: string;
       PROMETHEUS_URL?: string;
       PROMETHEUS_TOKEN?: string;
       PROMETHEUS_SKIP_TLS_VERIFY?: string;
+      PROMETHEUS_TIMEOUT_MS: string;
       MAAS_API_SKIP_TLS_VERIFY?: string;
 
       // Usage Cache

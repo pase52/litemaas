@@ -2109,7 +2109,7 @@
   },
   "maas": {
     "admin": {
-      "deleteMaasNote": "The model is hidden from LiteMaaS and active subscriptions are revoked. The MaaSModelRef on the cluster remains untouched in the halls of the cluster; use \"Sync and restore removed models\" to call it back.",
+      "deleteMaasNote": "The model is hidden from LiteMaaS and active subscriptions are revoked. The MaaSModelRef on the cluster remains untouched in the halls of the cluster; use \"Sync and restore banished models\" to call it back.",
       "graceDays": "Days of grace (Nurn lû)",
       "graceDaysHelp": "Wanderers keep their LiteLLM path to this model for this many days, that they may change their keys.",
       "managedByCluster": "This model comes from a MaaSModelRef. Endpoint, rate limits and credentials are kept by the cluster; only the lore (metadata) below may be edited here.",
@@ -2124,11 +2124,11 @@
       "migrateSuccessDesc": "{{count}} subscription(s) carried over to MaaS. The LiteLLM path remains open until {{date}}.",
       "migrateSuccessTitle": "The journey has begun",
       "migrateTitle": "Journey to MaaS",
-      "refsLoadFailed": "Failed to load MaaS model references",
+      "refsLoadFailed": "The MaaS model references could not be gathered",
       "syncButton": "Gar MaaS models",
-      "syncError": "MaaS synchronization failed",
+      "syncError": "MaaS models could not be brought into harmony",
       "syncMoreOptions": "More MaaS sync paths",
-      "syncRestore": "Sync and restore removed models",
+      "syncRestore": "Sync and restore banished models",
       "syncRestoreHelp": "Also call back the MaaS models banished by a steward",
       "syncSuccessDesc": "{{total}} model references found: {{created}} new, {{updated}} renewed, {{unavailable}} beyond reach.",
       "syncSuccessTitle": "MaaS models are in harmony"
@@ -2141,7 +2141,9 @@
     },
     "keys": {
       "backendHelp": "A key serves the models of one backend only. Choose the backend first, then the models it holds.",
-      "backendLabel": "Key backend",
+      "backendLabel": "Backend of the key (Hîr)",
+      "expiryNotLater": "The new fading may not lie beyond the present one ({{date}}).",
+      "expiryShortenOnly": "The fading of a MaaS API key may be hastened, but never delayed.",
       "graceBannerItem": "Key \"{{key}}\": {{models}} stay reachable through LiteLLM until {{date}}. Forge a MaaS key for these models before that day.",
       "graceBannerTitle": "Some of your keys hold models that journey to MaaS",
       "noSubscribedMaasModels": "You hold no active subscriptions to MaaS models.",
