@@ -151,6 +151,8 @@ export interface UserApiKey {
   expiresAt?: string;
   revokedAt?: string;
   archivedAt?: string;
+  /** Backend that issued the key (RHOAI MaaS keys only support TPM limits). */
+  backendType?: 'litellm' | 'maas';
 }
 
 // Create API key for user request

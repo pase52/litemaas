@@ -42,6 +42,8 @@ import { modelsService } from '../../services/models.service';
 import { useNotifications } from '../../contexts/NotificationContext';
 import { useCurrency } from '../../contexts/ConfigContext';
 import { formatDate } from '../../utils/formatters';
+import { BackendBadge } from '../common/BackendBadge';
+import { isMaasModel } from '../../utils/modelBackend';
 import {
   UserApiKey,
   CreateApiKeyForUserRequest,
@@ -57,6 +59,7 @@ interface UserApiKeysTabProps {
 interface ModelOption {
   id: string;
   name: string;
+  backendType?: 'litellm' | 'maas';
 }
 
 interface ModelLimits {
@@ -482,6 +485,18 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
       ).toISOString();
     }
 
+    if (editingMaasKey) {
+      // MaaS keys: only TPM (global + per-model), models and expiration can change
+      updateMutation.mutate({
+        keyId: keyToEdit.id,
+        modelIds: editSelectedModelIds,
+        expiresAt: editExpiresAt,
+        tpmLimit: editTpmLimit ?? null,
+        ...(Object.keys(modelTpmLimit).length > 0 ? { modelTpmLimit } : {}),
+      });
+      return;
+    }
+
     updateMutation.mutate({
       keyId: keyToEdit.id,
       modelIds: editSelectedModelIds,
@@ -501,7 +516,13 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
       setLoadingModels(true);
       const response = await modelsService.getModels(1, 100);
       setAvailableModels(
-        response.models.map((m: { id: string; name: string }) => ({ id: m.id, name: m.name })),
+        response.models.map(
+          (m: { id: string; name: string; backendType?: 'litellm' | 'maas' }) => ({
+            id: m.id,
+            name: m.name,
+            backendType: m.backendType,
+          }),
+        ),
       );
     } catch {
       // Models load failure is non-critical
@@ -687,6 +708,11 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
     return t('status.active', 'Active');
   };
 
+  // The key being edited is bound to the MaaS backend (only TPM limits are editable)
+  const editingMaasKey =
+    keyToEdit?.backendType === 'maas' ||
+    (keyToEdit?.models ?? []).some((id) => isMaasModel(availableModels.find((m) => m.id === id)));
+
   // Shared form fields renderer for both create and edit modals
   const renderQuotaFields = (
     prefix: string,
@@ -711,36 +737,52 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
         | ((prev: Record<string, ModelLimits>) => Record<string, ModelLimits>),
     ) => void,
     showSoftBudget = true,
+    // MaaS keys only support TPM limits: hide budget, RPM, soft budget and parallel requests
+    tpmOnly = false,
   ) => (
     <>
-      <FormGroup
-        label={t('users.apiKeys.form.maxBudget', {
-          defaultValue: 'Max Budget ({{currencyCode}})',
-          currencyCode,
-        })}
-        fieldId={`${prefix}-key-budget`}
-      >
-        <NumberInput
-          id={`${prefix}-key-budget`}
-          value={maxBudget ?? 0}
-          min={0}
-          onMinus={() => setMaxBudget(Math.max(0, (maxBudget || 0) - 10))}
-          onPlus={() => setMaxBudget((maxBudget || 0) + 10)}
-          onChange={(event) => {
-            const target = event.target as HTMLInputElement;
-            const value = parseFloat(target.value);
-            setMaxBudget(isNaN(value) ? undefined : value);
-          }}
-          isDisabled={isLoading}
-          aria-label={t('users.apiKeys.form.maxBudget', {
+      {tpmOnly && (
+        <Alert
+          variant="info"
+          isInline
+          isPlain
+          title={t(
+            'maas.keys.tpmOnlyNotice',
+            'MaaS keys support token-per-minute (TPM) limits only. Budget and request-rate limits are not available.',
+          )}
+          data-testid="maas-tpm-only-notice"
+        />
+      )}
+      {!tpmOnly && (
+        <FormGroup
+          label={t('users.apiKeys.form.maxBudget', {
             defaultValue: 'Max Budget ({{currencyCode}})',
             currencyCode,
           })}
-          widthChars={10}
-        />
-      </FormGroup>
+          fieldId={`${prefix}-key-budget`}
+        >
+          <NumberInput
+            id={`${prefix}-key-budget`}
+            value={maxBudget ?? 0}
+            min={0}
+            onMinus={() => setMaxBudget(Math.max(0, (maxBudget || 0) - 10))}
+            onPlus={() => setMaxBudget((maxBudget || 0) + 10)}
+            onChange={(event) => {
+              const target = event.target as HTMLInputElement;
+              const value = parseFloat(target.value);
+              setMaxBudget(isNaN(value) ? undefined : value);
+            }}
+            isDisabled={isLoading}
+            aria-label={t('users.apiKeys.form.maxBudget', {
+              defaultValue: 'Max Budget ({{currencyCode}})',
+              currencyCode,
+            })}
+            widthChars={10}
+          />
+        </FormGroup>
+      )}
 
-      {maxBudget !== undefined && maxBudget > 0 && (
+      {!tpmOnly && maxBudget !== undefined && maxBudget > 0 && (
         <FormGroup
           label={t('users.apiKeys.form.budgetDuration', 'Budget Duration')}
           fieldId={`${prefix}-key-budget-duration`}
@@ -793,33 +835,35 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
         </HelperText>
       </FormGroup>
 
-      <FormGroup
-        label={t('users.apiKeys.form.rpmLimit', 'Requests per Minute (RPM)')}
-        fieldId={`${prefix}-key-rpm`}
-      >
-        <TextInput
-          id={`${prefix}-key-rpm`}
-          type="number"
-          min="0"
-          value={rpmLimit ?? ''}
-          onChange={(_event, value) => {
-            const parsed = parseInt(value, 10);
-            setRpmLimit(value === '' || isNaN(parsed) || parsed < 0 ? undefined : parsed);
-          }}
-          isDisabled={isLoading}
-          aria-label={t('users.apiKeys.form.rpmLimit', 'Requests per Minute (RPM)')}
-        />
-        <HelperText>
-          <HelperTextItem>
-            {t(
-              'users.apiKeys.form.rpmLimitHelp',
-              'Leave empty for no limit. Superseded by user-level limit.',
-            )}
-          </HelperTextItem>
-        </HelperText>
-      </FormGroup>
+      {!tpmOnly && (
+        <FormGroup
+          label={t('users.apiKeys.form.rpmLimit', 'Requests per Minute (RPM)')}
+          fieldId={`${prefix}-key-rpm`}
+        >
+          <TextInput
+            id={`${prefix}-key-rpm`}
+            type="number"
+            min="0"
+            value={rpmLimit ?? ''}
+            onChange={(_event, value) => {
+              const parsed = parseInt(value, 10);
+              setRpmLimit(value === '' || isNaN(parsed) || parsed < 0 ? undefined : parsed);
+            }}
+            isDisabled={isLoading}
+            aria-label={t('users.apiKeys.form.rpmLimit', 'Requests per Minute (RPM)')}
+          />
+          <HelperText>
+            <HelperTextItem>
+              {t(
+                'users.apiKeys.form.rpmLimitHelp',
+                'Leave empty for no limit. Superseded by user-level limit.',
+              )}
+            </HelperTextItem>
+          </HelperText>
+        </FormGroup>
+      )}
 
-      {showSoftBudget && maxBudget !== undefined && maxBudget > 0 && (
+      {!tpmOnly && showSoftBudget && maxBudget !== undefined && maxBudget > 0 && (
         <FormGroup
           label={t('users.apiKeys.form.softBudget', {
             defaultValue: 'Soft Budget Warning ({{currencyCode}})',
@@ -856,34 +900,36 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
         </FormGroup>
       )}
 
-      <FormGroup
-        label={t('users.apiKeys.form.maxParallelRequests', 'Max Parallel Requests')}
-        fieldId={`${prefix}-key-max-parallel`}
-      >
-        <NumberInput
-          id={`${prefix}-key-max-parallel`}
-          value={maxParallelRequests ?? 0}
-          min={0}
-          onMinus={() => setMaxParallelRequests(Math.max(0, (maxParallelRequests || 0) - 1))}
-          onPlus={() => setMaxParallelRequests((maxParallelRequests || 0) + 1)}
-          onChange={(event) => {
-            const target = event.target as HTMLInputElement;
-            const value = parseInt(target.value);
-            setMaxParallelRequests(isNaN(value) || value === 0 ? undefined : value);
-          }}
-          isDisabled={isLoading}
-          aria-label={t('users.apiKeys.form.maxParallelRequests', 'Max Parallel Requests')}
-          widthChars={10}
-        />
-        <HelperText>
-          <HelperTextItem>
-            {t(
-              'users.apiKeys.form.maxParallelRequestsHelp',
-              'Maximum concurrent in-flight requests. Leave at 0 for no limit.',
-            )}
-          </HelperTextItem>
-        </HelperText>
-      </FormGroup>
+      {!tpmOnly && (
+        <FormGroup
+          label={t('users.apiKeys.form.maxParallelRequests', 'Max Parallel Requests')}
+          fieldId={`${prefix}-key-max-parallel`}
+        >
+          <NumberInput
+            id={`${prefix}-key-max-parallel`}
+            value={maxParallelRequests ?? 0}
+            min={0}
+            onMinus={() => setMaxParallelRequests(Math.max(0, (maxParallelRequests || 0) - 1))}
+            onPlus={() => setMaxParallelRequests((maxParallelRequests || 0) + 1)}
+            onChange={(event) => {
+              const target = event.target as HTMLInputElement;
+              const value = parseInt(target.value);
+              setMaxParallelRequests(isNaN(value) || value === 0 ? undefined : value);
+            }}
+            isDisabled={isLoading}
+            aria-label={t('users.apiKeys.form.maxParallelRequests', 'Max Parallel Requests')}
+            widthChars={10}
+          />
+          <HelperText>
+            <HelperTextItem>
+              {t(
+                'users.apiKeys.form.maxParallelRequestsHelp',
+                'Maximum concurrent in-flight requests. Leave at 0 for no limit.',
+              )}
+            </HelperTextItem>
+          </HelperText>
+        </FormGroup>
+      )}
 
       {modelIds.length > 0 && (
         <ExpandableSection
@@ -925,26 +971,28 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
                 </Content>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
                   {/* Per-model budget hidden: requires LiteLLM Enterprise license */}
-                  <FormGroup
-                    label={t('users.apiKeys.form.modelRpm', 'RPM')}
-                    fieldId={`${prefix}-model-rpm-${modelId}`}
-                  >
-                    <TextInput
-                      id={`${prefix}-model-rpm-${modelId}`}
-                      type="number"
-                      min="0"
-                      value={limits.rpm ?? ''}
-                      onChange={(_event, value) => {
-                        const parsed = parseInt(value, 10);
-                        updateModelLimit(
-                          'rpm',
-                          value === '' || isNaN(parsed) || parsed < 0 ? undefined : parsed,
-                        );
-                      }}
-                      isDisabled={isLoading}
-                      aria-label={`${modelName} RPM`}
-                    />
-                  </FormGroup>
+                  {!tpmOnly && (
+                    <FormGroup
+                      label={t('users.apiKeys.form.modelRpm', 'RPM')}
+                      fieldId={`${prefix}-model-rpm-${modelId}`}
+                    >
+                      <TextInput
+                        id={`${prefix}-model-rpm-${modelId}`}
+                        type="number"
+                        min="0"
+                        value={limits.rpm ?? ''}
+                        onChange={(_event, value) => {
+                          const parsed = parseInt(value, 10);
+                          updateModelLimit(
+                            'rpm',
+                            value === '' || isNaN(parsed) || parsed < 0 ? undefined : parsed,
+                          );
+                        }}
+                        isDisabled={isLoading}
+                        aria-label={`${modelName} RPM`}
+                      />
+                    </FormGroup>
+                  )}
                   <FormGroup
                     label={t('users.apiKeys.form.modelTpm', 'TPM')}
                     fieldId={`${prefix}-model-tpm-${modelId}`}
@@ -982,6 +1030,7 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
     setSelectedIds: (ids: string[]) => void,
     onToggle: (modelId: string) => void,
     clearModelLimits: () => void,
+    options: ModelOption[] = availableModels,
   ) => (
     <FormGroup
       label={t('users.apiKeys.form.models', 'Models')}
@@ -990,7 +1039,7 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
     >
       {loadingModels ? (
         <Skeleton height="40px" />
-      ) : availableModels.length === 0 ? (
+      ) : options.length === 0 ? (
         <Alert
           variant="warning"
           isInline
@@ -1002,20 +1051,20 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
           <Label
             color="purple"
             onClick={() => {
-              if (selectedIds.length === availableModels.length) {
+              if (selectedIds.length === options.length) {
                 setSelectedIds([]);
                 clearModelLimits();
               } else {
-                setSelectedIds(availableModels.map((m) => m.id));
+                setSelectedIds(options.map((m) => m.id));
               }
             }}
             style={{ cursor: 'pointer' }}
           >
-            {selectedIds.length === availableModels.length
+            {selectedIds.length === options.length
               ? t('users.apiKeys.form.deselectAll', 'Deselect All')
               : t('users.apiKeys.form.selectAll', 'Select All')}
           </Label>
-          {availableModels.map((model) => (
+          {options.map((model) => (
             <Label
               key={model.id}
               color={selectedIds.includes(model.id) ? 'blue' : 'grey'}
@@ -1098,6 +1147,12 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
                 <Td dataLabel={t('users.apiKeys.name', 'Name')}>
                   <div>
                     <strong>{key.name}</strong>
+                    {key.backendType === 'maas' && (
+                      <>
+                        {' '}
+                        <BackendBadge backendType="maas" isCompact />
+                      </>
+                    )}
                     <Content
                       component={ContentVariants.small}
                       style={{ color: 'var(--pf-t--global--text--color--subtle)' }}
@@ -1346,6 +1401,7 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
               setEditSelectedModelIds,
               handleEditModelToggle,
               () => setEditModelLimits({}),
+              availableModels.filter((m) => isMaasModel(m) === editingMaasKey),
             )}
 
             {/* Expiration */}
@@ -1477,6 +1533,7 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
               editModelLimits,
               setEditModelLimits,
               false,
+              editingMaasKey,
             )}
           </Form>
         </ModalBody>
@@ -1573,6 +1630,8 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
               setSelectedModelIds,
               handleModelToggle,
               () => setNewKeyModelLimits({}),
+              // MaaS keys need the user's own login token, so admins cannot create them
+              availableModels.filter((m) => !isMaasModel(m)),
             )}
 
             <FormGroup

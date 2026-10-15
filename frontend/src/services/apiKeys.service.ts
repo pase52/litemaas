@@ -1,4 +1,5 @@
 import { apiClient } from './api';
+import { MAAS_REAUTH_REQUIRED } from '../utils/modelBackend';
 
 export interface ApiKey {
   id: string;
@@ -22,6 +23,10 @@ export interface ApiKey {
     contextLength?: number;
     supportsEmbeddings?: boolean;
     supportsConvert?: boolean;
+    backendType?: 'litellm' | 'maas';
+    backendModelName?: string;
+    migrationState?: string;
+    migrationGraceUntil?: string;
   }[];
   // Quota fields
   maxBudget?: number;
@@ -33,6 +38,11 @@ export interface ApiKey {
   modelMaxBudget?: Record<string, { budgetLimit: number; timePeriod: string }>;
   modelRpmLimit?: Record<string, number>;
   modelTpmLimit?: Record<string, number>;
+  // Backend (LiteLLM or RHOAI MaaS) the key is bound to
+  backendType?: 'litellm' | 'maas';
+  /** OpenAI-compatible base URL to use with this key (gateway for MaaS keys). */
+  baseUrl?: string;
+  maasKeyId?: string;
 }
 
 // Backend response interface
@@ -52,6 +62,10 @@ interface BackendApiKeyDetails {
     contextLength?: number;
     supports_embeddings?: boolean;
     supports_convert?: boolean;
+    backendType?: 'litellm' | 'maas';
+    backendModelName?: string;
+    migrationState?: string;
+    migrationGraceUntil?: string;
   }[]; // New field for model details
   lastUsedAt?: string;
   expiresAt?: string;
@@ -67,6 +81,9 @@ interface BackendApiKeyDetails {
   modelMaxBudget?: Record<string, { budgetLimit: number; timePeriod: string }>;
   modelRpmLimit?: Record<string, number>;
   modelTpmLimit?: Record<string, number>;
+  backendType?: 'litellm' | 'maas';
+  baseUrl?: string;
+  maasKeyId?: string;
   metadata?: {
     permissions?: string[];
     ratelimit?: number;
@@ -80,6 +97,8 @@ interface BackendApiKeysResponse {
 }
 
 export interface CreateApiKeyRequest {
+  // Backend the key is issued by (defaults to litellm on the server)
+  backendType?: 'litellm' | 'maas';
   // Multi-model support - use modelIds for new keys
   modelIds?: string[];
   // Legacy support - deprecated
@@ -157,6 +176,10 @@ class ApiKeysService {
         supportsConvert:
           md.supports_convert ??
           ((md as Record<string, unknown>).supportsConvert as boolean | undefined),
+        backendType: md.backendType,
+        backendModelName: md.backendModelName,
+        migrationState: md.migrationState,
+        migrationGraceUntil: md.migrationGraceUntil,
       })),
       maxBudget: backend.maxBudget,
       currentSpend: backend.currentSpend,
@@ -166,6 +189,9 @@ class ApiKeysService {
       modelMaxBudget: backend.modelMaxBudget,
       modelRpmLimit: backend.modelRpmLimit,
       modelTpmLimit: backend.modelTpmLimit,
+      backendType: backend.backendType === 'maas' ? 'maas' : 'litellm',
+      baseUrl: backend.baseUrl || undefined,
+      maasKeyId: backend.maasKeyId || undefined,
     };
   }
 
@@ -265,6 +291,17 @@ class ApiKeysService {
         errorMessage = error.response.data.error.message;
       } else if (typeof error.message === 'string') {
         errorMessage = error.message;
+      }
+
+      // MaaS: the user's stored login token is missing/expired - surface the code
+      // so the UI can offer a re-authentication instead of a generic failure.
+      const responseCode = error.response?.data?.error?.code ?? error.response?.data?.code;
+      if (responseCode === MAAS_REAUTH_REQUIRED) {
+        const reauthError = new Error(
+          errorMessage || 'Your session must be refreshed to use this key. Please log in again.',
+        ) as Error & { code?: string };
+        reauthError.code = MAAS_REAUTH_REQUIRED;
+        throw reauthError;
       }
 
       // Handle specific error cases for better UX

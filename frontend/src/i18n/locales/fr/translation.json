@@ -2105,5 +2105,53 @@
       "roleConflict": "Conflit de Rôles",
       "roleConflictDesc": "Les rôles Administrateur et Administrateur-lecture seule sont en conflit. Le rôle Administrateur aura la priorité."
     }
+  },
+  "maas": {
+    "admin": {
+      "deleteMaasNote": "Le modèle est masqué dans LiteMaaS et les abonnements actifs sont révoqués. Le MaaSModelRef du cluster n'est pas supprimé ; utilisez « Synchroniser et restaurer les modèles supprimés » pour le rétablir.",
+      "graceDays": "Période de grâce (jours)",
+      "graceDaysHelp": "Les utilisateurs conservent l'accès LiteLLM à ce modèle pendant ce nombre de jours afin de pouvoir changer leurs clés.",
+      "managedByCluster": "Ce modèle provient d'un MaaSModelRef. Le endpoint, les limites de débit et les identifiants sont gérés sur le cluster ; seules les métadonnées ci-dessous peuvent être modifiées ici.",
+      "managedByClusterTitle": "Géré par le cluster MaaS",
+      "migrateAction": "Migrer vers MaaS",
+      "migrateConfirm": "Migrer",
+      "migrateDescription": "Créez un modèle MaaS pour « {{model}} » à partir d'un MaaSModelRef du cluster et déplacez ses abonnements actifs. L'accès LiteLLM est conservé jusqu'à la fin de la période de grâce.",
+      "migrateError": "Échec de la migration",
+      "migrateNoRefs": "Aucune référence de modèle disponible. Les références déjà importées ne sont pas listées.",
+      "migrateRefLabel": "Référence de modèle MaaS",
+      "migrateRefPlaceholder": "Sélectionnez une référence de modèle",
+      "migrateSuccessDesc": "{{count}} abonnement(s) déplacé(s) vers MaaS. L'accès LiteLLM reste disponible jusqu'au {{date}}.",
+      "migrateSuccessTitle": "Migration démarrée",
+      "migrateTitle": "Migrer vers MaaS",
+      "refsLoadFailed": "Échec du chargement des références de modèles MaaS",
+      "syncButton": "Synchroniser les modèles MaaS",
+      "syncError": "Échec de la synchronisation MaaS",
+      "syncMoreOptions": "Plus d'options de synchronisation MaaS",
+      "syncRestore": "Synchroniser et restaurer les modèles supprimés",
+      "syncRestoreHelp": "Rétablit également les modèles MaaS supprimés par un administrateur",
+      "syncSuccessDesc": "{{total}} références de modèle trouvées : {{created}} nouvelles, {{updated}} mises à jour, {{unavailable}} indisponibles.",
+      "syncSuccessTitle": "Modèles MaaS synchronisés"
+    },
+    "backend": {
+      "label": "Backend",
+      "litellm": "LiteLLM",
+      "maas": "MaaS",
+      "maasAria": "Servi via Red Hat OpenShift AI MaaS"
+    },
+    "keys": {
+      "backendHelp": "Une clé ne fonctionne qu'avec les modèles d'un seul backend. Choisissez d'abord le backend, puis sélectionnez ses modèles.",
+      "backendLabel": "Backend de la clé",
+      "graceBannerItem": "Clé « {{key}} » : {{models}} restent disponibles via LiteLLM jusqu'au {{date}}. Créez une clé MaaS pour ces modèles avant cette date.",
+      "graceBannerTitle": "Certaines de vos clés utilisent des modèles en cours de migration vers MaaS",
+      "noSubscribedMaasModels": "Vous n'avez aucun abonnement actif à des modèles MaaS.",
+      "perModelTpmHelp": "Définissez des limites de jetons par minute par modèle. Elles s'appliquent indépendamment de la limite globale de la clé.",
+      "reauthBody": "Les clés MaaS sont émises avec votre propre connexion OpenShift, qui a expiré. Reconnectez-vous pour continuer ; vous reviendrez sur cette page.",
+      "reauthButton": "Se réauthentifier",
+      "reauthTitle": "Réauthentification requise",
+      "tpmOnlyNotice": "Les clés MaaS ne prennent en charge que les limites de jetons par minute (TPM). Les limites de budget et de débit de requêtes ne sont pas disponibles."
+    },
+    "migration": {
+      "migratingUntil": "Migration vers MaaS jusqu'au {{date}}"
+    }
   }
 }

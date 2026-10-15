@@ -5,6 +5,9 @@ import {
   Checkbox,
   Content,
   ContentVariants,
+  Dropdown,
+  DropdownItem,
+  DropdownList,
   EmptyState,
   EmptyStateActions,
   EmptyStateBody,
@@ -13,11 +16,15 @@ import {
   FlexItem,
   Form,
   FormGroup,
+  FormSelect,
+  FormSelectOption,
   Grid,
   GridItem,
   HelperText,
   HelperTextItem,
   Label,
+  MenuToggle,
+  MenuToggleElement,
   Modal,
   ModalBody,
   ModalFooter,
@@ -34,8 +41,11 @@ import {
 import {
   CubesIcon,
   EditIcon,
+  EllipsisVIcon,
+  ExchangeAltIcon,
   ExclamationTriangleIcon,
   PlusCircleIcon,
+  SyncAltIcon,
   TrashIcon,
 } from '@patternfly/react-icons';
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
@@ -45,6 +55,9 @@ import { useMutation, useQuery, useQueryClient } from 'react-query';
 import { useAuth } from '../contexts/AuthContext';
 import { useNotifications } from '../contexts/NotificationContext';
 import { useCurrency } from '../contexts/ConfigContext';
+import { useMaasEnabled } from '../hooks/useMaasEnabled';
+import { BackendBadge, MigrationLabel } from '../components/common/BackendBadge';
+import { isMaasModel } from '../utils/modelBackend';
 import { adminModelsService } from '../services/adminModels.service';
 import { Model, modelsService } from '../services/models.service';
 import type {
@@ -52,9 +65,11 @@ import type {
   AdminModelFormData,
   AdminModelFormErrors,
   TestModelConfigRequest,
+  MaasModelRefInfo,
 } from '../types/admin';
 import { getModelFlairs } from '../utils/flairColors';
 import { extractErrorDetails } from '../utils/error.utils';
+import { formatDate } from '../utils/formatters';
 
 const AdminModelsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -62,6 +77,13 @@ const AdminModelsPage: React.FC = () => {
   const { addNotification } = useNotifications();
   const queryClient = useQueryClient();
   const { formatCurrency } = useCurrency();
+  const { maasEnabled } = useMaasEnabled();
+
+  // MaaS state
+  const [isSyncMenuOpen, setIsSyncMenuOpen] = useState(false);
+  const [isMigrateModalOpen, setIsMigrateModalOpen] = useState(false);
+  const [migrateRefKey, setMigrateRefKey] = useState<string>('');
+  const [migrateGraceDays, setMigrateGraceDays] = useState<number>(14);
 
   // State management
   const [selectedModel, setSelectedModel] = useState<Model | null>(null);
@@ -115,6 +137,10 @@ const AdminModelsPage: React.FC = () => {
     currentUser?.roles?.includes('admin') ||
     currentUser?.roles?.includes('admin-readonly') ||
     false;
+
+  // True while viewing/editing a model that is managed by the MaaS cluster
+  const editingMaasModel =
+    !isCreateModalOpen && (isEditModalOpen || isViewModalOpen) && isMaasModel(selectedModel);
 
   // Fetch models data
   const {
@@ -235,6 +261,106 @@ const AdminModelsPage: React.FC = () => {
     },
   );
 
+  // MaaS: list cluster MaaSModelRefs for the migrate picker (only while the modal is open)
+  const refsQuery = useQuery(['admin-maas-refs'], () => adminModelsService.getMaasRefs(), {
+    enabled: maasEnabled && canModifyModels && isMigrateModalOpen,
+    onError: (err: unknown) => {
+      addNotification({
+        title: t('maas.admin.refsLoadFailed', 'Failed to load MaaS model references'),
+        description: extractErrorDetails(err).message,
+        variant: 'danger',
+      });
+    },
+  });
+  const maasRefs: MaasModelRefInfo[] = Array.isArray(refsQuery.data) ? refsQuery.data : [];
+  const selectableRefs = maasRefs.filter((ref) => !ref.imported);
+
+  // MaaS: sync models from the cluster
+  const syncMaasMutation = useMutation(
+    (restoreRemoved: boolean) => adminModelsService.syncMaasModels(restoreRemoved),
+    {
+      onSuccess: async (result) => {
+        addNotification({
+          title: t('maas.admin.syncSuccessTitle', 'MaaS models synchronized'),
+          description: t('maas.admin.syncSuccessDesc', {
+            total: result?.totalRefs ?? 0,
+            created: result?.newModels ?? 0,
+            updated: result?.updatedModels ?? 0,
+            unavailable: result?.unavailableModels ?? 0,
+            defaultValue:
+              '{{total}} model references found: {{created}} new, {{updated}} updated, {{unavailable}} unavailable.',
+          }),
+          variant: result?.errors?.length ? 'warning' : 'success',
+        });
+        await queryClient.refetchQueries(['admin-models']);
+      },
+      onError: (err: unknown) => {
+        addNotification({
+          title: t('maas.admin.syncError', 'MaaS synchronization failed'),
+          description: extractErrorDetails(err).message,
+          variant: 'danger',
+        });
+      },
+    },
+  );
+
+  // MaaS: migrate a LiteLLM model to a MaaS model reference
+  const migrateMutation = useMutation(
+    ({ modelId, ref, graceDays }: { modelId: string; ref: MaasModelRefInfo; graceDays: number }) =>
+      adminModelsService.migrateToMaas(modelId, {
+        maasModelRef: { name: ref.name, namespace: ref.namespace },
+        graceDays,
+      }),
+    {
+      onSuccess: async (result) => {
+        addNotification({
+          title: t('maas.admin.migrateSuccessTitle', 'Migration started'),
+          description: t('maas.admin.migrateSuccessDesc', {
+            count: result?.migratedSubscriptions ?? 0,
+            date: result?.graceUntil ? formatDate(result.graceUntil) : '-',
+            defaultValue:
+              '{{count}} subscription(s) moved to MaaS. LiteLLM access stays available until {{date}}.',
+          }),
+          variant: 'success',
+        });
+        closeMigrateModal();
+        await queryClient.refetchQueries(['admin-models']);
+      },
+      onError: (err: unknown) => {
+        addNotification({
+          title: t('maas.admin.migrateError', 'Migration failed'),
+          description: extractErrorDetails(err).message,
+          variant: 'danger',
+        });
+      },
+    },
+  );
+
+  const closeMigrateModal = () => {
+    setIsMigrateModalOpen(false);
+    setMigrateRefKey('');
+    setMigrateGraceDays(14);
+    setSelectedModel(null);
+  };
+
+  const handleOpenMigrate = (model: Model) => {
+    setSelectedModel(model);
+    setMigrateRefKey('');
+    setMigrateGraceDays(14);
+    setIsMigrateModalOpen(true);
+  };
+
+  const handleConfirmMigrate = () => {
+    if (!selectedModel) return;
+    const ref = selectableRefs.find((r) => r.id === migrateRefKey);
+    if (!ref) return;
+    migrateMutation.mutate({
+      modelId: selectedModel.id,
+      ref,
+      graceDays: Math.max(0, Math.floor(migrateGraceDays || 0)),
+    });
+  };
+
   // Clear test result when critical fields change
   useEffect(() => {
     setTestResult({ type: null, message: '' });
@@ -272,10 +398,25 @@ const AdminModelsPage: React.FC = () => {
     if (!formData.model_name.trim()) {
       errors.model_name = t('models.admin.modelNameIsRequired');
     } else if (
-      formData.model_name !== formData.model_name.trim() ||
-      formData.model_name.includes(' ')
+      !editingMaasModel && // MaaS names are display names; requests use the served name
+      (formData.model_name !== formData.model_name.trim() || formData.model_name.includes(' '))
     ) {
       errors.model_name = t('models.admin.modelNameCannotContainSpaces');
+    }
+
+    // MaaS models are managed by the cluster: only metadata is validated
+    if (editingMaasModel) {
+      if (displayInputCost < 0) {
+        errors.input_cost_per_token = t('models.admin.inputCostCannotBeNegative');
+      }
+      if (displayOutputCost < 0) {
+        errors.output_cost_per_token = t('models.admin.outputCostCannotBeNegative');
+      }
+      if (formData.max_tokens < 1) {
+        errors.max_tokens = t('models.admin.maxTokensMustBeAtLeast_1');
+      }
+      setFormErrors(errors);
+      return Object.keys(errors).length === 0;
     }
 
     if (!formData.supports_convert && !formData.backend_model_name.trim()) {
@@ -377,7 +518,26 @@ const AdminModelsPage: React.FC = () => {
     if (!validateForm()) return;
 
     // Prepare payload, only include api_key if it's provided
-    const payload: Partial<AdminModelFormData> = { ...formData };
+    let payload: Partial<AdminModelFormData> = { ...formData };
+    if (editingMaasModel) {
+      // MaaS models are managed by the cluster: only metadata is editable
+      payload = {
+        model_name: formData.model_name,
+        description: formData.description,
+        backend_model_name: formData.backend_model_name || undefined,
+        input_cost_per_token: formData.input_cost_per_token,
+        output_cost_per_token: formData.output_cost_per_token,
+        max_tokens: formData.max_tokens,
+        supports_vision: formData.supports_vision,
+        supports_function_calling: formData.supports_function_calling,
+        supports_parallel_function_calling: formData.supports_parallel_function_calling,
+        supports_tool_choice: formData.supports_tool_choice,
+        supports_embeddings: formData.supports_embeddings,
+        supports_tokenize: formData.supports_tokenize,
+        supports_convert: formData.supports_convert,
+        restrictedAccess: formData.restrictedAccess,
+      };
+    }
     if (!payload.api_key?.trim()) {
       // Remove empty api_key to avoid sending it to backend
       delete payload.api_key;
@@ -557,6 +717,7 @@ const AdminModelsPage: React.FC = () => {
 
   // Check if we have an empty models state (initial setup)
   const isEmptyState = !isLoading && !error && models.length === 0;
+  const showBackendColumn = maasEnabled || models.some((m) => isMaasModel(m));
 
   return (
     <>
@@ -575,9 +736,62 @@ const AdminModelsPage: React.FC = () => {
           </FlexItem>
           {canModifyModels && (
             <FlexItem>
-              <Button variant="primary" icon={<PlusCircleIcon />} onClick={handleCreateModel}>
-                {t('models.admin.createModel')}
-              </Button>
+              <Flex spaceItems={{ default: 'spaceItemsSm' }}>
+                {maasEnabled && (
+                  <FlexItem>
+                    <Flex spaceItems={{ default: 'spaceItemsNone' }}>
+                      <FlexItem>
+                        <Button
+                          variant="secondary"
+                          icon={<SyncAltIcon />}
+                          onClick={() => syncMaasMutation.mutate(false)}
+                          isLoading={syncMaasMutation.isLoading}
+                          isDisabled={syncMaasMutation.isLoading}
+                        >
+                          {t('maas.admin.syncButton', 'Sync MaaS models')}
+                        </Button>
+                      </FlexItem>
+                      <FlexItem>
+                        <Dropdown
+                          isOpen={isSyncMenuOpen}
+                          onOpenChange={setIsSyncMenuOpen}
+                          onSelect={() => setIsSyncMenuOpen(false)}
+                          popperProps={{ position: 'right' }}
+                          toggle={(toggleRef: React.Ref<MenuToggleElement>) => (
+                            <MenuToggle
+                              ref={toggleRef}
+                              variant="plain"
+                              onClick={() => setIsSyncMenuOpen(!isSyncMenuOpen)}
+                              isExpanded={isSyncMenuOpen}
+                              aria-label={t('maas.admin.syncMoreOptions', 'More MaaS sync options')}
+                            >
+                              <EllipsisVIcon />
+                            </MenuToggle>
+                          )}
+                        >
+                          <DropdownList>
+                            <DropdownItem
+                              key="sync-restore"
+                              description={t(
+                                'maas.admin.syncRestoreHelp',
+                                'Also bring back MaaS models that were removed by an administrator',
+                              )}
+                              onClick={() => syncMaasMutation.mutate(true)}
+                            >
+                              {t('maas.admin.syncRestore', 'Sync and restore removed models')}
+                            </DropdownItem>
+                          </DropdownList>
+                        </Dropdown>
+                      </FlexItem>
+                    </Flex>
+                  </FlexItem>
+                )}
+                <FlexItem>
+                  <Button variant="primary" icon={<PlusCircleIcon />} onClick={handleCreateModel}>
+                    {t('models.admin.createModel')}
+                  </Button>
+                </FlexItem>
+              </Flex>
             </FlexItem>
           )}
         </Flex>
@@ -609,6 +823,7 @@ const AdminModelsPage: React.FC = () => {
                 <Th width={20} modifier="truncate">
                   {t('models.admin.table.name')}
                 </Th>
+                {showBackendColumn && <Th>{t('maas.backend.label', 'Backend')}</Th>}
                 <Th width={25} modifier="truncate">
                   {t('models.admin.table.apiBase')}
                 </Th>
@@ -650,9 +865,23 @@ const AdminModelsPage: React.FC = () => {
             <Tbody>
               {models.map((model) => (
                 <Tr key={model.id} isClickable onRowClick={() => handleEditModel(model)}>
-                  <Td>{model.name}</Td>
+                  <Td>
+                    {model.name}
+                    <MigrationLabel
+                      migrationState={model.migrationState}
+                      migrationGraceUntil={model.migrationGraceUntil}
+                      isCompact
+                    />
+                  </Td>
+                  {showBackendColumn && (
+                    <Td>
+                      <BackendBadge backendType={model.backendType} showLiteLLM />
+                    </Td>
+                  )}
                   <Td onClick={(e) => e.stopPropagation()}>
-                    {model.apiBase ? (
+                    {isMaasModel(model) ? (
+                      model.maasEndpoint || t('models.admin.table.nA')
+                    ) : model.apiBase ? (
                       expandedRows.has(model.id) ? (
                         <div>
                           {model.apiBase}
@@ -688,9 +917,13 @@ const AdminModelsPage: React.FC = () => {
                       <>{t('models.admin.table.nA')}</>
                     )}
                   </Td>
-                  <Td>{model.rpm?.toLocaleString() || t('models.admin.table.nA')}</Td>
                   <Td>
-                    {model.supportsConvert
+                    {isMaasModel(model)
+                      ? t('models.admin.table.nA')
+                      : model.rpm?.toLocaleString() || t('models.admin.table.nA')}
+                  </Td>
+                  <Td>
+                    {model.supportsConvert || isMaasModel(model)
                       ? t('models.admin.table.nA')
                       : model.tpm?.toLocaleString() || t('models.admin.table.nA')}
                   </Td>
@@ -733,6 +966,15 @@ const AdminModelsPage: React.FC = () => {
                             icon: <EditIcon />,
                             onClick: () => handleEditModel(model),
                           },
+                          ...(maasEnabled && !isMaasModel(model) && !model.migrationState
+                            ? [
+                                {
+                                  title: t('maas.admin.migrateAction', 'Migrate to MaaS'),
+                                  icon: <ExchangeAltIcon />,
+                                  onClick: () => handleOpenMigrate(model),
+                                },
+                              ]
+                            : []),
                           {
                             title: t('models.admin.table.delete'),
                             icon: <TrashIcon />,
@@ -771,6 +1013,21 @@ const AdminModelsPage: React.FC = () => {
           <ModalBody>
             <Form>
               <Grid hasGutter>
+                {editingMaasModel && (
+                  <GridItem span={12}>
+                    <Alert
+                      variant="info"
+                      isInline
+                      title={t('maas.admin.managedByClusterTitle', 'Managed by the MaaS cluster')}
+                      data-testid="maas-managed-alert"
+                    >
+                      {t(
+                        'maas.admin.managedByCluster',
+                        'This model comes from a MaaSModelRef. Endpoint, rate limits and credentials are managed on the cluster; only the metadata below can be edited here.',
+                      )}
+                    </Alert>
+                  </GridItem>
+                )}
                 <GridItem span={12}>
                   <FormGroup label={t('models.admin.modelType')} fieldId="model-type">
                     <Flex spaceItems={{ default: 'spaceItemsLg' }}>
@@ -854,28 +1111,30 @@ const AdminModelsPage: React.FC = () => {
                     />
                   </FormGroup>
                 </GridItem>
-                <GridItem span={12}>
-                  <FormGroup label={t('models.admin.apiBaseUrl')} isRequired fieldId="api-base">
-                    <TextInput
-                      id="api-base"
-                      value={formData.api_base}
-                      onChange={(_event, value) => setFormData({ ...formData, api_base: value })}
-                      validated={formErrors.api_base ? 'error' : 'default'}
-                      placeholder={t('models.admin.httpsApiExampleComV1')}
-                      isDisabled={isViewModalOpen}
-                    />
-                    {formErrors.api_base && (
-                      <HelperText>
-                        <HelperTextItem variant="error">{formErrors.api_base}</HelperTextItem>
-                      </HelperText>
-                    )}
-                  </FormGroup>
-                </GridItem>
+                {!editingMaasModel && (
+                  <GridItem span={12}>
+                    <FormGroup label={t('models.admin.apiBaseUrl')} isRequired fieldId="api-base">
+                      <TextInput
+                        id="api-base"
+                        value={formData.api_base}
+                        onChange={(_event, value) => setFormData({ ...formData, api_base: value })}
+                        validated={formErrors.api_base ? 'error' : 'default'}
+                        placeholder={t('models.admin.httpsApiExampleComV1')}
+                        isDisabled={isViewModalOpen}
+                      />
+                      {formErrors.api_base && (
+                        <HelperText>
+                          <HelperTextItem variant="error">{formErrors.api_base}</HelperTextItem>
+                        </HelperText>
+                      )}
+                    </FormGroup>
+                  </GridItem>
+                )}
                 {!formData.supports_convert && (
                   <GridItem span={12}>
                     <FormGroup
                       label={t('models.admin.backendModelName')}
-                      isRequired
+                      isRequired={!editingMaasModel}
                       fieldId="backend-model-name"
                     >
                       <TextInput
@@ -898,59 +1157,63 @@ const AdminModelsPage: React.FC = () => {
                     </FormGroup>
                   </GridItem>
                 )}
-                <GridItem span={12}>
-                  <FormGroup
-                    label={t('models.admin.apiKey')}
-                    isRequired={isCreateModalOpen}
-                    fieldId="api-key"
-                  >
-                    <TextInput
-                      id="api-key"
-                      type="password"
-                      value={formData.api_key}
-                      onChange={(_event, value) => setFormData({ ...formData, api_key: value })}
-                      validated={formErrors.api_key ? 'error' : 'default'}
-                      placeholder={
-                        isCreateModalOpen
-                          ? t('models.admin.enterApiKey')
-                          : t('models.admin.editApiKeyPlaceholder')
-                      }
-                      isDisabled={isViewModalOpen}
-                    />
-                    {formErrors.api_key && (
-                      <HelperText>
-                        <HelperTextItem variant="error">{formErrors.api_key}</HelperTextItem>
-                      </HelperText>
-                    )}
-                  </FormGroup>
-                </GridItem>
-                <GridItem span={6}>
-                  <FormGroup label={t('models.admin.rpmRequestsPerMinute')} fieldId="rpm">
-                    <NumberInput
-                      id="rpm"
-                      value={formData.rpm}
-                      onChange={(event) => {
-                        const value = parseInt((event.target as HTMLInputElement).value) || 1;
-                        setFormData({ ...formData, rpm: value });
-                      }}
-                      onPlus={() => {
-                        setFormData({ ...formData, rpm: formData.rpm + 1 });
-                      }}
-                      onMinus={() => {
-                        setFormData({ ...formData, rpm: Math.max(1, formData.rpm - 1) });
-                      }}
-                      min={1}
-                      validated={formErrors.rpm ? 'error' : 'default'}
-                      isDisabled={isViewModalOpen}
-                    />
-                    {formErrors.rpm && (
-                      <HelperText>
-                        <HelperTextItem variant="error">{formErrors.rpm}</HelperTextItem>
-                      </HelperText>
-                    )}
-                  </FormGroup>
-                </GridItem>
-                {!formData.supports_convert && (
+                {!editingMaasModel && (
+                  <GridItem span={12}>
+                    <FormGroup
+                      label={t('models.admin.apiKey')}
+                      isRequired={isCreateModalOpen}
+                      fieldId="api-key"
+                    >
+                      <TextInput
+                        id="api-key"
+                        type="password"
+                        value={formData.api_key}
+                        onChange={(_event, value) => setFormData({ ...formData, api_key: value })}
+                        validated={formErrors.api_key ? 'error' : 'default'}
+                        placeholder={
+                          isCreateModalOpen
+                            ? t('models.admin.enterApiKey')
+                            : t('models.admin.editApiKeyPlaceholder')
+                        }
+                        isDisabled={isViewModalOpen}
+                      />
+                      {formErrors.api_key && (
+                        <HelperText>
+                          <HelperTextItem variant="error">{formErrors.api_key}</HelperTextItem>
+                        </HelperText>
+                      )}
+                    </FormGroup>
+                  </GridItem>
+                )}
+                {!editingMaasModel && (
+                  <GridItem span={6}>
+                    <FormGroup label={t('models.admin.rpmRequestsPerMinute')} fieldId="rpm">
+                      <NumberInput
+                        id="rpm"
+                        value={formData.rpm}
+                        onChange={(event) => {
+                          const value = parseInt((event.target as HTMLInputElement).value) || 1;
+                          setFormData({ ...formData, rpm: value });
+                        }}
+                        onPlus={() => {
+                          setFormData({ ...formData, rpm: formData.rpm + 1 });
+                        }}
+                        onMinus={() => {
+                          setFormData({ ...formData, rpm: Math.max(1, formData.rpm - 1) });
+                        }}
+                        min={1}
+                        validated={formErrors.rpm ? 'error' : 'default'}
+                        isDisabled={isViewModalOpen}
+                      />
+                      {formErrors.rpm && (
+                        <HelperText>
+                          <HelperTextItem variant="error">{formErrors.rpm}</HelperTextItem>
+                        </HelperText>
+                      )}
+                    </FormGroup>
+                  </GridItem>
+                )}
+                {!formData.supports_convert && !editingMaasModel && (
                   <GridItem span={6}>
                     <FormGroup label={t('models.admin.tpmTokensPerMinute')} fieldId="tpm">
                       <NumberInput
@@ -1204,18 +1467,20 @@ const AdminModelsPage: React.FC = () => {
                 </FlexItem>
                 <FlexItem>
                   <Flex columnGap={{ default: 'columnGapSm' }}>
-                    <Button
-                      variant="secondary"
-                      onClick={handleTestConfiguration}
-                      isLoading={isTestingConfig}
-                      isDisabled={
-                        !formData.api_base ||
-                        (!formData.supports_convert && !formData.backend_model_name) ||
-                        (isCreateModalOpen && !formData.api_key)
-                      }
-                    >
-                      {t('models.admin.testConfiguration')}
-                    </Button>
+                    {!editingMaasModel && (
+                      <Button
+                        variant="secondary"
+                        onClick={handleTestConfiguration}
+                        isLoading={isTestingConfig}
+                        isDisabled={
+                          !formData.api_base ||
+                          (!formData.supports_convert && !formData.backend_model_name) ||
+                          (isCreateModalOpen && !formData.api_key)
+                        }
+                      >
+                        {t('models.admin.testConfiguration')}
+                      </Button>
+                    )}
                     <Button
                       variant="primary"
                       onClick={handleSubmit}
@@ -1258,7 +1523,12 @@ const AdminModelsPage: React.FC = () => {
                   <strong>{selectedModel.name}</strong>?
                 </p>
                 <p className="pf-v6-u-color-200 pf-v6-u-mt-sm">
-                  {t('models.admin.thisActionCannotBeUndoneAndWillRemoveTheModelFromLitellm')}
+                  {isMaasModel(selectedModel)
+                    ? t(
+                        'maas.admin.deleteMaasNote',
+                        'The model is hidden from LiteMaaS and active subscriptions are revoked. The MaaSModelRef on the cluster is not deleted; use "Sync and restore removed models" to bring it back.',
+                      )
+                    : t('models.admin.thisActionCannotBeUndoneAndWillRemoveTheModelFromLitellm')}
                 </p>
               </div>
             )}
@@ -1289,6 +1559,110 @@ const AdminModelsPage: React.FC = () => {
                 {t('common.cancel')}
               </Button>
             </div>
+          </ModalFooter>
+        </Modal>
+
+        {/* Migrate to MaaS Modal */}
+        <Modal
+          variant={ModalVariant.small}
+          isOpen={isMigrateModalOpen}
+          onClose={closeMigrateModal}
+          aria-labelledby="migrate-maas-title"
+        >
+          <ModalHeader
+            title={t('maas.admin.migrateTitle', 'Migrate to MaaS')}
+            labelId="migrate-maas-title"
+          />
+          <ModalBody>
+            {selectedModel && (
+              <Form>
+                <Content component={ContentVariants.p}>
+                  {t('maas.admin.migrateDescription', {
+                    model: selectedModel.name,
+                    defaultValue:
+                      'Create a MaaS model for "{{model}}" from a MaaSModelRef on the cluster and move its active subscriptions. LiteLLM access is kept until the grace period ends.',
+                  })}
+                </Content>
+                <FormGroup
+                  label={t('maas.admin.migrateRefLabel', 'MaaS model reference')}
+                  isRequired
+                  fieldId="migrate-ref"
+                >
+                  {refsQuery.isLoading ? (
+                    <Spinner size="md" aria-label={t('common.loading', 'Loading')} />
+                  ) : (
+                    <FormSelect
+                      id="migrate-ref"
+                      value={migrateRefKey}
+                      onChange={(_event, value) => setMigrateRefKey(value)}
+                      aria-label={t('maas.admin.migrateRefLabel', 'MaaS model reference')}
+                    >
+                      <FormSelectOption
+                        value=""
+                        isPlaceholder
+                        label={t('maas.admin.migrateRefPlaceholder', 'Select a model reference')}
+                      />
+                      {selectableRefs.map((ref) => (
+                        <FormSelectOption
+                          key={ref.id}
+                          value={ref.id}
+                          label={`${ref.namespace}/${ref.name} (${ref.phase})`}
+                        />
+                      ))}
+                    </FormSelect>
+                  )}
+                  {!refsQuery.isLoading && selectableRefs.length === 0 && (
+                    <HelperText>
+                      <HelperTextItem>
+                        {t(
+                          'maas.admin.migrateNoRefs',
+                          'No available model references found. References that are already imported are not listed.',
+                        )}
+                      </HelperTextItem>
+                    </HelperText>
+                  )}
+                </FormGroup>
+                <FormGroup
+                  label={t('maas.admin.graceDays', 'Grace period (days)')}
+                  fieldId="migrate-grace-days"
+                >
+                  <NumberInput
+                    inputName="migrate-grace-days"
+                    id="migrate-grace-days"
+                    value={migrateGraceDays}
+                    min={0}
+                    max={365}
+                    onChange={(event) => {
+                      const value = parseInt((event.target as HTMLInputElement).value, 10);
+                      setMigrateGraceDays(isNaN(value) ? 0 : Math.min(365, Math.max(0, value)));
+                    }}
+                    onPlus={() => setMigrateGraceDays(Math.min(365, migrateGraceDays + 1))}
+                    onMinus={() => setMigrateGraceDays(Math.max(0, migrateGraceDays - 1))}
+                  />
+                  <HelperText>
+                    <HelperTextItem>
+                      {t(
+                        'maas.admin.graceDaysHelp',
+                        'Users keep LiteLLM access to this model for this many days so they can switch their keys.',
+                      )}
+                    </HelperTextItem>
+                  </HelperText>
+                </FormGroup>
+              </Form>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button
+              variant="primary"
+              onClick={handleConfirmMigrate}
+              isLoading={migrateMutation.isLoading}
+              isDisabled={!migrateRefKey || migrateMutation.isLoading}
+            >
+              {t('maas.admin.migrateConfirm', 'Migrate')}
+            </Button>
+            <Button variant="link" onClick={closeMigrateModal}>
+              {t('common.cancel')}
+            </Button>
           </ModalFooter>
         </Modal>
 

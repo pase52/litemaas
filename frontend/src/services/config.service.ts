@@ -46,6 +46,9 @@ export interface BackendConfig {
   currency?: CurrencySettings;
   // Authentication provider type
   authProvider?: 'openshift' | 'oidc';
+  // RHOAI MaaS backend support
+  maasEnabled?: boolean;
+  maasGatewayUrl?: string;
   // Legacy fields for backwards compatibility
   litellmApiUrl?: string;
   authMode?: 'oauth' | 'mock';

@@ -2105,5 +2105,53 @@
       "roleConflict": "角色冲突",
       "roleConflictDesc": "管理员和管理员（只读）角色冲突。管理员角色将优先。"
     }
+  },
+  "maas": {
+    "admin": {
+      "deleteMaasNote": "该模型将从 LiteMaaS 中隐藏,并撤销有效订阅。集群上的 MaaSModelRef 不会被删除;可使用“同步并恢复已移除的模型”将其恢复。",
+      "graceDays": "宽限期(天)",
+      "graceDaysHelp": "在此天数内,用户仍可通过 LiteLLM 访问该模型,以便切换其密钥。",
+      "managedByCluster": "该模型来自 MaaSModelRef。端点、速率限制和凭据由集群管理;此处只能编辑下方的元数据。",
+      "managedByClusterTitle": "由 MaaS 集群管理",
+      "migrateAction": "迁移到 MaaS",
+      "migrateConfirm": "迁移",
+      "migrateDescription": "根据集群上的 MaaSModelRef 为“{{model}}”创建 MaaS 模型,并迁移其有效订阅。在宽限期结束前将保留 LiteLLM 访问权限。",
+      "migrateError": "迁移失败",
+      "migrateNoRefs": "未找到可用的模型引用。已导入的引用不会列出。",
+      "migrateRefLabel": "MaaS 模型引用",
+      "migrateRefPlaceholder": "选择模型引用",
+      "migrateSuccessDesc": "已将 {{count}} 个订阅迁移到 MaaS。LiteLLM 访问权限将保留至 {{date}}。",
+      "migrateSuccessTitle": "迁移已开始",
+      "migrateTitle": "迁移到 MaaS",
+      "refsLoadFailed": "加载 MaaS 模型引用失败",
+      "syncButton": "同步 MaaS 模型",
+      "syncError": "MaaS 同步失败",
+      "syncMoreOptions": "更多 MaaS 同步选项",
+      "syncRestore": "同步并恢复已移除的模型",
+      "syncRestoreHelp": "同时恢复管理员已移除的 MaaS 模型",
+      "syncSuccessDesc": "发现 {{total}} 个模型引用:新增 {{created}} 个,更新 {{updated}} 个,不可用 {{unavailable}} 个。",
+      "syncSuccessTitle": "MaaS 模型已同步"
+    },
+    "backend": {
+      "label": "后端",
+      "litellm": "LiteLLM",
+      "maas": "MaaS",
+      "maasAria": "通过 Red Hat OpenShift AI MaaS 提供"
+    },
+    "keys": {
+      "backendHelp": "一个密钥只能用于同一后端的模型。请先选择后端,再选择其模型。",
+      "backendLabel": "密钥后端",
+      "graceBannerItem": "密钥“{{key}}”:{{models}} 在 {{date}} 之前仍可通过 LiteLLM 使用。请在此之前为这些模型创建 MaaS 密钥。",
+      "graceBannerTitle": "您的部分密钥使用了正在迁移到 MaaS 的模型",
+      "noSubscribedMaasModels": "您没有任何 MaaS 模型的有效订阅。",
+      "perModelTpmHelp": "为每个模型设置每分钟令牌数限制。这些限制独立于密钥的全局限制生效。",
+      "reauthBody": "MaaS 密钥使用您自己的 OpenShift 登录凭据签发,而该凭据已过期。请重新登录以继续,登录后将返回此页面。",
+      "reauthButton": "重新验证",
+      "reauthTitle": "需要重新验证",
+      "tpmOnlyNotice": "MaaS 密钥仅支持每分钟令牌数 (TPM) 限制,不支持预算和请求速率限制。"
+    },
+    "migration": {
+      "migratingUntil": "正在迁移到 MaaS,截止 {{date}}"
+    }
   }
 }

@@ -45,6 +45,8 @@ import {
   ProgressMeasureLocation,
   ProgressVariant,
   DatePicker,
+  ToggleGroup,
+  ToggleGroupItem,
 } from '@patternfly/react-core';
 import {
   KeyIcon,
@@ -68,6 +70,16 @@ import { configService } from '../services/config.service';
 import type { ApiKeyQuotaDefaults } from '../types/users';
 import { extractErrorDetails } from '../utils/error.utils';
 import { formatDate } from '../utils/formatters';
+import { useMaasEnabled } from '../hooks/useMaasEnabled';
+import { BackendBadge } from '../components/common/BackendBadge';
+import { MaasReauthAlert } from '../components/common/MaasReauthAlert';
+import {
+  getMigrationGraceUntil,
+  getModelBaseUrl,
+  getServedModelName,
+  isMaasModel,
+  isMaasReauthError,
+} from '../utils/modelBackend';
 
 interface ModelLimits {
   budget?: number;
@@ -81,6 +93,7 @@ const ApiKeysPage: React.FC = () => {
   const { addNotification } = useNotifications();
   const { handleError } = useErrorHandler();
   const { formatCurrency, currencyCode } = useCurrency();
+  const { maasEnabled } = useMaasEnabled();
 
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
@@ -102,6 +115,10 @@ const ApiKeysPage: React.FC = () => {
   const [keyToDelete, setKeyToDelete] = useState<ApiKey | null>(null);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [selectedModelForExample, setSelectedModelForExample] = useState<string>('');
+
+  // MaaS backend support
+  const [newKeyBackend, setNewKeyBackend] = useState<'litellm' | 'maas'>('litellm');
+  const [reauthRequired, setReauthRequired] = useState(false);
 
   // Edit modal state
   const [isEditMode, setIsEditMode] = useState(false);
@@ -420,10 +437,38 @@ const ApiKeysPage: React.FC = () => {
     );
   };
 
+  // Backend of the key being created/edited: MaaS keys only support TPM limits
+  const isMaasKeyForm = isEditMode
+    ? editingKey?.backendType === 'maas'
+    : maasEnabled && newKeyBackend === 'maas';
+  // A key is bound to one backend, so only models of that backend can be selected
+  const selectableModels = models.filter((m) => isMaasModel(m) === isMaasKeyForm);
+
+  const handleBackendChange = (backend: 'litellm' | 'maas') => {
+    if (backend === newKeyBackend) return;
+    setNewKeyBackend(backend);
+    setSelectedModelIds([]);
+    setNewKeyModelLimits({});
+    setReauthRequired(false);
+    if (backend === 'maas') {
+      // Budget / RPM are not supported by MaaS keys
+      setNewKeyMaxBudget(undefined);
+      setNewKeyRpmLimit(undefined);
+      setNewKeyBudgetDuration('');
+    } else {
+      setNewKeyMaxBudget(quotaDefaults?.defaults?.maxBudget ?? undefined);
+      setNewKeyRpmLimit(quotaDefaults?.defaults?.rpmLimit ?? undefined);
+      setNewKeyBudgetDuration(quotaDefaults?.defaults?.budgetDuration ?? '');
+    }
+    setFormErrors({});
+  };
+
   const handleCreateApiKey = (triggerElement?: HTMLElement) => {
     // Reset edit mode
     setIsEditMode(false);
     setEditingKey(null);
+    setNewKeyBackend('litellm');
+    setReauthRequired(false);
 
     setNewKeyName('');
     setNewKeyDescription('');
@@ -473,7 +518,12 @@ const ApiKeysPage: React.FC = () => {
     // Validate quota fields against admin-set maximums
     if (quotaDefaults?.maximums) {
       const max = quotaDefaults.maximums;
-      if (max.maxBudget != null && newKeyMaxBudget != null && newKeyMaxBudget > max.maxBudget) {
+      if (
+        !isMaasKeyForm &&
+        max.maxBudget != null &&
+        newKeyMaxBudget != null &&
+        newKeyMaxBudget > max.maxBudget
+      ) {
         errors.maxBudget = t('pages.apiKeys.quotas.exceedsMaximum', {
           field: t('pages.apiKeys.quotas.maxBudget', { currencyCode }),
           max: max.maxBudget,
@@ -485,7 +535,12 @@ const ApiKeysPage: React.FC = () => {
           max: max.tpmLimit,
         });
       }
-      if (max.rpmLimit != null && newKeyRpmLimit != null && newKeyRpmLimit > max.rpmLimit) {
+      if (
+        !isMaasKeyForm &&
+        max.rpmLimit != null &&
+        newKeyRpmLimit != null &&
+        newKeyRpmLimit > max.rpmLimit
+      ) {
         errors.rpmLimit = t('pages.apiKeys.quotas.exceedsMaximum', {
           field: t('pages.apiKeys.quotas.rpmLimit'),
           max: max.rpmLimit,
@@ -516,7 +571,7 @@ const ApiKeysPage: React.FC = () => {
     for (const [modelId, limits] of Object.entries(newKeyModelLimits)) {
       if (!selectedModelIds.includes(modelId)) continue;
       const modelName = models.find((m) => m.id === modelId)?.name || modelId;
-      if (limits.budget != null && limits.budget > 0) {
+      if (!isMaasKeyForm && limits.budget != null && limits.budget > 0) {
         if (newKeyMaxBudget != null && limits.budget > newKeyMaxBudget) {
           errors[`model-budget-${modelId}`] = t('pages.apiKeys.quotas.modelExceedsKeyLimit', {
             model: modelName,
@@ -534,7 +589,7 @@ const ApiKeysPage: React.FC = () => {
           });
         }
       }
-      if (limits.rpm != null && limits.rpm > 0) {
+      if (!isMaasKeyForm && limits.rpm != null && limits.rpm > 0) {
         if (newKeyRpmLimit != null && limits.rpm > newKeyRpmLimit) {
           errors[`model-rpm-${modelId}`] = t('pages.apiKeys.quotas.modelExceedsKeyLimit', {
             model: modelName,
@@ -592,13 +647,13 @@ const ApiKeysPage: React.FC = () => {
 
     for (const [modelId, limits] of Object.entries(newKeyModelLimits)) {
       if (!selectedModelIds.includes(modelId)) continue;
-      if (limits.budget && limits.budget > 0) {
+      if (!isMaasKeyForm && limits.budget && limits.budget > 0) {
         modelMaxBudget[modelId] = {
           budgetLimit: limits.budget,
           timePeriod: limits.timePeriod || 'monthly',
         };
       }
-      if (limits.rpm && limits.rpm > 0) {
+      if (!isMaasKeyForm && limits.rpm && limits.rpm > 0) {
         modelRpmLimit[modelId] = limits.rpm;
       }
       if (limits.tpm && limits.tpm > 0) {
@@ -626,10 +681,11 @@ const ApiKeysPage: React.FC = () => {
                 : new Date(
                     Date.now() + parseInt(newKeyExpiration) * 24 * 60 * 60 * 1000,
                   ).toISOString(),
-          maxBudget: newKeyMaxBudget ?? undefined,
-          budgetDuration: newKeyBudgetDuration || undefined,
+          // MaaS keys only support TPM limits
+          maxBudget: isMaasKeyForm ? undefined : (newKeyMaxBudget ?? undefined),
+          budgetDuration: isMaasKeyForm ? undefined : newKeyBudgetDuration || undefined,
           tpmLimit: newKeyTpmLimit ?? undefined,
-          rpmLimit: newKeyRpmLimit ?? undefined,
+          rpmLimit: isMaasKeyForm ? undefined : (newKeyRpmLimit ?? undefined),
           ...perModelPayload,
           metadata: {
             description: newKeyDescription || undefined,
@@ -666,11 +722,13 @@ const ApiKeysPage: React.FC = () => {
                 : new Date(
                     Date.now() + parseInt(newKeyExpiration) * 24 * 60 * 60 * 1000,
                   ).toISOString(),
-          // Quota fields
-          maxBudget: newKeyMaxBudget,
-          budgetDuration: newKeyBudgetDuration || undefined,
+          // Backend the key is issued by (omitted for LiteLLM, the server default)
+          ...(isMaasKeyForm ? { backendType: 'maas' as const } : {}),
+          // Quota fields (MaaS keys only support TPM limits)
+          maxBudget: isMaasKeyForm ? undefined : newKeyMaxBudget,
+          budgetDuration: isMaasKeyForm ? undefined : newKeyBudgetDuration || undefined,
           tpmLimit: newKeyTpmLimit,
-          rpmLimit: newKeyRpmLimit,
+          rpmLimit: isMaasKeyForm ? undefined : newKeyRpmLimit,
           // Per-model limits
           ...perModelPayload,
           // ✅ Put additional fields in metadata as backend expects
@@ -698,6 +756,13 @@ const ApiKeysPage: React.FC = () => {
       }
     } catch (err: any) {
       console.error(isEditMode ? 'Failed to update API key:' : 'Failed to create API key:', err);
+
+      // MaaS: the stored login token expired - offer re-authentication instead of a generic error
+      if (isMaasReauthError(err)) {
+        setReauthRequired(true);
+        return;
+      }
+
       const fallbackMessage = isEditMode
         ? t('pages.apiKeys.notifications.updateErrorDesc')
         : t('pages.apiKeys.notifications.createErrorDesc');
@@ -726,6 +791,7 @@ const ApiKeysPage: React.FC = () => {
     // Set edit mode and populate form with existing data
     setIsEditMode(true);
     setEditingKey(apiKey);
+    setReauthRequired(false);
     setNewKeyName(apiKey.name);
     setNewKeyDescription(apiKey.description || '');
     setSelectedModelIds(apiKey.models || []);
@@ -881,6 +947,9 @@ const ApiKeysPage: React.FC = () => {
           variant: 'success',
         });
       } catch (error) {
+        if (isMaasReauthError(error)) {
+          setReauthRequired(true);
+        }
         addNotification({
           title: t('pages.apiKeys.notifications.retrieveError'),
           description:
@@ -909,6 +978,29 @@ const ApiKeysPage: React.FC = () => {
     { value: 'analytics:read', label: 'Read Analytics' },
     { value: 'admin:all', label: 'Admin Access' }
   ]; */
+
+  // LiteLLM keys holding models whose migration to MaaS is in its grace period
+  const graceKeys = maasEnabled
+    ? apiKeys
+        .filter((k) => k.backendType !== 'maas' && k.status === 'active')
+        .map((k) => {
+          let until: Date | null = null;
+          const names: string[] = [];
+          for (const modelId of k.models ?? []) {
+            const detail = k.modelDetails?.find((m) => m.id === modelId);
+            const fromList = models.find((m) => m.id === modelId);
+            const modelUntil = getMigrationGraceUntil({
+              migrationGraceUntil: detail?.migrationGraceUntil ?? fromList?.migrationGraceUntil,
+            });
+            if (modelUntil && modelUntil.getTime() > Date.now()) {
+              names.push(detail?.name ?? fromList?.name ?? modelId);
+              if (!until || modelUntil < until) until = modelUntil;
+            }
+          }
+          return until ? { key: k, models: names, until } : null;
+        })
+        .filter((x): x is { key: ApiKey; models: string[]; until: Date } => x !== null)
+    : [];
 
   if (loading) {
     return (
@@ -959,6 +1051,40 @@ const ApiKeysPage: React.FC = () => {
           </FlexItem>
         </Flex>
       </PageSection>
+
+      {reauthRequired && !isCreateModalOpen && (
+        <PageSection>
+          <MaasReauthAlert />
+        </PageSection>
+      )}
+
+      {graceKeys.length > 0 && (
+        <PageSection>
+          <Alert
+            variant="warning"
+            isInline
+            title={t(
+              'maas.keys.graceBannerTitle',
+              'Some of your keys use models that are migrating to MaaS',
+            )}
+            data-testid="maas-grace-banner"
+          >
+            <ul>
+              {graceKeys.map(({ key, models: graceModels, until }) => (
+                <li key={key.id}>
+                  {t('maas.keys.graceBannerItem', {
+                    key: key.name,
+                    models: graceModels.join(', '),
+                    date: formatDate(until.toISOString()),
+                    defaultValue:
+                      'Key "{{key}}": {{models}} stay available through LiteLLM until {{date}}. Create a MaaS key for these models before then.',
+                  })}
+                </li>
+              ))}
+            </ul>
+          </Alert>
+        </PageSection>
+      )}
 
       <PageSection>
         {error ? (
@@ -1044,6 +1170,12 @@ const ApiKeysPage: React.FC = () => {
                         <Flex direction={{ default: 'column' }}>
                           <FlexItem>
                             <strong>{apiKey.name}</strong>
+                            {apiKey.backendType === 'maas' && (
+                              <>
+                                {' '}
+                                <BackendBadge backendType="maas" isCompact />
+                              </>
+                            )}
                           </FlexItem>
                           {apiKey.description && (
                             <FlexItem>
@@ -1247,6 +1379,37 @@ const ApiKeysPage: React.FC = () => {
         />
         <ModalBody>
           <Form>
+            {reauthRequired && <MaasReauthAlert />}
+            {maasEnabled && (
+              <FormGroup label={t('maas.keys.backendLabel', 'Key backend')} fieldId="key-backend">
+                {isEditMode ? (
+                  <BackendBadge backendType={editingKey?.backendType} showLiteLLM />
+                ) : (
+                  <ToggleGroup aria-label={t('maas.keys.backendLabel', 'Key backend')}>
+                    <ToggleGroupItem
+                      text={t('maas.backend.litellm', 'LiteLLM')}
+                      buttonId="key-backend-litellm"
+                      isSelected={newKeyBackend === 'litellm'}
+                      onChange={() => handleBackendChange('litellm')}
+                    />
+                    <ToggleGroupItem
+                      text={t('maas.backend.maas', 'MaaS')}
+                      buttonId="key-backend-maas"
+                      isSelected={newKeyBackend === 'maas'}
+                      onChange={() => handleBackendChange('maas')}
+                    />
+                  </ToggleGroup>
+                )}
+                <HelperText>
+                  <HelperTextItem>
+                    {t(
+                      'maas.keys.backendHelp',
+                      'A key works with models of one backend only. Choose the backend first, then select its models.',
+                    )}
+                  </HelperTextItem>
+                </HelperText>
+              </FormGroup>
+            )}
             <FormGroup label={t('pages.apiKeys.forms.name')} isRequired fieldId="key-name">
               <TextInput
                 isRequired
@@ -1291,23 +1454,30 @@ const ApiKeysPage: React.FC = () => {
             <FormGroup label={t('pages.apiKeys.forms.models')} isRequired fieldId="key-models">
               {loadingModels ? (
                 <Skeleton height="40px" />
-              ) : models.length === 0 ? (
+              ) : selectableModels.length === 0 ? (
                 <Alert
                   variant="warning"
                   isInline
                   isPlain
-                  title={t('pages.apiKeys.messages.noSubscribedModels')}
+                  title={
+                    isMaasKeyForm
+                      ? t(
+                          'maas.keys.noSubscribedMaasModels',
+                          'You have no active subscriptions to MaaS models.',
+                        )
+                      : t('pages.apiKeys.messages.noSubscribedModels')
+                  }
                 />
               ) : (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
                   <Label
                     color="purple"
                     onClick={() => {
-                      if (selectedModelIds.length === models.length) {
+                      if (selectedModelIds.length === selectableModels.length) {
                         setSelectedModelIds([]);
                         setNewKeyModelLimits({});
                       } else {
-                        setSelectedModelIds(models.map((m) => m.id));
+                        setSelectedModelIds(selectableModels.map((m) => m.id));
                       }
                       // Clear validation error if selecting all
                       if (formErrors.models) {
@@ -1318,11 +1488,11 @@ const ApiKeysPage: React.FC = () => {
                     }}
                     style={{ cursor: 'pointer' }}
                   >
-                    {selectedModelIds.length === models.length
+                    {selectedModelIds.length === selectableModels.length
                       ? t('pages.apiKeys.deselectAll', 'Deselect All')
                       : t('pages.apiKeys.selectAll', 'Select All')}
                   </Label>
-                  {models.map((model) => (
+                  {selectableModels.map((model) => (
                     <Label
                       key={model.id}
                       color={selectedModelIds.includes(model.id) ? 'blue' : 'grey'}
@@ -1471,9 +1641,22 @@ const ApiKeysPage: React.FC = () => {
             <Content component={ContentVariants.small} style={{ marginBottom: '0.125rem' }}>
               {t('pages.apiKeys.quotas.description')}
             </Content>
+            {isMaasKeyForm && (
+              <Alert
+                variant="info"
+                isInline
+                isPlain
+                title={t(
+                  'maas.keys.tpmOnlyNotice',
+                  'MaaS keys support token-per-minute (TPM) limits only. Budget and request-rate limits are not available.',
+                )}
+                data-testid="maas-tpm-only-notice"
+              />
+            )}
 
             {/* Current Spend with Progress Bar and Reset Button - edit mode only, when budget is set */}
-            {isEditMode &&
+            {!isMaasKeyForm &&
+              isEditMode &&
               editingKey &&
               editingKey.maxBudget != null &&
               editingKey.maxBudget > 0 && (
@@ -1524,35 +1707,37 @@ const ApiKeysPage: React.FC = () => {
                 </FormGroup>
               )}
 
-            <FormGroup
-              label={t('pages.apiKeys.quotas.maxBudget', { currencyCode })}
-              fieldId="key-max-budget"
-            >
-              <TextInput
-                id="key-max-budget"
-                type="number"
-                min="0"
-                step="1"
-                value={newKeyMaxBudget ?? ''}
-                onChange={(_event, value) =>
-                  setNewKeyMaxBudget(value ? parseFloat(value) : undefined)
-                }
-                placeholder={t('pages.apiKeys.quotas.optionalPlaceholder')}
-                validated={formErrors.maxBudget ? 'error' : 'default'}
-              />
-              <HelperText>
-                <HelperTextItem variant={formErrors.maxBudget ? 'error' : 'default'}>
-                  {formErrors.maxBudget ??
-                    (quotaDefaults?.maximums?.maxBudget != null
-                      ? t('pages.apiKeys.quotas.maxAllowed', {
-                          max: quotaDefaults.maximums.maxBudget,
-                        })
-                      : t('pages.apiKeys.quotas.maxBudgetHelper', { currencyCode }))}
-                </HelperTextItem>
-              </HelperText>
-            </FormGroup>
+            {!isMaasKeyForm && (
+              <FormGroup
+                label={t('pages.apiKeys.quotas.maxBudget', { currencyCode })}
+                fieldId="key-max-budget"
+              >
+                <TextInput
+                  id="key-max-budget"
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={newKeyMaxBudget ?? ''}
+                  onChange={(_event, value) =>
+                    setNewKeyMaxBudget(value ? parseFloat(value) : undefined)
+                  }
+                  placeholder={t('pages.apiKeys.quotas.optionalPlaceholder')}
+                  validated={formErrors.maxBudget ? 'error' : 'default'}
+                />
+                <HelperText>
+                  <HelperTextItem variant={formErrors.maxBudget ? 'error' : 'default'}>
+                    {formErrors.maxBudget ??
+                      (quotaDefaults?.maximums?.maxBudget != null
+                        ? t('pages.apiKeys.quotas.maxAllowed', {
+                            max: quotaDefaults.maximums.maxBudget,
+                          })
+                        : t('pages.apiKeys.quotas.maxBudgetHelper', { currencyCode }))}
+                  </HelperTextItem>
+                </HelperText>
+              </FormGroup>
+            )}
 
-            {newKeyMaxBudget != null && newKeyMaxBudget > 0 && (
+            {!isMaasKeyForm && newKeyMaxBudget != null && newKeyMaxBudget > 0 && (
               <FormGroup
                 label={t('pages.apiKeys.quotas.budgetDuration')}
                 fieldId="key-budget-duration"
@@ -1597,28 +1782,32 @@ const ApiKeysPage: React.FC = () => {
               </HelperText>
             </FormGroup>
 
-            <FormGroup label={t('pages.apiKeys.quotas.rpmLimit')} fieldId="key-rpm-limit">
-              <TextInput
-                id="key-rpm-limit"
-                type="number"
-                min="0"
-                step="10"
-                value={newKeyRpmLimit ?? ''}
-                onChange={(_event, value) => setNewKeyRpmLimit(value ? parseInt(value) : undefined)}
-                placeholder={t('pages.apiKeys.quotas.optionalPlaceholder')}
-                validated={formErrors.rpmLimit ? 'error' : 'default'}
-              />
-              <HelperText>
-                <HelperTextItem variant={formErrors.rpmLimit ? 'error' : 'default'}>
-                  {formErrors.rpmLimit ??
-                    (quotaDefaults?.maximums?.rpmLimit != null
-                      ? t('pages.apiKeys.quotas.maxAllowed', {
-                          max: quotaDefaults.maximums.rpmLimit,
-                        })
-                      : t('pages.apiKeys.quotas.rpmLimitHelper'))}
-                </HelperTextItem>
-              </HelperText>
-            </FormGroup>
+            {!isMaasKeyForm && (
+              <FormGroup label={t('pages.apiKeys.quotas.rpmLimit')} fieldId="key-rpm-limit">
+                <TextInput
+                  id="key-rpm-limit"
+                  type="number"
+                  min="0"
+                  step="10"
+                  value={newKeyRpmLimit ?? ''}
+                  onChange={(_event, value) =>
+                    setNewKeyRpmLimit(value ? parseInt(value) : undefined)
+                  }
+                  placeholder={t('pages.apiKeys.quotas.optionalPlaceholder')}
+                  validated={formErrors.rpmLimit ? 'error' : 'default'}
+                />
+                <HelperText>
+                  <HelperTextItem variant={formErrors.rpmLimit ? 'error' : 'default'}>
+                    {formErrors.rpmLimit ??
+                      (quotaDefaults?.maximums?.rpmLimit != null
+                        ? t('pages.apiKeys.quotas.maxAllowed', {
+                            max: quotaDefaults.maximums.rpmLimit,
+                          })
+                        : t('pages.apiKeys.quotas.rpmLimitHelper'))}
+                  </HelperTextItem>
+                </HelperText>
+              </FormGroup>
+            )}
 
             {/* Per-model limits */}
             {selectedModelIds.length > 0 && (
@@ -1628,10 +1817,15 @@ const ApiKeysPage: React.FC = () => {
               >
                 <HelperText style={{ marginBottom: '0.75rem' }}>
                   <HelperTextItem>
-                    {t(
-                      'pages.apiKeys.quotas.perModelLimitsHelp',
-                      'Set per-model budget and rate limits. These apply independently of global key limits.',
-                    )}
+                    {isMaasKeyForm
+                      ? t(
+                          'maas.keys.perModelTpmHelp',
+                          'Set per-model token-per-minute limits. These apply independently of the global key limit.',
+                        )
+                      : t(
+                          'pages.apiKeys.quotas.perModelLimitsHelp',
+                          'Set per-model budget and rate limits. These apply independently of global key limits.',
+                        )}
                   </HelperTextItem>
                 </HelperText>
                 {selectedModelIds.map((modelId) => {
@@ -1663,34 +1857,36 @@ const ApiKeysPage: React.FC = () => {
                         style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}
                       >
                         {/* Per-model budget hidden: requires LiteLLM Enterprise license */}
-                        <FormGroup
-                          label={t('pages.apiKeys.quotas.modelRpm', 'RPM')}
-                          fieldId={`model-rpm-${modelId}`}
-                        >
-                          <TextInput
-                            id={`model-rpm-${modelId}`}
-                            type="number"
-                            min="0"
-                            value={limits.rpm ?? ''}
-                            onChange={(_event, value) => {
-                              const parsed = parseInt(value, 10);
-                              updateModelLimit(
-                                'rpm',
-                                value === '' || isNaN(parsed) || parsed < 0 ? undefined : parsed,
-                              );
-                            }}
-                            isDisabled={creatingKey || updatingKey}
-                            aria-label={`${modelName} RPM`}
-                            validated={formErrors[`model-rpm-${modelId}`] ? 'error' : 'default'}
-                          />
-                          {formErrors[`model-rpm-${modelId}`] && (
-                            <HelperText>
-                              <HelperTextItem variant="error">
-                                {formErrors[`model-rpm-${modelId}`]}
-                              </HelperTextItem>
-                            </HelperText>
-                          )}
-                        </FormGroup>
+                        {!isMaasKeyForm && (
+                          <FormGroup
+                            label={t('pages.apiKeys.quotas.modelRpm', 'RPM')}
+                            fieldId={`model-rpm-${modelId}`}
+                          >
+                            <TextInput
+                              id={`model-rpm-${modelId}`}
+                              type="number"
+                              min="0"
+                              value={limits.rpm ?? ''}
+                              onChange={(_event, value) => {
+                                const parsed = parseInt(value, 10);
+                                updateModelLimit(
+                                  'rpm',
+                                  value === '' || isNaN(parsed) || parsed < 0 ? undefined : parsed,
+                                );
+                              }}
+                              isDisabled={creatingKey || updatingKey}
+                              aria-label={`${modelName} RPM`}
+                              validated={formErrors[`model-rpm-${modelId}`] ? 'error' : 'default'}
+                            />
+                            {formErrors[`model-rpm-${modelId}`] && (
+                              <HelperText>
+                                <HelperTextItem variant="error">
+                                  {formErrors[`model-rpm-${modelId}`]}
+                                </HelperTextItem>
+                              </HelperText>
+                            )}
+                          </FormGroup>
+                        )}
                         <FormGroup
                           label={t('pages.apiKeys.quotas.modelTpm', 'TPM')}
                           fieldId={`model-tpm-${modelId}`}
@@ -1929,7 +2125,12 @@ const ApiKeysPage: React.FC = () => {
                                     <strong>{t('pages.apiKeys.labels.apiUrl')}</strong>
                                   </Th>
                                   <Td>
-                                    {litellmApiUrl}/
+                                    {getModelBaseUrl(
+                                      models.find((m) => m.id === selectedModelForExample),
+                                      selectedApiKey.baseUrl,
+                                      litellmApiUrl,
+                                    )}
+                                    /
                                     {(() => {
                                       const detail = selectedApiKey.modelDetails?.find(
                                         (m) => m.id === selectedModelForExample,
@@ -1943,6 +2144,19 @@ const ApiKeysPage: React.FC = () => {
                                     })()}
                                   </Td>
                                 </Tr>
+                                {maasEnabled && (
+                                  <Tr>
+                                    <Th scope="row">
+                                      <strong>{t('maas.keys.backendLabel', 'Key backend')}</strong>
+                                    </Th>
+                                    <Td>
+                                      <BackendBadge
+                                        backendType={selectedApiKey.backendType}
+                                        showLiteLLM
+                                      />
+                                    </Td>
+                                  </Tr>
+                                )}
                                 <Tr>
                                   <Th scope="row">
                                     <strong>{t('pages.apiKeys.labels.created')}</strong>
@@ -1968,16 +2182,18 @@ const ApiKeysPage: React.FC = () => {
                               borders={false}
                             >
                               <Tbody>
-                                <Tr>
-                                  <Th scope="row">
-                                    <strong>{t('users.apiKeys.budget', 'Budget')}</strong>
-                                  </Th>
-                                  <Td>
-                                    {selectedApiKey.maxBudget != null
-                                      ? `${formatCurrency(selectedApiKey.currentSpend ?? 0)} / ${formatCurrency(selectedApiKey.maxBudget)}`
-                                      : '-'}
-                                  </Td>
-                                </Tr>
+                                {selectedApiKey.backendType !== 'maas' && (
+                                  <Tr>
+                                    <Th scope="row">
+                                      <strong>{t('users.apiKeys.budget', 'Budget')}</strong>
+                                    </Th>
+                                    <Td>
+                                      {selectedApiKey.maxBudget != null
+                                        ? `${formatCurrency(selectedApiKey.currentSpend ?? 0)} / ${formatCurrency(selectedApiKey.maxBudget)}`
+                                        : '-'}
+                                    </Td>
+                                  </Tr>
+                                )}
                                 <Tr>
                                   <Th scope="row">
                                     <strong>{t('users.apiKeys.tpmLimit', 'TPM Limit')}</strong>
@@ -1988,16 +2204,18 @@ const ApiKeysPage: React.FC = () => {
                                       : '-'}
                                   </Td>
                                 </Tr>
-                                <Tr>
-                                  <Th scope="row">
-                                    <strong>{t('users.apiKeys.rpmLimit', 'RPM Limit')}</strong>
-                                  </Th>
-                                  <Td>
-                                    {selectedApiKey.rpmLimit != null
-                                      ? selectedApiKey.rpmLimit.toLocaleString()
-                                      : '-'}
-                                  </Td>
-                                </Tr>
+                                {selectedApiKey.backendType !== 'maas' && (
+                                  <Tr>
+                                    <Th scope="row">
+                                      <strong>{t('users.apiKeys.rpmLimit', 'RPM Limit')}</strong>
+                                    </Th>
+                                    <Td>
+                                      {selectedApiKey.rpmLimit != null
+                                        ? selectedApiKey.rpmLimit.toLocaleString()
+                                        : '-'}
+                                    </Td>
+                                  </Tr>
+                                )}
                               </Tbody>
                             </Table>
                           </SplitItem>
@@ -2036,7 +2254,30 @@ const ApiKeysPage: React.FC = () => {
                         visibleKeys.has(selectedApiKey.id) && selectedApiKey.fullKey
                           ? selectedApiKey.fullKey
                           : '<click-show-key-to-reveal>';
-                      const modelName = selectedModelForExample || 'gpt-4';
+                      const exampleModelFromList = models.find(
+                        (m) => m.id === selectedModelForExample,
+                      );
+                      const exampleModelDetail = selectedApiKey.modelDetails?.find(
+                        (m) => m.id === selectedModelForExample,
+                      );
+                      const baseUrl = getModelBaseUrl(
+                        exampleModelFromList,
+                        selectedApiKey.baseUrl,
+                        litellmApiUrl,
+                      );
+                      // MaaS models are addressed by their served name, not the "<ns>/<name>" id
+                      const modelName = selectedModelForExample
+                        ? getServedModelName({
+                            id: selectedModelForExample,
+                            backendType:
+                              exampleModelDetail?.backendType ??
+                              exampleModelFromList?.backendType ??
+                              selectedApiKey.backendType,
+                            backendModelName:
+                              exampleModelDetail?.backendModelName ??
+                              exampleModelFromList?.backendModelName,
+                          })
+                        : 'gpt-4';
                       // Check model type from both API key modelDetails and loaded models array
                       const selectedModelDetail = selectedApiKey.modelDetails?.find(
                         (m) => m.id === selectedModelForExample,
@@ -2053,7 +2294,7 @@ const ApiKeysPage: React.FC = () => {
 
                       if (isEmbeddingsModel) {
                         return `# ${t('pages.apiKeys.codeExample.commentEmbeddings')}
-curl -X POST ${litellmApiUrl}/v1/embeddings \\
+curl -X POST ${baseUrl}/v1/embeddings \\
   -H "accept: application/json" \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${bearerToken}" \\
@@ -2066,7 +2307,7 @@ curl -X POST ${litellmApiUrl}/v1/embeddings \\
 
                       if (isConvertModel) {
                         return `# ${t('pages.apiKeys.codeExample.commentConvert')}
-curl -X POST ${litellmApiUrl}/docling/v1/convert/source \\
+curl -X POST ${baseUrl}/docling/v1/convert/source \\
   -H "accept: application/json" \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${bearerToken}" \\
@@ -2080,7 +2321,7 @@ curl -X POST ${litellmApiUrl}/docling/v1/convert/source \\
                       }
 
                       return `# ${t('pages.apiKeys.codeExample.commentChat')}
-curl -X POST ${litellmApiUrl}/v1/chat/completions \\
+curl -X POST ${baseUrl}/v1/chat/completions \\
   -H "Authorization: Bearer ${bearerToken}" \\
   -H "Content-Type: application/json" \\
   -d '{

@@ -2105,5 +2105,53 @@
       "roleConflict": "Varad-Glaemscaul",
       "roleConflictDesc": "Aran a Aran-leithron barad glaemscatha. Aran-varad tiri orthor."
     }
+  },
+  "maas": {
+    "admin": {
+      "deleteMaasNote": "The model is hidden from LiteMaaS and active subscriptions are revoked. The MaaSModelRef on the cluster remains untouched in the halls of the cluster; use \"Sync and restore removed models\" to call it back.",
+      "graceDays": "Days of grace (Nurn lû)",
+      "graceDaysHelp": "Wanderers keep their LiteLLM path to this model for this many days, that they may change their keys.",
+      "managedByCluster": "This model comes from a MaaSModelRef. Endpoint, rate limits and credentials are kept by the cluster; only the lore (metadata) below may be edited here.",
+      "managedByClusterTitle": "Kept by the MaaS cluster",
+      "migrateAction": "Journey to MaaS",
+      "migrateConfirm": "Begin the journey",
+      "migrateDescription": "Forge a MaaS model for \"{{model}}\" from a MaaSModelRef of the cluster and carry its active subscriptions across. LiteLLM access is kept until the days of grace end.",
+      "migrateError": "The journey failed",
+      "migrateNoRefs": "No model references found. References already brought in are not listed.",
+      "migrateRefLabel": "MaaS model reference (Echuil vegil)",
+      "migrateRefPlaceholder": "Choose a model reference",
+      "migrateSuccessDesc": "{{count}} subscription(s) carried over to MaaS. The LiteLLM path remains open until {{date}}.",
+      "migrateSuccessTitle": "The journey has begun",
+      "migrateTitle": "Journey to MaaS",
+      "refsLoadFailed": "Failed to load MaaS model references",
+      "syncButton": "Gar MaaS models",
+      "syncError": "MaaS synchronization failed",
+      "syncMoreOptions": "More MaaS sync paths",
+      "syncRestore": "Sync and restore removed models",
+      "syncRestoreHelp": "Also call back the MaaS models banished by a steward",
+      "syncSuccessDesc": "{{total}} model references found: {{created}} new, {{updated}} renewed, {{unavailable}} beyond reach.",
+      "syncSuccessTitle": "MaaS models are in harmony"
+    },
+    "backend": {
+      "label": "Backend (Hîr)",
+      "litellm": "LiteLLM",
+      "maas": "MaaS",
+      "maasAria": "Served through the Red Hat OpenShift AI MaaS"
+    },
+    "keys": {
+      "backendHelp": "A key serves the models of one backend only. Choose the backend first, then the models it holds.",
+      "backendLabel": "Key backend",
+      "graceBannerItem": "Key \"{{key}}\": {{models}} stay reachable through LiteLLM until {{date}}. Forge a MaaS key for these models before that day.",
+      "graceBannerTitle": "Some of your keys hold models that journey to MaaS",
+      "noSubscribedMaasModels": "You hold no active subscriptions to MaaS models.",
+      "perModelTpmHelp": "Set tokens-per-minute limits for each model. They stand apart from the global key limit.",
+      "reauthBody": "MaaS keys are forged with your own OpenShift sign-in, and its light has faded. Sign in anew to continue; you will return to this hall.",
+      "reauthButton": "Sign in anew",
+      "reauthTitle": "Sign in anew required",
+      "tpmOnlyNotice": "MaaS keys honour tokens-per-minute (TPM) limits only. Budget and request-rate limits are not available."
+    },
+    "migration": {
+      "migratingUntil": "Journeying to MaaS until {{date}}"
+    }
   }
 }

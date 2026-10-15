@@ -61,6 +61,7 @@ import {
   useScreenReaderAnnouncement,
 } from '../components/ScreenReaderAnnouncement';
 import { getModelFlairs } from '../utils/flairColors';
+import { BackendBadge, MigrationLabel } from '../components/common/BackendBadge';
 
 const ModelsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -255,7 +256,14 @@ const ModelsPage: React.FC = () => {
   }, [page, perPage]);
 
   // Define all available categories (static list)
-  const categories = ['all', 'Language Model', 'Multimodal', 'Function Calling', 'Image Generation', 'Audio'];
+  const categories = [
+    'all',
+    'Language Model',
+    'Multimodal',
+    'Function Calling',
+    'Image Generation',
+    'Audio',
+  ];
 
   // Translation function for category names
   const getCategoryLabel = (category: string) => {
@@ -574,6 +582,11 @@ const ModelsPage: React.FC = () => {
                               {model.restrictedAccess && (
                                 <FlexItem>{getRestrictedAccessBadge()}</FlexItem>
                               )}
+                              {model.backendType === 'maas' && (
+                                <FlexItem>
+                                  <BackendBadge backendType={model.backendType} />
+                                </FlexItem>
+                              )}
                               {getSubscriptionBadge(model.id) && (
                                 <FlexItem>{getSubscriptionBadge(model.id)}</FlexItem>
                               )}
@@ -621,6 +634,14 @@ const ModelsPage: React.FC = () => {
                             <Label color={color}>{label}</Label>
                           </FlexItem>
                         ))}
+                        {model.migrationGraceUntil && (
+                          <FlexItem>
+                            <MigrationLabel
+                              migrationState={model.migrationState}
+                              migrationGraceUntil={model.migrationGraceUntil}
+                            />
+                          </FlexItem>
+                        )}
                       </Flex>
                     </CardFooter>
                   </Card>
@@ -735,6 +756,19 @@ const ModelsPage: React.FC = () => {
                           <Label color={color}>{label}</Label>
                         </FlexItem>
                       ))}
+                      {selectedModel.backendType === 'maas' && (
+                        <FlexItem>
+                          <BackendBadge backendType={selectedModel.backendType} />
+                        </FlexItem>
+                      )}
+                      {selectedModel.migrationGraceUntil && (
+                        <FlexItem>
+                          <MigrationLabel
+                            migrationState={selectedModel.migrationState}
+                            migrationGraceUntil={selectedModel.migrationGraceUntil}
+                          />
+                        </FlexItem>
+                      )}
                     </Flex>
                   </DescriptionListDescription>
                 </DescriptionListGroup>

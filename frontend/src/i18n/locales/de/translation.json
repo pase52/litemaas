@@ -2105,5 +2105,53 @@
       "roleConflict": "Rollenkonflikt",
       "roleConflictDesc": "Administrator- und Administrator-Nur-Lesen-Rollen stehen in Konflikt. Die Administrator-Rolle hat Vorrang."
     }
+  },
+  "maas": {
+    "admin": {
+      "deleteMaasNote": "Das Modell wird in LiteMaaS ausgeblendet und aktive Abonnements werden widerrufen. Das MaaSModelRef im Cluster wird nicht gelöscht; mit „Synchronisieren und entfernte Modelle wiederherstellen“ kann es zurückgeholt werden.",
+      "graceDays": "Übergangsfrist (Tage)",
+      "graceDaysHelp": "Benutzer behalten so viele Tage den LiteLLM-Zugriff auf dieses Modell, um ihre Schlüssel umzustellen.",
+      "managedByCluster": "Dieses Modell stammt aus einem MaaSModelRef. Endpunkt, Ratenlimits und Zugangsdaten werden im Cluster verwaltet; hier können nur die folgenden Metadaten bearbeitet werden.",
+      "managedByClusterTitle": "Vom MaaS-Cluster verwaltet",
+      "migrateAction": "Zu MaaS migrieren",
+      "migrateConfirm": "Migrieren",
+      "migrateDescription": "Erstellen Sie ein MaaS-Modell für „{{model}}“ aus einem MaaSModelRef im Cluster und verschieben Sie die aktiven Abonnements. Der LiteLLM-Zugriff bleibt bis zum Ende der Übergangsfrist bestehen.",
+      "migrateError": "Migration fehlgeschlagen",
+      "migrateNoRefs": "Keine verfügbaren Modellreferenzen gefunden. Bereits importierte Referenzen werden nicht aufgeführt.",
+      "migrateRefLabel": "MaaS-Modellreferenz",
+      "migrateRefPlaceholder": "Modellreferenz auswählen",
+      "migrateSuccessDesc": "{{count}} Abonnement(s) zu MaaS verschoben. Der LiteLLM-Zugriff bleibt bis {{date}} verfügbar.",
+      "migrateSuccessTitle": "Migration gestartet",
+      "migrateTitle": "Zu MaaS migrieren",
+      "refsLoadFailed": "MaaS-Modellreferenzen konnten nicht geladen werden",
+      "syncButton": "MaaS-Modelle synchronisieren",
+      "syncError": "MaaS-Synchronisierung fehlgeschlagen",
+      "syncMoreOptions": "Weitere MaaS-Synchronisierungsoptionen",
+      "syncRestore": "Synchronisieren und entfernte Modelle wiederherstellen",
+      "syncRestoreHelp": "Stellt auch MaaS-Modelle wieder her, die von einem Administrator entfernt wurden",
+      "syncSuccessDesc": "{{total}} Modellreferenzen gefunden: {{created}} neu, {{updated}} aktualisiert, {{unavailable}} nicht verfügbar.",
+      "syncSuccessTitle": "MaaS-Modelle synchronisiert"
+    },
+    "backend": {
+      "label": "Backend",
+      "litellm": "LiteLLM",
+      "maas": "MaaS",
+      "maasAria": "Bereitgestellt über Red Hat OpenShift AI MaaS"
+    },
+    "keys": {
+      "backendHelp": "Ein Schlüssel funktioniert nur mit Modellen eines Backends. Wählen Sie zuerst das Backend und dann dessen Modelle aus.",
+      "backendLabel": "Schlüssel-Backend",
+      "graceBannerItem": "Schlüssel „{{key}}“: {{models}} bleiben bis {{date}} über LiteLLM verfügbar. Erstellen Sie vorher einen MaaS-Schlüssel für diese Modelle.",
+      "graceBannerTitle": "Einige Ihrer Schlüssel verwenden Modelle, die zu MaaS migriert werden",
+      "noSubscribedMaasModels": "Sie haben keine aktiven Abonnements für MaaS-Modelle.",
+      "perModelTpmHelp": "Legen Sie Token-pro-Minute-Limits pro Modell fest. Sie gelten unabhängig vom globalen Schlüssellimit.",
+      "reauthBody": "MaaS-Schlüssel werden mit Ihrer eigenen OpenShift-Anmeldung ausgestellt, die abgelaufen ist. Melden Sie sich erneut an, um fortzufahren; Sie kehren zu dieser Seite zurück.",
+      "reauthButton": "Erneut authentifizieren",
+      "reauthTitle": "Erneute Authentifizierung erforderlich",
+      "tpmOnlyNotice": "MaaS-Schlüssel unterstützen nur Token-pro-Minute-Limits (TPM). Budget- und Anfragenratenlimits sind nicht verfügbar."
+    },
+    "migration": {
+      "migratingUntil": "Migration zu MaaS bis {{date}}"
+    }
   }
 }

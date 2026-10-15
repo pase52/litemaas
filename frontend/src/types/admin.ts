@@ -178,3 +178,44 @@ export interface SubscriptionApprovalStats {
   deniedToday: number;
   totalRequests: number;
 }
+
+// ---- RHOAI MaaS backend ----
+
+export interface MaasModelRefInfo {
+  id: string;
+  name: string;
+  namespace: string;
+  displayName?: string;
+  description?: string;
+  phase: 'Pending' | 'Ready' | 'Failed' | 'Unknown';
+  endpoint?: string;
+  targetKind?: string;
+  targetName?: string;
+  imported: boolean;
+}
+
+export interface MaasSyncResult {
+  success: boolean;
+  totalRefs: number;
+  newModels: number;
+  updatedModels: number;
+  unavailableModels: number;
+  cascadeStatistics?: {
+    subscriptionsDeactivated: number;
+    apiKeyModelAssociationsRemoved: number;
+    orphanedApiKeysDeactivated: number;
+  };
+  errors: string[];
+  syncedAt: string;
+}
+
+export interface MigrateToMaasRequest {
+  maasModelRef: { name: string; namespace: string };
+  graceDays?: number;
+}
+
+export interface MigrateToMaasResponse {
+  newModelId: string;
+  migratedSubscriptions: number;
+  graceUntil: string;
+}

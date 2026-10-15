@@ -2105,5 +2105,53 @@
       "roleConflict": "Role Conflict",
       "roleConflictDesc": "Admin and Admin-readonly roles conflict. Admin role will take precedence."
     }
+  },
+  "maas": {
+    "admin": {
+      "deleteMaasNote": "The model is hidden from LiteMaaS and active subscriptions are revoked. The MaaSModelRef on the cluster is not deleted; use \"Sync and restore removed models\" to bring it back.",
+      "graceDays": "Grace period (days)",
+      "graceDaysHelp": "Users keep LiteLLM access to this model for this many days so they can switch their keys.",
+      "managedByCluster": "This model comes from a MaaSModelRef. Endpoint, rate limits and credentials are managed on the cluster; only the metadata below can be edited here.",
+      "managedByClusterTitle": "Managed by the MaaS cluster",
+      "migrateAction": "Migrate to MaaS",
+      "migrateConfirm": "Migrate",
+      "migrateDescription": "Create a MaaS model for \"{{model}}\" from a MaaSModelRef on the cluster and move its active subscriptions. LiteLLM access is kept until the grace period ends.",
+      "migrateError": "Migration failed",
+      "migrateNoRefs": "No available model references found. References that are already imported are not listed.",
+      "migrateRefLabel": "MaaS model reference",
+      "migrateRefPlaceholder": "Select a model reference",
+      "migrateSuccessDesc": "{{count}} subscription(s) moved to MaaS. LiteLLM access stays available until {{date}}.",
+      "migrateSuccessTitle": "Migration started",
+      "migrateTitle": "Migrate to MaaS",
+      "refsLoadFailed": "Failed to load MaaS model references",
+      "syncButton": "Sync MaaS models",
+      "syncError": "MaaS synchronization failed",
+      "syncMoreOptions": "More MaaS sync options",
+      "syncRestore": "Sync and restore removed models",
+      "syncRestoreHelp": "Also bring back MaaS models that were removed by an administrator",
+      "syncSuccessDesc": "{{total}} model references found: {{created}} new, {{updated}} updated, {{unavailable}} unavailable.",
+      "syncSuccessTitle": "MaaS models synchronized"
+    },
+    "backend": {
+      "label": "Backend",
+      "litellm": "LiteLLM",
+      "maas": "MaaS",
+      "maasAria": "Served through Red Hat OpenShift AI MaaS"
+    },
+    "keys": {
+      "backendHelp": "A key works with models of one backend only. Choose the backend first, then select its models.",
+      "backendLabel": "Key backend",
+      "graceBannerItem": "Key \"{{key}}\": {{models}} stay available through LiteLLM until {{date}}. Create a MaaS key for these models before then.",
+      "graceBannerTitle": "Some of your keys use models that are migrating to MaaS",
+      "noSubscribedMaasModels": "You have no active subscriptions to MaaS models.",
+      "perModelTpmHelp": "Set per-model token-per-minute limits. These apply independently of the global key limit.",
+      "reauthBody": "MaaS keys are issued with your own OpenShift login, which has expired. Sign in again to continue; you will return to this page.",
+      "reauthButton": "Re-authenticate",
+      "reauthTitle": "Re-authentication required",
+      "tpmOnlyNotice": "MaaS keys support token-per-minute (TPM) limits only. Budget and request-rate limits are not available."
+    },
+    "migration": {
+      "migratingUntil": "Migrating to MaaS until {{date}}"
+    }
   }
 }

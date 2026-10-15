@@ -1,5 +1,7 @@
 import { apiClient } from './api';
 
+export type BackendType = 'litellm' | 'maas';
+
 // Backend API Model interface
 export interface BackendModel {
   id: string;
@@ -34,6 +36,11 @@ export interface BackendModel {
   supportsTokenize?: boolean;
   supportsConvert?: boolean;
   litellmModelId?: string;
+  // Backend (LiteLLM or RHOAI MaaS) information
+  backendType?: BackendType;
+  maasEndpoint?: string;
+  migrationState?: string | null;
+  migrationGraceUntil?: string | null;
 }
 
 // Frontend Model interface (matching what components expect)
@@ -69,6 +76,11 @@ export interface Model {
   supportsTokenize?: boolean;
   supportsConvert?: boolean;
   litellmModelId?: string;
+  // Backend (LiteLLM or RHOAI MaaS) information
+  backendType?: BackendType;
+  maasEndpoint?: string;
+  migrationState?: string;
+  migrationGraceUntil?: string;
 }
 
 export interface ModelsResponse {
@@ -179,6 +191,10 @@ class ModelsService {
       supportsConvert:
         backendModel.supportsConvert ?? backendModel.capabilities?.includes('convert') ?? false,
       litellmModelId: backendModel.litellmModelId,
+      backendType: backendModel.backendType === 'maas' ? 'maas' : 'litellm',
+      maasEndpoint: backendModel.maasEndpoint || undefined,
+      migrationState: backendModel.migrationState || undefined,
+      migrationGraceUntil: backendModel.migrationGraceUntil || undefined,
     };
   }
 

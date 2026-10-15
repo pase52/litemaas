@@ -60,6 +60,7 @@ import { useNotifications } from '../contexts/NotificationContext';
 import { useErrorHandler } from '../hooks/useErrorHandler';
 import { ApiKey, apiKeysService } from '../services/apiKeys.service';
 import { chatService } from '../services/chat.service';
+import { getModelBaseUrl, getServedModelName } from '../utils/modelBackend';
 import { configService } from '../services/config.service';
 import { Model, modelsService } from '../services/models.service';
 import {
@@ -246,7 +247,11 @@ const ChatbotPage: React.FC = () => {
         console.error('Failed to retrieve full API key:', error);
 
         // Let the error propagate to the caller for proper handling
-        throw new Error(error.message || t('pages.chatbot.errors.keyRetrievalFailedDesc'));
+        const wrapped = new Error(
+          error.message || t('pages.chatbot.errors.keyRetrievalFailedDesc'),
+        ) as Error & { code?: string };
+        wrapped.code = error.code;
+        throw wrapped;
       }
     },
     [fullKeyCache, t, handleError],
@@ -280,8 +285,20 @@ const ChatbotPage: React.FC = () => {
           });
         }
 
+        // MaaS models are addressed by their served name, not the "<ns>/<name>" id
+        const selectedModelInfo = models.find((m) => m.id === configuration.selectedModel);
+        const servedModelName = selectedModelInfo
+          ? getServedModelName(selectedModelInfo)
+          : configuration.selectedModel;
+        // Each key knows its own endpoint (MaaS gateway or LiteLLM)
+        const endpointUrl = getModelBaseUrl(
+          selectedModelInfo,
+          selectedApiKey.baseUrl,
+          litellmApiUrl,
+        );
+
         const request: ChatCompletionRequest = {
-          model: configuration.selectedModel,
+          model: servedModelName,
           messages: requestMessages,
           temperature: configuration.settings.temperature,
           max_tokens: configuration.settings.maxTokens,
@@ -313,7 +330,7 @@ const ChatbotPage: React.FC = () => {
           });
 
           await chatService.sendStreamingMessage(
-            litellmApiUrl,
+            endpointUrl,
             apiKeyToUse,
             request,
             (
@@ -358,7 +375,7 @@ const ChatbotPage: React.FC = () => {
         } else {
           // Handle non-streaming response (original logic)
           const { response, metrics } = await chatService.sendMessage(
-            litellmApiUrl,
+            endpointUrl,
             apiKeyToUse,
             request,
           );
@@ -412,7 +429,16 @@ const ChatbotPage: React.FC = () => {
         setIsSending(false);
       }
     },
-    [messages, selectedApiKey, configuration, litellmApiUrl, retrieveFullKey, t, handleError],
+    [
+      messages,
+      selectedApiKey,
+      configuration,
+      litellmApiUrl,
+      models,
+      retrieveFullKey,
+      t,
+      handleError,
+    ],
   );
 
   // Handle stopping streaming

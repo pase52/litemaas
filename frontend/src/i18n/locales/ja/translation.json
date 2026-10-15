@@ -2105,5 +2105,53 @@
       "roleConflict": "役割の競合",
       "roleConflictDesc": "管理者と管理者（読み取り専用）の役割が競合しています。管理者の役割が優先されます。"
     }
+  },
+  "maas": {
+    "admin": {
+      "deleteMaasNote": "このモデルは LiteMaaS から非表示になり、有効なサブスクリプションは取り消されます。クラスター上の MaaSModelRef は削除されません。元に戻すには「同期して削除済みモデルを復元」を使用してください。",
+      "graceDays": "猶予期間(日)",
+      "graceDaysHelp": "ユーザーがキーを切り替えられるよう、この日数の間は LiteLLM でこのモデルにアクセスできます。",
+      "managedByCluster": "このモデルは MaaSModelRef から取り込まれています。エンドポイント、レート制限、認証情報はクラスターで管理され、ここでは下のメタデータのみ編集できます。",
+      "managedByClusterTitle": "MaaS クラスターで管理されています",
+      "migrateAction": "MaaS へ移行",
+      "migrateConfirm": "移行",
+      "migrateDescription": "クラスター上の MaaSModelRef から「{{model}}」用の MaaS モデルを作成し、有効なサブスクリプションを移動します。猶予期間が終了するまで LiteLLM へのアクセスは維持されます。",
+      "migrateError": "移行に失敗しました",
+      "migrateNoRefs": "利用可能なモデル参照が見つかりません。すでにインポート済みの参照は表示されません。",
+      "migrateRefLabel": "MaaS モデル参照",
+      "migrateRefPlaceholder": "モデル参照を選択",
+      "migrateSuccessDesc": "{{count}} 件のサブスクリプションを MaaS に移動しました。LiteLLM へのアクセスは {{date}} まで利用できます。",
+      "migrateSuccessTitle": "移行を開始しました",
+      "migrateTitle": "MaaS へ移行",
+      "refsLoadFailed": "MaaS モデル参照の読み込みに失敗しました",
+      "syncButton": "MaaS モデルを同期",
+      "syncError": "MaaS の同期に失敗しました",
+      "syncMoreOptions": "その他の MaaS 同期オプション",
+      "syncRestore": "同期して削除済みモデルを復元",
+      "syncRestoreHelp": "管理者が削除した MaaS モデルも復元します",
+      "syncSuccessDesc": "モデル参照 {{total}} 件を検出: 新規 {{created}} 件、更新 {{updated}} 件、利用不可 {{unavailable}} 件。",
+      "syncSuccessTitle": "MaaS モデルを同期しました"
+    },
+    "backend": {
+      "label": "バックエンド",
+      "litellm": "LiteLLM",
+      "maas": "MaaS",
+      "maasAria": "Red Hat OpenShift AI MaaS 経由で提供"
+    },
+    "keys": {
+      "backendHelp": "キーは 1 つのバックエンドのモデルでのみ使用できます。先にバックエンドを選択し、そのモデルを選んでください。",
+      "backendLabel": "キーのバックエンド",
+      "graceBannerItem": "キー「{{key}}」: {{models}} は {{date}} まで LiteLLM で利用できます。それまでにこれらのモデル用の MaaS キーを作成してください。",
+      "graceBannerTitle": "一部のキーは MaaS へ移行中のモデルを使用しています",
+      "noSubscribedMaasModels": "MaaS モデルの有効なサブスクリプションがありません。",
+      "perModelTpmHelp": "モデルごとに 1 分あたりのトークン数の上限を設定します。キー全体の上限とは独立して適用されます。",
+      "reauthBody": "MaaS キーはお客様自身の OpenShift ログインで発行されますが、その有効期限が切れています。続行するには再度サインインしてください。サインイン後にこのページへ戻ります。",
+      "reauthButton": "再認証",
+      "reauthTitle": "再認証が必要です",
+      "tpmOnlyNotice": "MaaS キーでは 1 分あたりのトークン数 (TPM) の制限のみ使用できます。予算およびリクエストレートの制限は利用できません。"
+    },
+    "migration": {
+      "migratingUntil": "{{date}} まで MaaS へ移行中"
+    }
   }
 }

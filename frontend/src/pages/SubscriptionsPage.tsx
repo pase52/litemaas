@@ -47,6 +47,9 @@ import { useCurrency } from '../contexts/ConfigContext';
 import { useErrorHandler } from '../hooks/useErrorHandler';
 import { subscriptionsService, Subscription } from '../services/subscriptions.service';
 import { getModelFlairs } from '../utils/flairColors';
+import { BackendBadge, MigrationLabel } from '../components/common/BackendBadge';
+import { useMaasEnabled } from '../hooks/useMaasEnabled';
+import { modelsService } from '../services/models.service';
 import { extractErrorDetails } from '../utils/error.utils';
 
 const SubscriptionsPage: React.FC = () => {
@@ -124,6 +127,55 @@ const SubscriptionsPage: React.FC = () => {
   useEffect(() => {
     loadSubscriptions();
   }, []);
+
+  // With MaaS enabled, enrich subscriptions with the model's backend / migration info
+  const { maasEnabled } = useMaasEnabled();
+  const [modelBackendInfo, setModelBackendInfo] = useState<
+    Record<string, { backendType?: 'litellm' | 'maas'; migrationState?: string; until?: string }>
+  >({});
+  useEffect(() => {
+    if (!maasEnabled) return;
+    let cancelled = false;
+    modelsService
+      .getModels(1, 1000)
+      .then((res) => {
+        if (cancelled) return;
+        const info: typeof modelBackendInfo = {};
+        for (const m of res.models) {
+          info[m.id] = {
+            backendType: m.backendType,
+            migrationState: m.migrationState,
+            until: m.migrationGraceUntil,
+          };
+        }
+        setModelBackendInfo(info);
+      })
+      .catch((err) => console.warn('Failed to load model backend info:', err));
+    return () => {
+      cancelled = true;
+    };
+  }, [maasEnabled]);
+
+  const renderBackendFlairs = (subscription: Subscription) => {
+    const info = modelBackendInfo[subscription.modelId];
+    const backendType = info?.backendType ?? subscription.backendType;
+    const until = info?.until ?? subscription.migrationGraceUntil;
+    const state = info?.migrationState ?? subscription.migrationState;
+    return (
+      <>
+        {backendType === 'maas' && (
+          <FlexItem>
+            <BackendBadge backendType={backendType} />
+          </FlexItem>
+        )}
+        {until && (
+          <FlexItem>
+            <MigrationLabel migrationState={state} migrationGraceUntil={until} />
+          </FlexItem>
+        )}
+      </>
+    );
+  };
 
   const getStatusBadge = (status: string) => {
     const variants = {
@@ -375,6 +427,7 @@ const SubscriptionsPage: React.FC = () => {
                                   <Label color={color}>{label}</Label>
                                 </FlexItem>
                               ))}
+                              {renderBackendFlairs(subscription)}
                             </Flex>
                           </FlexItem>
                         </Flex>
@@ -512,6 +565,7 @@ const SubscriptionsPage: React.FC = () => {
                           <Label color={color}>{label}</Label>
                         </FlexItem>
                       ))}
+                      {renderBackendFlairs(selectedSubscription)}
                     </Flex>
                   </DescriptionListDescription>
                 </DescriptionListGroup>

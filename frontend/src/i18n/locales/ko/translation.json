@@ -2105,5 +2105,53 @@
       "roleConflict": "역할 충돌",
       "roleConflictDesc": "관리자와 관리자(읽기 전용) 역할이 충돌합니다. 관리자 역할이 우선합니다."
     }
+  },
+  "maas": {
+    "admin": {
+      "deleteMaasNote": "모델이 LiteMaaS에서 숨겨지고 활성 구독이 취소됩니다. 클러스터의 MaaSModelRef는 삭제되지 않으며, \"동기화 및 제거된 모델 복원\"을 사용하여 되돌릴 수 있습니다.",
+      "graceDays": "유예 기간(일)",
+      "graceDaysHelp": "사용자가 키를 전환할 수 있도록 이 일수 동안 이 모델에 대한 LiteLLM 접근이 유지됩니다.",
+      "managedByCluster": "이 모델은 MaaSModelRef에서 가져왔습니다. 엔드포인트, 속도 제한, 자격 증명은 클러스터에서 관리되며 여기서는 아래 메타데이터만 편집할 수 있습니다.",
+      "managedByClusterTitle": "MaaS 클러스터에서 관리됨",
+      "migrateAction": "MaaS로 마이그레이션",
+      "migrateConfirm": "마이그레이션",
+      "migrateDescription": "클러스터의 MaaSModelRef에서 \"{{model}}\"용 MaaS 모델을 만들고 활성 구독을 이동합니다. 유예 기간이 끝날 때까지 LiteLLM 접근이 유지됩니다.",
+      "migrateError": "마이그레이션에 실패했습니다",
+      "migrateNoRefs": "사용 가능한 모델 참조가 없습니다. 이미 가져온 참조는 표시되지 않습니다.",
+      "migrateRefLabel": "MaaS 모델 참조",
+      "migrateRefPlaceholder": "모델 참조를 선택하세요",
+      "migrateSuccessDesc": "구독 {{count}}건이 MaaS로 이동되었습니다. LiteLLM 접근은 {{date}}까지 유지됩니다.",
+      "migrateSuccessTitle": "마이그레이션이 시작되었습니다",
+      "migrateTitle": "MaaS로 마이그레이션",
+      "refsLoadFailed": "MaaS 모델 참조를 불러오지 못했습니다",
+      "syncButton": "MaaS 모델 동기화",
+      "syncError": "MaaS 동기화에 실패했습니다",
+      "syncMoreOptions": "추가 MaaS 동기화 옵션",
+      "syncRestore": "동기화 및 제거된 모델 복원",
+      "syncRestoreHelp": "관리자가 제거한 MaaS 모델도 함께 복원합니다",
+      "syncSuccessDesc": "모델 참조 {{total}}개 발견: 신규 {{created}}개, 업데이트 {{updated}}개, 사용 불가 {{unavailable}}개.",
+      "syncSuccessTitle": "MaaS 모델이 동기화되었습니다"
+    },
+    "backend": {
+      "label": "백엔드",
+      "litellm": "LiteLLM",
+      "maas": "MaaS",
+      "maasAria": "Red Hat OpenShift AI MaaS를 통해 제공됨"
+    },
+    "keys": {
+      "backendHelp": "키는 하나의 백엔드 모델에만 사용할 수 있습니다. 먼저 백엔드를 선택한 다음 해당 모델을 선택하세요.",
+      "backendLabel": "키 백엔드",
+      "graceBannerItem": "키 \"{{key}}\": {{models}}은(는) {{date}}까지 LiteLLM에서 사용할 수 있습니다. 그 전에 이 모델용 MaaS 키를 만드세요.",
+      "graceBannerTitle": "일부 키가 MaaS로 마이그레이션 중인 모델을 사용합니다",
+      "noSubscribedMaasModels": "MaaS 모델에 대한 활성 구독이 없습니다.",
+      "perModelTpmHelp": "모델별 분당 토큰 제한을 설정합니다. 키 전체 제한과 별개로 적용됩니다.",
+      "reauthBody": "MaaS 키는 사용자의 OpenShift 로그인으로 발급되며, 해당 로그인이 만료되었습니다. 계속하려면 다시 로그인하세요. 로그인 후 이 페이지로 돌아옵니다.",
+      "reauthButton": "다시 인증",
+      "reauthTitle": "재인증이 필요합니다",
+      "tpmOnlyNotice": "MaaS 키는 분당 토큰(TPM) 제한만 지원합니다. 예산 및 요청 속도 제한은 사용할 수 없습니다."
+    },
+    "migration": {
+      "migratingUntil": "{{date}}까지 MaaS로 마이그레이션 중"
+    }
   }
 }

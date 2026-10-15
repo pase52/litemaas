@@ -39,6 +39,11 @@ export interface Subscription {
   supportsFunctionCalling?: boolean;
   supportsParallelFunctionCalling?: boolean;
   supportsToolChoice?: boolean;
+
+  // Backend information (RHOAI MaaS); optional, may be enriched by the page from the models list
+  backendType?: 'litellm' | 'maas';
+  migrationState?: string;
+  migrationGraceUntil?: string;
 }
 
 // Backend response interface
@@ -87,6 +92,9 @@ interface BackendSubscriptionDetails {
   modelSupportsFunctionCalling?: boolean;
   modelSupportsParallelFunctionCalling?: boolean;
   modelSupportsToolChoice?: boolean;
+  modelBackendType?: 'litellm' | 'maas';
+  modelMigrationState?: string;
+  modelMigrationGraceUntil?: string;
 }
 
 interface BackendSubscriptionsResponse {
@@ -163,6 +171,12 @@ class SubscriptionsService {
       supportsFunctionCalling: backend.modelSupportsFunctionCalling,
       supportsParallelFunctionCalling: backend.modelSupportsParallelFunctionCalling,
       supportsToolChoice: backend.modelSupportsToolChoice,
+
+      // MaaS model ids have the form "<namespace>/<name>"; LiteLLM ids never contain "/"
+      backendType:
+        backend.modelBackendType ?? (backend.modelId?.includes('/') ? 'maas' : undefined),
+      migrationState: backend.modelMigrationState,
+      migrationGraceUntil: backend.modelMigrationGraceUntil,
     };
   }
 

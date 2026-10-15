@@ -6,6 +6,10 @@ import type {
   AdminModelError,
   TestModelConfigRequest,
   TestModelConfigResponse,
+  MaasModelRefInfo,
+  MaasSyncResult,
+  MigrateToMaasRequest,
+  MigrateToMaasResponse,
 } from '../types/admin';
 
 export class AdminModelsService {
@@ -78,6 +82,30 @@ export class AdminModelsService {
         statusCode: error.response?.status || 500,
       } as AdminModelError;
     }
+  }
+
+  /** Import/refresh models from MaaSModelRef objects on the cluster. */
+  async syncMaasModels(restoreRemoved = false): Promise<MaasSyncResult> {
+    return apiClient.post<MaasSyncResult>(`${this.basePath}/maas/sync`, { restoreRemoved });
+  }
+
+  /** List MaaSModelRefs available on the cluster (for the migrate picker). */
+  async getMaasRefs(): Promise<MaasModelRefInfo[]> {
+    const response = await apiClient.get<{ data: MaasModelRefInfo[] }>(
+      `${this.basePath}/maas/refs`,
+    );
+    return response.data ?? [];
+  }
+
+  /** Migrate a LiteLLM model to a MaaS model reference, with a grace period. */
+  async migrateToMaas(
+    modelId: string,
+    request: MigrateToMaasRequest,
+  ): Promise<MigrateToMaasResponse> {
+    return apiClient.post<MigrateToMaasResponse>(
+      `${this.basePath}/${encodeURIComponent(modelId)}/migrate-to-maas`,
+      request,
+    );
   }
 }
 
