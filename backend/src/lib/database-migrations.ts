@@ -173,6 +173,29 @@ CREATE INDEX IF NOT EXISTS idx_models_litellm_model_id ON models(litellm_model_i
 CREATE INDEX IF NOT EXISTS idx_models_restricted_access ON models(restricted_access);
 
 COMMENT ON COLUMN models.restricted_access IS 'When true, subscriptions require admin approval';
+
+-- MaaS (RHOAI Models-as-a-Service) backend support
+ALTER TABLE models ADD COLUMN IF NOT EXISTS backend_type VARCHAR(20) NOT NULL DEFAULT 'litellm';
+ALTER TABLE models ADD COLUMN IF NOT EXISTS maas_model_ref_name VARCHAR(255);
+ALTER TABLE models ADD COLUMN IF NOT EXISTS maas_model_ref_namespace VARCHAR(255);
+ALTER TABLE models ADD COLUMN IF NOT EXISTS maas_endpoint TEXT;
+ALTER TABLE models ADD COLUMN IF NOT EXISTS maas_phase VARCHAR(20);
+ALTER TABLE models ADD COLUMN IF NOT EXISTS migration_state VARCHAR(20);
+ALTER TABLE models ADD COLUMN IF NOT EXISTS migration_grace_until TIMESTAMP WITH TIME ZONE;
+ALTER TABLE models ADD COLUMN IF NOT EXISTS migrated_from_litellm_id VARCHAR(255);
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'models_backend_type_check') THEN
+        ALTER TABLE models ADD CONSTRAINT models_backend_type_check CHECK (backend_type IN ('litellm', 'maas'));
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_models_backend_type ON models(backend_type);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_models_maas_model_ref
+    ON models(maas_model_ref_namespace, maas_model_ref_name)
+    WHERE maas_model_ref_name IS NOT NULL;
+
+COMMENT ON COLUMN models.backend_type IS 'Backend serving this model: litellm (default) or maas (RHOAI Models-as-a-Service)';
 `;
 
 // Subscriptions table
@@ -299,6 +322,28 @@ ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS model_tpm_limit JSONB;
 -- Archived keys: hidden from user view, preserved for audit trail
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP WITH TIME ZONE;
 CREATE INDEX IF NOT EXISTS idx_api_keys_archived_at ON api_keys(archived_at);
+
+-- MaaS (RHOAI Models-as-a-Service) backend support: each key is bound to exactly one backend
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS backend_type VARCHAR(20) NOT NULL DEFAULT 'litellm';
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS maas_key_id VARCHAR(255);
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS maas_subscription_name VARCHAR(255);
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS encrypted_key TEXT;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS maas_sync_state VARCHAR(20);
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS maas_last_error TEXT;
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'api_keys_backend_type_check') THEN
+        ALTER TABLE api_keys ADD CONSTRAINT api_keys_backend_type_check CHECK (backend_type IN ('litellm', 'maas'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'api_keys_maas_sync_state_check') THEN
+        ALTER TABLE api_keys ADD CONSTRAINT api_keys_maas_sync_state_check CHECK (maas_sync_state IS NULL OR maas_sync_state IN ('synced', 'pending', 'error'));
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_backend_type ON api_keys(backend_type);
+CREATE INDEX IF NOT EXISTS idx_api_keys_maas_sync_state ON api_keys(maas_sync_state) WHERE maas_sync_state IS NOT NULL;
+
+COMMENT ON COLUMN api_keys.encrypted_key IS 'AES-256-GCM encrypted plaintext key (MaaS keys only, so View Key keeps working)';
 `;
 
 // API Key Models junction table
@@ -791,6 +836,22 @@ VALUES ('user_defaults', '{}')
 ON CONFLICT (key) DO NOTHING;
 `;
 
+// Per-user OAuth access tokens (encrypted), used to create MaaS keys on behalf of the user
+export const userOAuthTokensTable = `
+CREATE TABLE IF NOT EXISTS user_oauth_tokens (
+    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    encrypted_access_token TEXT NOT NULL,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    scope TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_oauth_tokens_expires_at ON user_oauth_tokens(expires_at);
+
+COMMENT ON TABLE user_oauth_tokens IS 'Encrypted OAuth access tokens captured at login (only when MAAS_ENABLED=true)';
+`;
+
 // Main migration function
 export const applyMigrations = async (dbUtils: DatabaseUtils) => {
   console.log('🚀 Starting database migrations...');
@@ -878,6 +939,9 @@ export const applyMigrations = async (dbUtils: DatabaseUtils) => {
         AND revoked_at IS NULL
         AND id NOT IN (SELECT DISTINCT api_key_id FROM api_key_models)
     `);
+
+    console.log('🔐 Creating user_oauth_tokens table...');
+    await dbUtils.query(userOAuthTokensTable);
 
     console.log('✅ Database migrations completed successfully!');
   } catch (error) {

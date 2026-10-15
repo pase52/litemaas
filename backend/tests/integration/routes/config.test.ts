@@ -184,6 +184,8 @@ describe('Config Routes Integration', () => {
         'authMode',
         'litellmApiUrl',
         'currency',
+        'maasEnabled',
+        'maasGatewayUrl',
       ];
 
       // Check that all fields in response are allowed

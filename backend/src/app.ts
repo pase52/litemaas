@@ -16,6 +16,7 @@ import {
 import oauthPlugin from './plugins/oauth';
 import sessionPlugin from './plugins/session';
 import rbacPlugin from './plugins/rbac';
+import backendsPlugin from './plugins/backends';
 import errorHandlerPlugin from './middleware/error-handler';
 import authHooksPlugin from './middleware/auth-hooks';
 import routes from './routes';
@@ -92,6 +93,7 @@ export const createApp = async (opts: { logger?: boolean } = {}): Promise<Fastif
   await fastify.register(oauthPlugin);
   await fastify.register(sessionPlugin);
   await fastify.register(rbacPlugin);
+  await fastify.register(backendsPlugin);
   await fastify.register(authHooksPlugin);
   await fastify.register(subscriptionHooksPlugin);
   await fastify.register(rateLimitPlugin);

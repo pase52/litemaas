@@ -8,6 +8,7 @@ import { litellmConfig } from '../config/litellm.js';
 import { ConfigResponseSchema, type ConfigResponse } from '../schemas/config';
 import { SettingsService } from '../services/settings.service';
 import { ApiKeyQuotaDefaultsSchema } from '../schemas/settings';
+import { getMaasConfig } from '../services/maas/maas-config';
 
 /**
  * Configuration Routes
@@ -53,6 +54,7 @@ export default async function configRoutes(fastify: FastifyInstance) {
         process.env.OAUTH_MOCK_ENABLED === 'true' || process.env.NODE_ENV === 'development';
 
       const currency = await settingsService.getCurrencySettings();
+      const maas = getMaasConfig(fastify.config);
 
       const config: ConfigResponse = {
         version: appVersion,
@@ -69,6 +71,9 @@ export default async function configRoutes(fastify: FastifyInstance) {
         litellmApiUrl: litellmConfig.apiUrl,
         authMode: isMockEnabled ? 'mock' : 'oauth',
         authProvider: fastify.config.AUTH_PROVIDER || 'openshift',
+        // MaaS backend (false / undefined gateway when disabled)
+        maasEnabled: maas.enabled,
+        ...(maas.enabled && maas.gatewayUrl ? { maasGatewayUrl: maas.gatewayUrl } : {}),
       };
     },
   });

@@ -3,6 +3,8 @@ import { Static } from '@sinclair/typebox';
 import { AuthenticatedRequest } from '../types';
 import { LoginResponseSchema, AuthCallbackQuerySchema, TokenResponseSchema } from '../schemas';
 import { ApplicationError } from '../utils/errors';
+import { UserTokenService } from '../services/maas/user-token.service';
+import { getMaasConfig } from '../services/maas/maas-config';
 
 const DEV_ALLOWED_ENVS = ['development', 'test'];
 const hideDevEndpoints = !DEV_ALLOWED_ENVS.includes(process.env.NODE_ENV || '');
@@ -27,6 +29,10 @@ interface DevTokenRequestBody {
  * - GET /mock-users - Development only
  */
 const authRoutes: FastifyPluginAsync = async (fastify) => {
+  // User OAuth token capture is only active when the MaaS backend is enabled
+  const maasEnabled = getMaasConfig(fastify.config).enabled;
+  const userTokenService = maasEnabled ? new UserTokenService(fastify) : null;
+
   // OAuth login initiation
   fastify.post<{
     Reply: Static<typeof LoginResponseSchema>;
@@ -295,6 +301,24 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
           });
         }
 
+        // Keep the user's own access token (encrypted) so MaaS API keys can be created as them.
+        // Failure here must never block login: the user is just asked to re-login on demand.
+        if (userTokenService) {
+          try {
+            await userTokenService.storeToken(
+              user.id,
+              tokenResponse.access_token,
+              tokenResponse.expires_in,
+              tokenResponse.scope,
+            );
+          } catch (tokenError) {
+            fastify.log.warn(
+              { userId: user.id, error: (tokenError as Error).message },
+              'Failed to store user OAuth token for MaaS',
+            );
+          }
+        }
+
         // Create audit log
         await fastify.dbUtils.query(
           `INSERT INTO audit_logs (user_id, action, resource_type, ip_address, user_agent, metadata)
@@ -384,6 +408,18 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
       const user = (request as AuthenticatedRequest).user;
 
       try {
+        // Drop the stored OAuth token (best effort)
+        if (userTokenService) {
+          try {
+            await userTokenService.clearToken(user.userId);
+          } catch (tokenError) {
+            fastify.log.warn(
+              { userId: user.userId, error: (tokenError as Error).message },
+              'Failed to clear stored user OAuth token on logout',
+            );
+          }
+        }
+
         // Create audit log
         await fastify.dbUtils.query(
           `INSERT INTO audit_logs (user_id, action, resource_type, ip_address, user_agent)

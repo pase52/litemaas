@@ -258,6 +258,12 @@ export class OAuthService extends BaseService {
   }
 
   private getScopes(): string {
+    // OAUTH_SCOPES overrides the defaults for both providers (e.g. adding a scope that makes
+    // the access token acceptable to maas-api)
+    const overrideScopes = this.fastify.config.OAUTH_SCOPES?.trim();
+    if (overrideScopes) {
+      return overrideScopes;
+    }
     if (this.authProvider === 'oidc') {
       const customScopes = this.fastify.config.OIDC_SCOPES;
       return customScopes || 'openid profile email';

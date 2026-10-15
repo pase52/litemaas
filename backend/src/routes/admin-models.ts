@@ -15,7 +15,7 @@ import {
   AdminTestModelConfigSchema,
   AdminTestModelConfigResponseSchema,
 } from '../schemas/admin-models.js';
-import { encryptApiKey, decryptApiKey } from '../utils/encryption.js';
+import { encryptApiKey, decryptApiKey, getEncryptionKey } from '../utils/encryption.js';
 
 interface ModelRow {
   litellm_model_id: string;
@@ -60,7 +60,7 @@ const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
           [model_id],
         );
         if (result?.encrypted_api_key) {
-          const encKey = fastify.config.LITELLM_MASTER_KEY || fastify.config.LITELLM_API_KEY;
+          const encKey = getEncryptionKey(fastify.config);
           if (encKey) {
             apiKey = decryptApiKey(result.encrypted_api_key, encKey);
           }
@@ -397,8 +397,7 @@ const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
 
           // Store encrypted API key if provided
           if (api_key) {
-            const encryptionKey =
-              fastify.config.LITELLM_MASTER_KEY || fastify.config.LITELLM_API_KEY;
+            const encryptionKey = getEncryptionKey(fastify.config);
             if (encryptionKey) {
               const encrypted = encryptApiKey(api_key, encryptionKey);
               await fastify.dbUtils.query(
@@ -607,8 +606,7 @@ const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
 
           // Store encrypted API key if provided
           if (updateData.api_key) {
-            const encryptionKey =
-              fastify.config.LITELLM_MASTER_KEY || fastify.config.LITELLM_API_KEY;
+            const encryptionKey = getEncryptionKey(fastify.config);
             if (encryptionKey) {
               const encrypted = encryptApiKey(updateData.api_key, encryptionKey);
               await fastify.dbUtils.query(

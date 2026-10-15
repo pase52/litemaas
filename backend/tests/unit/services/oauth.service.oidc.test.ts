@@ -413,6 +413,26 @@ describe('OAuthService - OIDC Specific Tests', () => {
       expect(url.searchParams.get('scope')).toBe('openid profile email groups roles');
     });
 
+    it('should let OAUTH_SCOPES take precedence over OIDC_SCOPES', async () => {
+      const customMockFastify = createMockFastifyOIDC({
+        OIDC_SCOPES: 'openid profile email',
+        OAUTH_SCOPES: 'openid profile email groups',
+      });
+      const customService = new OAuthService(
+        customMockFastify,
+        mockLiteLLMService,
+        mockDefaultTeamService,
+      );
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => createMockOIDCDiscovery(),
+      } as Response);
+
+      const result = await customService.generateAuthUrl('test-state');
+
+      expect(new URL(result.url).searchParams.get('scope')).toBe('openid profile email groups');
+    });
+
     it('should use default OIDC scopes when OIDC_SCOPES not configured', async () => {
       const customMockFastify = createMockFastifyOIDC({
         OIDC_SCOPES: undefined,
@@ -488,6 +508,32 @@ describe('OAuthService - OIDC Specific Tests', () => {
 
       const url = new URL(result.url);
       expect(url.searchParams.get('scope')).toBe('user:info user:check-access');
+    });
+
+    it('should let OAUTH_SCOPES override the OpenShift scopes', async () => {
+      const openshiftFastify = createMockFastifyOpenShift({ OAUTH_SCOPES: 'user:full' });
+      const openshiftService = new OAuthService(
+        openshiftFastify,
+        mockLiteLLMService,
+        mockDefaultTeamService,
+      );
+
+      const result = await openshiftService.generateAuthUrl('test-state');
+
+      expect(new URL(result.url).searchParams.get('scope')).toBe('user:full');
+    });
+
+    it('should ignore a blank OAUTH_SCOPES', async () => {
+      const openshiftFastify = createMockFastifyOpenShift({ OAUTH_SCOPES: '   ' });
+      const openshiftService = new OAuthService(
+        openshiftFastify,
+        mockLiteLLMService,
+        mockDefaultTeamService,
+      );
+
+      const result = await openshiftService.generateAuthUrl('test-state');
+
+      expect(new URL(result.url).searchParams.get('scope')).toBe('user:info user:check-access');
     });
   });
 

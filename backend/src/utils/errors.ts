@@ -37,6 +37,8 @@ export enum ErrorCode {
   // External Services (5xx)
   EXTERNAL_SERVICE_ERROR = 'EXTERNAL_SERVICE_ERROR',
   LITELLM_ERROR = 'LITELLM_ERROR',
+  MAAS_ERROR = 'MAAS_ERROR',
+  MAAS_REAUTH_REQUIRED = 'MAAS_REAUTH_REQUIRED',
   DATABASE_ERROR = 'DATABASE_ERROR',
 
   // System Errors (5xx)
@@ -323,6 +325,49 @@ export class ApplicationError extends Error {
       retryable,
       retryAfter: retryable ? 30 : undefined,
       maxRetries: retryable ? 3 : 0,
+    });
+  }
+
+  /**
+   * Factory method for MaaS (maas-api / Kubernetes / Prometheus) upstream errors
+   */
+  static maasError(
+    message: string,
+    upstreamStatus?: number,
+    upstreamMessage?: string,
+    retryable: boolean = true,
+  ): ApplicationError {
+    return new ApplicationError({
+      code: ErrorCode.MAAS_ERROR,
+      statusCode: 502,
+      message,
+      details: {
+        service: 'maas',
+        upstreamStatus,
+        upstreamMessage,
+        suggestion: retryable
+          ? 'The MaaS backend is temporarily unavailable. Please try again'
+          : 'MaaS backend error. Please contact support',
+      },
+      retryable,
+      retryAfter: retryable ? 30 : undefined,
+      maxRetries: retryable ? 3 : 0,
+    });
+  }
+
+  /**
+   * The user's stored OAuth token is missing, expired or rejected by maas-api.
+   * Deliberately NOT a 401: the frontend treats 401 as "session expired" and logs the user out.
+   */
+  static maasReauthRequired(reason?: string): ApplicationError {
+    return new ApplicationError({
+      code: ErrorCode.MAAS_REAUTH_REQUIRED,
+      statusCode: 403,
+      message: 'Your OpenShift session has expired. Please log in again to manage MaaS API keys',
+      details: {
+        reason,
+        suggestion: 'Log out and log in again, then retry the operation',
+      },
     });
   }
 

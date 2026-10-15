@@ -200,6 +200,8 @@ const ERROR_CODE_TO_STATUS_CODE: Record<ErrorCode, number> = {
   [ErrorCode.BUDGET_EXCEEDED]: 403,
   [ErrorCode.EXTERNAL_SERVICE_ERROR]: 502,
   [ErrorCode.LITELLM_ERROR]: 502,
+  [ErrorCode.MAAS_ERROR]: 502,
+  [ErrorCode.MAAS_REAUTH_REQUIRED]: 403,
   [ErrorCode.DATABASE_ERROR]: 500,
   [ErrorCode.INTERNAL_ERROR]: 500,
   [ErrorCode.SERVICE_UNAVAILABLE]: 503,
@@ -241,6 +243,7 @@ export function isRetryableErrorCode(errorCode: ErrorCode): boolean {
   const retryableErrors = [
     ErrorCode.EXTERNAL_SERVICE_ERROR,
     ErrorCode.LITELLM_ERROR,
+    ErrorCode.MAAS_ERROR,
     ErrorCode.SERVICE_UNAVAILABLE,
     ErrorCode.TIMEOUT,
     ErrorCode.RATE_LIMITED,

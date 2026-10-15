@@ -5,6 +5,22 @@ const AUTH_TAG_LENGTH = 16;
 const ALGORITHM = 'aes-256-gcm';
 
 /**
+ * Resolve the secret used to encrypt/decrypt stored credentials (model provider keys,
+ * MaaS API keys, user OAuth tokens).
+ *
+ * Precedence: ENCRYPTION_KEY, then LITELLM_MASTER_KEY, then LITELLM_API_KEY. When
+ * ENCRYPTION_KEY is not set the result is identical to the value historically used by
+ * admin-models, so existing encrypted data stays readable.
+ */
+export function getEncryptionKey(config: {
+  ENCRYPTION_KEY?: string;
+  LITELLM_MASTER_KEY?: string;
+  LITELLM_API_KEY?: string;
+}): string | undefined {
+  return config.ENCRYPTION_KEY || config.LITELLM_MASTER_KEY || config.LITELLM_API_KEY || undefined;
+}
+
+/**
  * Derive a 256-bit AES key from an encryption key string using SHA-256.
  */
 function deriveKey(encryptionKey: string): Buffer {

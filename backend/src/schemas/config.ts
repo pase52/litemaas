@@ -34,6 +34,12 @@ export const ConfigResponseSchema = Type.Object(
         description: 'LiteLLM API base URL (legacy field)',
       }),
     ),
+    maasEnabled: Type.Optional(
+      Type.Boolean({ description: 'Whether the RHOAI MaaS backend is enabled' }),
+    ),
+    maasGatewayUrl: Type.Optional(
+      Type.String({ description: 'Base URL of the MaaS inference gateway (when MaaS is enabled)' }),
+    ),
     authMode: Type.Optional(
       Type.Union([Type.Literal('oauth'), Type.Literal('mock')], {
         description: 'Authentication mode (legacy field)',

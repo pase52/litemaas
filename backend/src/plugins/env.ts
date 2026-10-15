@@ -32,6 +32,8 @@ const envSchema = Type.Object({
   K8S_API_SKIP_TLS_VERIFY: Type.Optional(Type.String()),
   OIDC_GROUPS_CLAIM: Type.String({ default: 'groups' }),
   OIDC_SCOPES: Type.Optional(Type.String()),
+  // Overrides the OAuth scopes requested at login (both providers). Needed for MaaS token capture.
+  OAUTH_SCOPES: Type.Optional(Type.String()),
 
   // Redis (optional — used to flush LiteLLM's cache after model CRUD)
   REDIS_HOST: Type.Optional(Type.String()),
@@ -45,6 +47,24 @@ const envSchema = Type.Object({
   LITELLM_TIMEOUT: Type.String({ default: '30000' }),
   LITELLM_RETRIES: Type.String({ default: '3' }),
   LITELLM_RETRY_DELAY: Type.String({ default: '1000' }),
+
+  // Secrets encryption (MaaS keys, user tokens). Falls back to LITELLM_MASTER_KEY / LITELLM_API_KEY.
+  ENCRYPTION_KEY: Type.Optional(Type.String()),
+
+  // MaaS (RHOAI Models-as-a-Service) backend - all optional, disabled by default
+  MAAS_ENABLED: Type.String({ default: 'false' }),
+  MAAS_API_URL: Type.Optional(Type.String()),
+  MAAS_GATEWAY_URL: Type.Optional(Type.String()),
+  MAAS_NAMESPACE: Type.String({ default: 'models-as-a-service' }),
+  MAAS_MODEL_NAMESPACES: Type.Optional(Type.String()), // comma-separated; empty = all namespaces
+  MAAS_SYNC_INTERVAL_MS: Type.String({ default: '300000' }),
+  MAAS_RECONCILE_INTERVAL_MS: Type.String({ default: '300000' }),
+  MAAS_MIGRATION_GRACE_DAYS: Type.String({ default: '14' }),
+  K8S_API_URL: Type.Optional(Type.String()),
+  K8S_TOKEN: Type.Optional(Type.String()),
+  PROMETHEUS_URL: Type.Optional(Type.String()),
+  PROMETHEUS_TOKEN: Type.Optional(Type.String()),
+  PROMETHEUS_SKIP_TLS_VERIFY: Type.Optional(Type.String()),
 
   // Usage Cache
   USAGE_CACHE_TTL_MINUTES: Type.String({ default: '5' }),

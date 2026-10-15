@@ -57,6 +57,8 @@ export interface ErrorDetails {
   service?: string; // External service name (e.g., 'litellm', 'openshift')
   upstreamCode?: string; // Original error code from external service
   upstreamMessage?: string; // Original error message from external service
+  upstreamStatus?: number; // Original HTTP status from external service
+  reason?: string; // Machine-readable reason (e.g., why re-authentication is required)
 
   // Rate limiting details
   rateLimitValue?: number; // Rate limit value

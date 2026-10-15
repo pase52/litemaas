@@ -31,6 +31,7 @@ declare module 'fastify' {
       K8S_API_SKIP_TLS_VERIFY?: string;
       OIDC_GROUPS_CLAIM: string;
       OIDC_SCOPES?: string;
+      OAUTH_SCOPES?: string;
 
       // Redis (optional)
       REDIS_HOST?: string;
@@ -44,6 +45,24 @@ declare module 'fastify' {
       LITELLM_TIMEOUT: string;
       LITELLM_RETRIES: string;
       LITELLM_RETRY_DELAY: string;
+
+      // Secrets encryption
+      ENCRYPTION_KEY?: string;
+
+      // MaaS (RHOAI Models-as-a-Service)
+      MAAS_ENABLED: string;
+      MAAS_API_URL?: string;
+      MAAS_GATEWAY_URL?: string;
+      MAAS_NAMESPACE: string;
+      MAAS_MODEL_NAMESPACES?: string;
+      MAAS_SYNC_INTERVAL_MS: string;
+      MAAS_RECONCILE_INTERVAL_MS: string;
+      MAAS_MIGRATION_GRACE_DAYS: string;
+      K8S_API_URL?: string;
+      K8S_TOKEN?: string;
+      PROMETHEUS_URL?: string;
+      PROMETHEUS_TOKEN?: string;
+      PROMETHEUS_SKIP_TLS_VERIFY?: string;
 
       // Usage Cache
       USAGE_CACHE_TTL_MINUTES: string;
@@ -71,6 +90,11 @@ declare module 'fastify' {
 
     // LiteLLM Service
     liteLLMService: import('../services/litellm.service').LiteLLMService;
+
+    // Per-model backend registry (litellm / maas)
+    backends: import('../services/backends/backend-registry').BackendRegistry;
+    // MaaS clients (undefined unless MAAS_ENABLED=true)
+    maasClients: import('../services/maas/maas-clients').MaasClients | undefined;
   }
 }
 
