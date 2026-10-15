@@ -172,9 +172,8 @@ class SubscriptionsService {
       supportsParallelFunctionCalling: backend.modelSupportsParallelFunctionCalling,
       supportsToolChoice: backend.modelSupportsToolChoice,
 
-      // MaaS model ids have the form "<namespace>/<name>"; LiteLLM ids never contain "/"
-      backendType:
-        backend.modelBackendType ?? (backend.modelId?.includes('/') ? 'maas' : undefined),
+      // Never infer the backend from the id: LiteLLM model names may contain "/" too
+      backendType: backend.modelBackendType,
       migrationState: backend.modelMigrationState,
       migrationGraceUntil: backend.modelMigrationGraceUntil,
     };
