@@ -2117,7 +2117,7 @@
       "migrateConfirm": "Migrate",
       "migrateDescription": "Create a MaaS model for \"{{model}}\" from a MaaSModelRef on the cluster and move its active subscriptions. LiteLLM access is kept until the grace period ends.",
       "migrateError": "Migration failed",
-      "migrateNoRefs": "No available model references found. References that are already imported are not listed.",
+      "migrateNoRefs": "No MaaS model references found on the cluster.",
       "migrateRefLabel": "MaaS model reference",
       "migrateRefPlaceholder": "Select a model reference",
       "migrateSuccessDesc": "{{count}} subscription(s) moved to MaaS. LiteLLM access stays available until {{date}}.",
@@ -2152,6 +2152,9 @@
     },
     "migration": {
       "migratingUntil": "Migrating to MaaS until {{date}}"
+    },
+    "budget": {
+      "estimatedSpend": "MaaS usage this month (estimated, not counted against the budget): {{amount}} for {{tokens}} tokens"
     }
   }
 }

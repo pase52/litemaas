@@ -78,10 +78,12 @@ const SA_DIR = '/var/run/secrets/kubernetes.io/serviceaccount';
  * Build a CA bundle for cluster-internal HTTPS endpoints: the in-cluster service account CA
  * (ca.crt) and the OpenShift service CA (service-ca.crt), on top of the system roots (Node's
  * `ca` option replaces the defaults, so they must be re-added to keep public CAs working).
+ * The file named by NODE_EXTRA_CA_CERTS (if any) is appended too.
  * Returns undefined when no cluster CA file is readable (not running in-cluster).
  */
 export function loadClusterCaBundle(
   readFile: (path: string) => string = (p) => readFileSync(p, 'utf-8'),
+  extraCaFile: string | undefined = process.env.NODE_EXTRA_CA_CERTS,
 ): string[] | undefined {
   const extra: string[] = [];
   for (const file of ['ca.crt', 'service-ca.crt']) {
@@ -92,5 +94,16 @@ export function loadClusterCaBundle(
       // not present
     }
   }
-  return extra.length ? [...rootCertificates, ...extra] : undefined;
+  if (!extra.length) return undefined;
+  // Passing `ca` replaces Node's default store, which would silently drop NODE_EXTRA_CA_CERTS
+  // (e.g. the OpenShift trusted CA bundle holding the ingress CA that signs the maas-api route).
+  if (extraCaFile) {
+    try {
+      const pem = readFile(extraCaFile);
+      if (pem) extra.push(pem);
+    } catch {
+      // not readable: keep the cluster CAs only
+    }
+  }
+  return [...rootCertificates, ...extra];
 }

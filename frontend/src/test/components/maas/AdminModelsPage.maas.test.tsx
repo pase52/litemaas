@@ -38,7 +38,15 @@ vi.mock('../../../services/adminModels.service', () => ({
     syncMaasModels: vi.fn(() => Promise.resolve({ success: true, totalRefs: 1, errors: [] })),
     getMaasRefs: vi.fn(),
     migrateToMaas: vi.fn(() =>
-      Promise.resolve({ newModelId: 'ns/x', migratedSubscriptions: 2, graceUntil: '2030-01-01' }),
+      Promise.resolve({
+        oldModelId: 'gpt-4',
+        newModelId: 'ns/x',
+        created: true,
+        subscriptionsCopied: 2,
+        usersNotified: 2,
+        policyFailures: 0,
+        graceUntil: '2030-01-01',
+      }),
     ),
   },
 }));
@@ -190,8 +198,8 @@ describe('AdminModelsPage with the MaaS backend', () => {
 
     const dialog = await screen.findByRole('dialog');
     const select = dialog.querySelector('#migrate-ref') as HTMLSelectElement;
-    // Already imported references are not selectable
-    expect(within(select).queryByText(/a\/imported/)).not.toBeInTheDocument();
+    // Already imported references stay selectable (startup sync imports every ref)
+    expect(within(select).getByText(/a\/imported/)).toBeInTheDocument();
     await user.selectOptions(select, 'maas-demo/new-ref');
     await user.click(within(dialog).getByRole('button', { name: 'Migrate' }));
 

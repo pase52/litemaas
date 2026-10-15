@@ -440,3 +440,14 @@ Uses busybox on Kubernetes, OpenShift tools image on OpenShift.
       memory: "128Mi"
       cpu: "100m"
 {{- end }}
+
+{{/*
+MaaS: whether the trusted CA bundle is mounted into the backend ("true" or empty).
+On OpenShift the bundle is injected into a chart-managed ConfigMap; elsewhere an existing
+ConfigMap (key ca-bundle.crt) must be provided.
+*/}}
+{{- define "litemaas.maas.trustedCa" -}}
+{{- if and .Values.maas.enabled .Values.maas.trustedCaBundle.enabled (or (eq .Values.global.platform "openshift") .Values.maas.trustedCaBundle.existingConfigMap) -}}
+true
+{{- end -}}
+{{- end -}}

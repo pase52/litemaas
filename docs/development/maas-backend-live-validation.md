@@ -1,659 +1,954 @@
-# MaaS Backend - Live Validation Checklist
+# MaaS Backend: Live Validation Runbook (RHOAI 3.5.x)
 
-The MaaS (RHOAI Models-as-a-Service) backend was built without access to a cluster running the
-MaaS stack (RHOAI 3.4/3.5, `maas.opendatahub.io/v1alpha1`). Everything below is an **assumption**
-that must be verified against a real cluster before enabling `MAAS_ENABLED=true` in production.
-Each section states the assumption, how the code relies on it, how to verify it, and what to change
-if it is wrong.
+This runbook is for the engineer or agent who first runs the LiteMaaS MaaS backend on a real Red Hat
+OpenShift AI 3.5.x cluster with the Models-as-a-Service stack installed.
 
-Conventions: `$MAAS_API` is `MAAS_API_URL` (for example `https://maas.apps.example.com/maas-api`),
-`$TOKEN` is an OpenShift user token (`oc whoami -t`), `$NS` is `models-as-a-service`.
+The backend (`MAAS_ENABLED=true`, see [MaaS backend](../features/maas-backend.md)) was built and
+tested against **mocks only**: an in-memory Kubernetes API, a mock maas-api and a mock Prometheus.
+Every statement below about cluster behavior is an **assumption** taken from the RHOAI 3.4/3.5
+documentation.
 
-Without `MAAS_API_URL`, `K8S_API_URL`/in-cluster credentials or `PROMETHEUS_URL`, the
-corresponding client runs in **mock mode** (in-memory, dev/test only; production returns 503).
-Mock mode must never be used for validation.
+Each assumption has an ID (`A1`–`A31`, plus `F1`–`F3` for the frontend). Code comments and other docs
+refer to these IDs, so keep them stable. Every entry follows the same layout:
 
-This file is appended to by every implementation phase. Phase 0/1 assumptions come first.
+- **Assumption**: what the code expects.
+- **Verify**: exact commands to run.
+- **Expected**: the result that confirms the assumption.
+- **If different**: which file and function to change.
+
+Work through the phases in order. Phase A needs no LiteMaaS at all, and its findings decide whether
+code changes are needed before deploying. At the end, run the
+[end-to-end acceptance test](#phase-e-end-to-end-acceptance) and fill in the
+[results log](#results-log).
 
 ---
 
-## A1. The LiteMaaS login token is accepted by maas-api (scope / audience)
+## 0. Prerequisites
 
-**Assumption.** The OpenShift OAuth access token obtained at LiteMaaS login (default scopes
-`user:info user:check-access`) is accepted by maas-api as the caller identity, i.e. maas-api
-validates it with TokenReview / the user API and does not require a broader scope such as
-`user:full`.
+### Cluster and access
 
-**Code relying on it.** `routes/auth.ts` stores `access_token` (encrypted) in `user_oauth_tokens`;
-`UserTokenService.getValidToken()` hands it to `MaasApiClient.createKey()` as
-`Authorization: Bearer <token>`.
+- OpenShift 4.16 or later with RHOAI 3.5.x, the MaaS component enabled, and its gateway
+  (`maas-default-gateway`), maas-api, Authorino and Limitador running.
+- At least one model served through MaaS: an `LLMInferenceService` (or `ExternalModel`) plus a
+  `MaaSModelRef` in status `Ready`.
+- You need `cluster-admin` for RBAC and to read the `models-as-a-service` namespace.
+- Two OpenShift users: an **admin** (in `litemaas-admins`) and a **regular user**. Their logins must
+  work through the identity provider LiteMaaS will use.
+- Tools: `oc`, `curl`, `jq`, `helm` (3.12 or later), and a browser.
+
+### Shell variables used throughout
+
+```bash
+export DOMAIN=$(oc get ingresses.config cluster -o jsonpath='{.spec.domain}')   # apps.<cluster>
+export NS=models-as-a-service                                 # MAAS_NAMESPACE
+export LM_NS=litemaas                                         # LiteMaaS namespace
+export RELEASE=litemaas                                       # Helm release name
+export SA=system:serviceaccount:$LM_NS:$RELEASE               # Helm: SA = release fullname
+#        (Kustomize: system:serviceaccount:$LM_NS:litemaas-backend)
+export MAAS_API=https://maas.$DOMAIN/maas-api                 # confirm with the route below
+export GATEWAY=https://maas.$DOMAIN                           # confirm with the gateway below
+export PROM=https://thanos-querier.openshift-monitoring.svc.cluster.local:9091
+export PROM_ROUTE=https://$(oc -n openshift-monitoring get route thanos-querier -o jsonpath='{.spec.host}')
+export MODEL_NS=<namespace of the MaaSModelRef>
+export MODEL_REF=<name of the MaaSModelRef>
+export USER_TOKEN=$(oc whoami -t)      # log in as the REGULAR user first (oc login ...)
+# LiteMaaS database (Helm-deployed PostgreSQL):
+PSQL() { oc -n $LM_NS exec -i sts/$RELEASE-postgresql -- psql -U litemaas_admin -d litemaas_db -At -c "$1"; }
+```
+
+### Discover the MaaS endpoints
+
+```bash
+oc get crd | grep maas.opendatahub.io
+oc get gateway -A | grep -i maas
+oc get httproute -A | grep -i maas
+oc -n $NS get route,svc | grep -i maas-api        # route host + path, or service:port
+oc get maasmodelrefs.maas.opendatahub.io -A
+```
+
+**Expected.** The CRDs `maasmodelrefs`, `maasauthpolicies` and `maassubscriptions` are present in
+group `maas.opendatahub.io` (version `v1alpha1`). There is one gateway and a maas-api route or
+service, and at least one `MaaSModelRef` reports `PHASE=Ready`.
+
+**If different.** If the API version or plural names differ, change the constants
+`MAAS_API_VERSION`, `MAAS_MODEL_REF`, `MAAS_AUTH_POLICY` and `MAAS_SUBSCRIPTION` in
+`backend/src/services/maas/maas-resources.ts`. Then fix the RBAC rules in
+`deployment/helm/litemaas/templates/maas-rbac.yaml` and `deployment/kustomize/components/maas/*.template`.
+
+---
+
+## Phase A: Cluster discovery (no LiteMaaS needed)
+
+### A8. MaaSModelRef shape
+
+**Assumption.** A `MaaSModelRef` lives in the model's namespace and has:
+
+- `spec.modelRef{kind: LLMInferenceService|ExternalModel, name}`
+- `status.phase` set to `Pending`, `Ready` or `Failed`
+- `status.endpoint`, the inference URL
+- optional annotations `openshift.io/display-name` and `openshift.io/description`
+
+The LiteMaaS model id is `<namespace>/<name>`.
 
 **Verify.**
 
 ```bash
-# token obtained through the LiteMaaS OAuth client (log in via the UI, then read it from the DB,
-# or run the authorization-code flow manually with the same client_id and scopes)
-curl -sk -H "Authorization: Bearer $TOKEN" "$MAAS_API/health"
-curl -sk -X POST "$MAAS_API/v1/api-keys" \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"name":"validation","description":"","subscription":"<existing-subscription>","expiresIn":"1d"}'
-# Expect 200/201 with {id,key,...}. 401/403 => scope or audience problem.
-
-# What the token can do on the cluster API:
-oc auth can-i --token="$TOKEN" get users/~
-curl -sk -H "Authorization: Bearer $TOKEN" "$(oc whoami --show-server)/apis/user.openshift.io/v1/users/~"
-oc get oauthclient <litemaas-client> -o yaml   # scopeRestrictions / accessTokenMaxAgeSeconds
+oc -n $MODEL_NS get maasmodelref $MODEL_REF -o yaml
+oc -n $MODEL_NS get maasmodelref $MODEL_REF -o jsonpath='{.status.phase} {.status.endpoint}{"\n"}'
 ```
 
-**If wrong.** Set `OAUTH_SCOPES` (for example `user:full`, or whatever maas-api documents) and make
-sure the `OAuthClient` allows it (`scopeRestrictions`). Users must log in again afterwards. If
-maas-api requires a different audience (OIDC), the token capture needs a token-exchange step.
+**Expected.** The fields above exist with these names, and `status.endpoint` is an absolute URL.
 
-## A2. Token lifetime and expiry handling
+**If different.** Adjust `parseModelRef()` in `backend/src/services/maas/maas-resources.ts`. It is
+the only place that reads the object. The phase-to-availability mapping is in
+`MaasModelSyncService.insertModel` / `updateModel` (`maas-model-sync.service.ts`).
 
-**Assumption.** The OAuth token response contains `expires_in` (OpenShift default 24h,
-`accessTokenMaxAgeSeconds` on the `OAuthClient`/cluster OAuth config). Tokens are treated as
-expired 30 seconds before `expires_at`. There is no refresh token flow (OpenShift OAuth does not
-issue refresh tokens for this grant), so an expired token means the user must log in again
-(`MAAS_REAUTH_REQUIRED`).
+### A13. Served model name
+
+**Assumption.** The `model` field a client sends equals the `MaaSModelRef` name. The sync stores
+the ref name in `models.backend_model_name`, and an admin can override it.
 
 **Verify.**
 
 ```bash
-oc get oauth cluster -o jsonpath='{.spec.tokenConfig}'
-oc get oauthclient <litemaas-client> -o jsonpath='{.accessTokenMaxAgeSeconds}'
-# After login: SELECT expires_at - now() FROM user_oauth_tokens WHERE user_id = '<id>';
+oc -n $MODEL_NS get llminferenceservice -o yaml | grep -iA3 'served\|model:'   # served-model-name / spec.model.name
 ```
 
-**If wrong.** If `expires_in` is absent, `expires_at` is NULL and expiry is only discovered when
-maas-api answers 401/403 (mapped to `MAAS_REAUTH_REQUIRED`). Adjust `EXPIRY_SKEW_MS` in
-`services/maas/user-token.service.ts` if clock skew is an issue.
+After A18 gives you a key `$SK`, run:
 
-## A3. Username match between LiteMaaS and OpenShift
+```bash
+curl -sk "$(oc -n $MODEL_NS get maasmodelref $MODEL_REF -o jsonpath='{.status.endpoint}')/v1/models" \
+  -H "Authorization: Bearer $SK" | jq -r '.data[].id'
+```
 
-**Assumption.** `users.username` in LiteMaaS equals the OpenShift user name (`metadata.name` of
-the `User` object), which is also the identity maas-api / the gateway sees. This value is used in
-`MaaSAuthPolicy.spec.subjects.users`, `MaaSSubscription.spec.owner.users` and the CR names
-(`litemaas-<user>`).
+**Expected.** The `/v1/models` id equals `$MODEL_REF`.
+
+**If different.** If the served name follows a fixed rule (for example `spec.model.name` of the
+`LLMInferenceService`), read it in `parseModelRef()` and use it in `insertModel()`
+(`maas-model-sync.service.ts`). Otherwise document that admins must set the served name in the
+model edit form.
+
+### A22. Inference URL form (`maasEndpoint` vs gateway `baseUrl`)
+
+**Assumption.**
+
+- Clients call `<maasEndpoint>/v1/chat/completions`.
+- If `maasEndpoint` already ends in `/v1`, that suffix is stripped first.
+- Without an endpoint, clients fall back to `<MAAS_GATEWAY_URL>/v1/...`.
+- The typical RHOAI form is `https://maas.<domain>/llm/<model>`; this is unverified.
 
 **Verify.**
 
 ```bash
-oc whoami                                   # for the logged-in test user
-oc get user <name> -o yaml                   # identities, groups
-# LiteMaaS: SELECT username FROM users WHERE ...;  (OpenShift provider: preferred_username = metadata.name)
-# Does the gateway see the same string?  Create a key and inspect the AuthPolicy / authorino logs:
-oc -n kuadrant-system logs deploy/authorino | grep -i <username>
+EP=$(oc -n $MODEL_NS get maasmodelref $MODEL_REF -o jsonpath='{.status.endpoint}'); echo $EP
+curl -sk -o /dev/null -w '%{http_code}\n' "$EP/v1/models" -H "Authorization: Bearer $SK"
+curl -sk -o /dev/null -w '%{http_code}\n' "$GATEWAY/v1/models" -H "Authorization: Bearer $SK"
 ```
 
-Special cases to check: usernames with `:` (for example `kube:admin`), `@` (OIDC emails), upper case,
-and users whose OpenShift name differs from the IdP login (identity mapping method `add`/`generate`).
+**Expected.** The `$EP/v1/...` call returns 200. The bare gateway URL may return 404, which is
+fine because the per-model endpoint is preferred.
 
-**If wrong.** Map through a different claim when creating CRs (for example `User.metadata.name` from
-`/apis/user.openshift.io/v1/users/~`, which `getOpenShiftUserInfo` already reads as
-`preferred_username`). For OIDC deployments the subject format may need a prefix (for example
-`oidc:<name>`).
+**If different.** URL building is in two places:
 
-## A4. maas-api request/response contract
+- Frontend: `getModelBaseUrl()` in `frontend/src/utils/modelBackend.ts`.
+- Backend: the `baseUrl` given to keys, from `ApiKeyService.maasBaseUrl` in
+  `backend/src/services/api-key.service.ts`.
 
-**Assumption** (from RHOAI 3.4/3.5 documentation):
+If `status.endpoint` is relative or missing, build it in `parseModelRef()`.
+
+### A4. maas-api request/response contract
+
+**Assumption.** maas-api calls carry the user's bearer token.
 
 | Call | Request | Response |
 | --- | --- | --- |
-| `POST /v1/api-keys` | `{name, description, subscription, expiresIn:"<n>d"}` + user bearer token | `{id, key (sk-oai-...), keyPrefix, createdAt, expiresAt, subscription}` |
-| `DELETE /v1/api-keys/{id}` | user bearer token | 2xx, 404 treated as "already revoked" |
-| `POST /v1/api-keys/search` | JSON filter (we send `{}` or `{subscription}`) | array, or `{items|keys|data: []}` |
+| `POST /v1/api-keys` | `{name, description, subscription, expiresIn:"<n>d"}` | `{id, key (sk-oai-...), keyPrefix, createdAt, expiresAt, subscription}` |
+| `DELETE /v1/api-keys/{id}` | none | 2xx; 404 counts as already revoked |
+| `POST /v1/api-keys/search` | `{}` or `{subscription}` | an array, or `{items\|keys\|data: []}` |
 | `GET /health` | none | 2xx |
 
-**Code relying on it.** `services/maas/maas-api.client.ts`. 401 and 403 are both mapped to
-`MAAS_REAUTH_REQUIRED` (HTTP 403 towards the frontend, deliberately not 401 so the SPA does not log
-the user out). Other non-2xx map to `MAAS_ERROR` (502, retryable for 5xx/429).
-
-**Verify.**
+**Verify.** This needs a subscription; create the test one from A18 first.
 
 ```bash
-curl -sk -X POST "$MAAS_API/v1/api-keys" -H "Authorization: Bearer $TOKEN" \
+curl -sk -i "$MAAS_API/health"
+curl -sk -X POST "$MAAS_API/v1/api-keys" -H "Authorization: Bearer $USER_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"v","description":"d","subscription":"<name>","expiresIn":"30d"}' | jq
-curl -sk -X POST "$MAAS_API/v1/api-keys/search" -H "Authorization: Bearer $TOKEN" \
+  -d '{"name":"v","description":"d","subscription":"litemaas-key-test","expiresIn":"30d"}' | tee /tmp/key.json | jq
+export SK=$(jq -r .key /tmp/key.json) KEY_ID=$(jq -r .id /tmp/key.json)
+curl -sk -X POST "$MAAS_API/v1/api-keys/search" -H "Authorization: Bearer $USER_TOKEN" \
   -H 'Content-Type: application/json' -d '{}' | jq
-curl -sk -X DELETE "$MAAS_API/v1/api-keys/<id>" -H "Authorization: Bearer $TOKEN" -i
 ```
 
-Check specifically: is `expiresIn` optional (no expiry)? Does it accept `"30d"` or only hours
-(`"720h"`)? Does DELETE require the owner token or does an admin/SA token work? What does a
-non-existent `subscription` return (400/404/403)? Does search require a body, and what filters does
-it accept?
+**Expected.** Create returns 200 or 201 with the fields above, and `keyPrefix` is at most 20
+characters. Also note:
 
-**If wrong.** Adjust `formatExpiresIn` / request bodies in `maas-api.client.ts`; the rest of the
-platform only sees `IMaasApiClient`.
+- whether `expiresIn` accepts `"30d"` (or only hours, `"720h"`),
+- what the response looks like without `expiresIn`,
+- what an unknown `subscription` returns.
 
-## A5. TLS trust for cluster endpoints
+**If different.**
 
-**Assumption.** The Kubernetes API, maas-api (route or service) and Thanos Querier present
-certificates signed by the in-cluster CA (`ca.crt`) or the OpenShift service CA (`service-ca.crt`)
-mounted in the pod, **or** by a publicly trusted CA. `loadClusterCaBundle()` adds both cluster CA
-files on top of Node's system roots. Because Node's global `fetch` ignores `https.Agent`,
-`tlsFetch()` uses `https.request` whenever a custom CA / `rejectUnauthorized:false` is needed.
+- Expiry format: `formatExpiresIn()` in `backend/src/services/maas/maas-api.client.ts`.
+- Request and response fields: `MaasApiClient.createKey()` / `searchKeys()` in the same file.
+  Nothing else talks to maas-api.
+- Status mapping (401/403 → `MAAS_REAUTH_REQUIRED`, other errors → `MAAS_ERROR`): same file.
 
-`K8S_API_SKIP_TLS_VERIFY=true` also disables verification for **maas-api**;
-`PROMETHEUS_SKIP_TLS_VERIFY=true` for Prometheus/Thanos.
+### A18. The subscription must exist before the key (create ordering)
+
+**Assumption.**
+
+- `POST /v1/api-keys` succeeds only when the named `MaaSSubscription` exists and the caller is
+  in `spec.owner.users`.
+- It may succeed immediately after the subscription is applied, with no controller delay.
+- `tokenRateLimits` is optional. LiteMaaS omits it when the key has no TPM limit.
 
 **Verify.**
 
 ```bash
-# from inside the LiteMaaS pod
-oc rsh deploy/litemaas-backend
-ls /var/run/secrets/kubernetes.io/serviceaccount/        # ca.crt, service-ca.crt (OpenShift), token
-curl --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt https://kubernetes.default.svc/version
-curl --cacert /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt https://thanos-querier.openshift-monitoring.svc:9091/-/healthy
-openssl s_client -connect maas.apps.example.com:443 -showcerts </dev/null | openssl x509 -noout -issuer
-```
-
-**If wrong.** The maas-api route is usually signed by the cluster ingress CA, which is not part of
-the SA CA files. Either mount the ingress CA bundle and extend `loadClusterCaBundle()`, set
-`NODE_EXTRA_CA_CERTS`, or use the in-cluster `Service` URL for `MAAS_API_URL`.
-
-## A6. Service account permissions (Kubernetes client)
-
-**Assumption.** The LiteMaaS service account (in-cluster token, or `K8S_TOKEN`) may
-`get/list/watch/create/update/patch/delete` `maasauthpolicies` and `maassubscriptions` in
-`$MAAS_NAMESPACE`, and `get/list` `maasmodelrefs` in the model namespaces (or cluster wide when
-`MAAS_MODEL_NAMESPACES` is empty, which issues a cluster-scoped list).
-
-**Verify.**
-
-```bash
-SA=system:serviceaccount:<litemaas-ns>:<litemaas-sa>
-for r in maasauthpolicies maassubscriptions; do
-  for v in get list create update patch delete; do
-    echo -n "$r $v: "; oc auth can-i $v $r.maas.opendatahub.io -n $NS --as=$SA
-  done
-done
-oc auth can-i list maasmodelrefs.maas.opendatahub.io --all-namespaces --as=$SA
-oc get crd | grep maas.opendatahub.io      # confirm plural names and version v1alpha1
-```
-
-**If wrong.** Fix the Role/ClusterRole delivered with the Helm/Kustomize charts (phase 7). If the
-CRD plural names differ from `maasmodelrefs`, `maasauthpolicies`, `maassubscriptions`, update the
-constants in `services/maas/maas-resources.ts`.
-
-## A7. In-cluster configuration resolution
-
-**Assumption.** In-cluster, the API server is `https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT`
-and the SA token is read from `/var/run/secrets/kubernetes.io/serviceaccount/token` **on every
-request** (projected tokens rotate, about hourly). `K8S_API_URL` and `K8S_TOKEN` override both.
-Prometheus uses `PROMETHEUS_TOKEN`, falling back to the same Kubernetes credentials.
-
-**Verify.** Run LiteMaaS in-cluster with `MAAS_ENABLED=true`, leave `K8S_*` unset and check
-`GET /api/v1/health` and the startup log line "MaaS backend enabled" (`k8sMock:false`). Confirm the
-token keeps working past the projected-token rotation interval.
-
-**If wrong.** Set `K8S_API_URL`/`K8S_TOKEN` explicitly. When the Thanos route requires a token with
-`cluster-monitoring-view`, set `PROMETHEUS_TOKEN`.
-
-## A8. MaaSModelRef shape (consumed from phase 2)
-
-**Assumption.** `MaaSModelRef` lives in the model's namespace and has
-`spec.modelRef{kind: LLMInferenceService|ExternalModel, name}`, `status.phase` in
-`Pending|Ready|Failed`, `status.endpoint`, and annotations `openshift.io/display-name` and
-`openshift.io/description`. The LiteMaaS model id is `<namespace>/<name>`. `backendModelName` is
-set to the MaaSModelRef name; the **served model name** (the `model` field clients must send) may
-differ.
-
-**Verify.**
-
-```bash
-oc get maasmodelrefs.maas.opendatahub.io -A -o yaml | less
-oc get llminferenceservice <name> -n <ns> -o yaml            # spec.model.name = served name?
-curl -sk -H "Authorization: Bearer $SK_OAI_KEY" https://<gateway>/<ns>/<name>/v1/models | jq
-```
-
-**If wrong.** Adjust `parseModelRef()` and the `backend_model_name` mapping.
-
-## A9. Encryption key and rotation
-
-**Assumption.** `ENCRYPTION_KEY` (falling back to `LITELLM_MASTER_KEY`, then `LITELLM_API_KEY`) is
-the secret that encrypts provider API keys (existing), MaaS key plaintext (`api_keys.encrypted_key`)
-and user OAuth tokens. When `ENCRYPTION_KEY` is unset the derived AES key is **identical** to what
-earlier versions used, so existing `models.encrypted_api_key` rows stay readable. **Setting
-`ENCRYPTION_KEY` on an existing deployment changes the derivation and makes existing
-`models.encrypted_api_key` values undecryptable** (admins must re-enter provider keys), and there
-is no automatic re-encryption.
-
-A stored user token that cannot be decrypted is treated as "re-login required"; a MaaS key that
-cannot be decrypted cannot be shown again (View Key fails).
-
-**Verify.**
-
-```sql
-SELECT count(*) FROM models WHERE encrypted_api_key IS NOT NULL;
-SELECT count(*) FROM api_keys WHERE encrypted_key IS NOT NULL;
-```
-
-Rotation procedure (not automated): decrypt with the old key and re-encrypt with the new one for
-`models.encrypted_api_key`, `api_keys.encrypted_key` and delete `user_oauth_tokens` (users re-login).
-
-## A10. Public config exposure
-
-**Assumption.** `GET /api/v1/config` returns `maasEnabled` (boolean) and, only when enabled and
-configured, `maasGatewayUrl` (trailing slash stripped). The frontend uses `maasGatewayUrl` to build
-per-key base URLs; the exact per-model inference path (`<gateway>/<namespace>/<model>/v1/...`) is
-taken from `MaaSModelRef.status.endpoint` in later phases.
-
-**Verify.**
-
-```bash
-curl -s http://localhost:8081/api/v1/config | jq '{maasEnabled, maasGatewayUrl}'
-oc get gateway -A | grep maas
-oc get httproute -A | grep -i maas
-```
-
-## A11. MaaSAuthPolicy semantics (phase 3: subscriptions -> access)
-
-**Assumption.** One policy per user, `litemaas-<username>` in `MAAS_NAMESPACE`
-(`models-as-a-service`), with `spec.subjects.users=[<username>]` and `spec.modelRefs=[{name,namespace}]`
-where `namespace` is the namespace of the MaaSModelRef (not of the policy). The operator treats
-multiple policies naming the same user as a union. LiteMaaS deletes the policy when the user has no
-active MaaS subscription, rather than writing an empty `modelRefs`, because the behaviour of an empty
-list is unverified.
-
-**Verify.**
-
-```bash
-oc -n models-as-a-service get maasauthpolicy -l app.kubernetes.io/managed-by=litemaas -o yaml
-# Union: a hand-made policy for the same user must not be overwritten or removed by LiteMaaS
-# Empty list: apply a policy with modelRefs: [] and check the user is denied (not allowed-all)
-oc -n models-as-a-service get maasauthpolicy <name> -o jsonpath='{.status}'
-```
-
-Also confirm that a user without a policy naming the model is denied by the gateway (HTTP 403) and
-that a model name in `modelRefs` which does not exist is rejected or ignored (not fatal for the others).
-
-## A12. Revocation latency and request-time subscription validation
-
-**Assumption.** Deleting a user's model from the policy, or removing the model from (or deleting)
-a `MaaSSubscription`, stops already-issued API keys from reaching that model without having to
-revoke them in maas-api (the gateway validates the subscription at request time). LiteMaaS relies on
-this for revocation-first behaviour when a subscription is cancelled/denied/deleted or a model
-becomes restricted/unavailable.
-
-**Verify.**
-
-```bash
-# 1. create a key via maas-api bound to subscription litemaas-key-<id>, call the model -> 200
-# 2. delete the model from the policy / subscription, wait for reconcile of the operator
-oc -n models-as-a-service patch maassubscription litemaas-key-<id> --type=json \
-  -p '[{"op":"remove","path":"/spec/modelRefs/0"}]'
-# 3. call again; measure the time until 403/401
-curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $KEY" "$MAAS_GATEWAY_URL/<ns>/<model>/v1/models"
-# 4. delete the subscription entirely and repeat
-```
-
-Record the propagation delay (operator reconcile + Authorino cache TTL) in the user documentation.
-
-## A13. Served model name (`backend_model_name`) of synced MaaS models
-
-**Assumption.** The model name clients send in the request body is the `MaaSModelRef` name, so the
-sync sets `models.backend_model_name = <ref name>` on import only (admins can override it via
-`PUT /admin/models/:id`; syncs never overwrite a non-empty value). If the vLLM served name differs
-(e.g. `--served-model-name`), the override is needed.
-
-**Verify.**
-
-```bash
-oc -n <model-ns> get maasmodelref <name> -o jsonpath='{.status.endpoint}{"\n"}'
-curl -s -H "Authorization: Bearer $KEY" "<endpoint>/v1/models" | jq '.data[].id'
-```
-
-Also verify the `status.phase` values used for availability: `Ready` -> available; `Pending`,
-`Failed` or anything else -> unavailable without cascade (access is kept so the model returns when
-healthy). A ref that disappears from the scanned namespaces cascades (subscriptions deactivated,
-API key associations removed, policies/subscriptions revoked).
-
-## A14. Service account RBAC for the phase 2/3 operations
-
-**Assumption.** The LiteMaaS service account can `get/list` MaaSModelRefs in `MAAS_MODEL_NAMESPACES`
-(or cluster-wide when unset), and `get/list/create/update/delete` MaaSAuthPolicies and
-MaaSSubscriptions in `MAAS_NAMESPACE` (the K8s client uses `replace`, i.e. `update`, with
-`resourceVersion`). Deployment RBAC is delivered in phase 7.
-
-**Verify.**
-
-```bash
-SA=system:serviceaccount:litemaas:litemaas-backend
-oc auth can-i list maasmodelrefs.maas.opendatahub.io --all-namespaces --as=$SA
-for v in get list create update delete; do
-  echo -n "$v maasauthpolicies: "; oc -n models-as-a-service auth can-i $v maasauthpolicies.maas.opendatahub.io --as=$SA
-  echo -n "$v maassubscriptions: "; oc -n models-as-a-service auth can-i $v maassubscriptions.maas.opendatahub.io --as=$SA
-done
-```
-
-## A15. Reconciler comparison and API-server defaulting
-
-**Assumption.** The reconciler compares the desired `spec` with the live object using JSON equality
-and only writes when different. If the CRD defaults or normalises fields (e.g. adds `groups: []`,
-reorders), the comparison never matches and every pass re-writes every object (harmless but noisy,
-visible as non-zero `policiesApplied` / `subscriptionsApplied` on `POST /admin/maas/reconcile`
-with no changes).
-
-**Verify.**
-
-```bash
-curl -s -X POST -H "Authorization: Bearer $ADMIN_JWT" http://localhost:8081/api/v1/admin/maas/reconcile | jq .data
-# run twice with no DB changes: the second run must report 0 applied
-```
-
-If it does not converge, compare `oc get maasauthpolicy <n> -o jsonpath='{.spec}'` with the built spec
-in `maas-resources.ts` and normalise the differences.
-
-Orphan deletion only removes objects labeled `app.kubernetes.io/managed-by=litemaas` and, for
-subscriptions, older than 120 s (a key being created is not racing the reconciler). Confirm that no
-operator-created object copies the label.
-
-## A16. Multi-replica locking and Postgres poolers
-
-**Assumption.** The reconciler and the periodic model sync use session-level
-`pg_try_advisory_lock` on a dedicated connection from the pool. This is not safe behind a
-transaction-mode pooler (pgbouncer `pool_mode=transaction`): the lock may be released/shared
-unexpectedly.
-
-**Verify.**
-
-```sql
--- while a reconcile is running (locks: 1296121171 reconciler, 1296121172 model sync)
-SELECT pid, classid, objid FROM pg_locks WHERE locktype = 'advisory';
-```
-
-With two replicas, exactly one holder at a time and the other logs "skipped: lock held".
-
-## A17. Model ids containing `/` in URLs
-
-**Assumption.** MaaS model ids are `<namespace>/<name>`; admin routes (`/api/v1/admin/models/:id`) and
-public routes (`/api/v1/models/:id`) receive them URL-encoded (`%2F`) and Fastify decodes the
-parameter. Some ingress controllers/proxies reject or decode `%2F` before forwarding.
-
-**Verify.**
-
-```bash
-curl -s -H "Authorization: Bearer $JWT" "https://<litemaas-route>/api/v1/models/maas-demo-models%2Fllama-3-2-3b" | jq .id
-# Expect the model; a 404 here but 200 on localhost:8081 means the route/ingress decodes %2F
-```
-
-## A18. Subscription must exist before the maas-api key (create ordering)
-
-**Assumption.** `POST /v1/api-keys` with `subscription: "litemaas-key-<id>"` only succeeds when the
-named MaaSSubscription already exists and the calling user (token identity) is in its
-`spec.owner.users`. LiteMaaS therefore creates the api_keys row, then the MaaSSubscription, then the
-maas-api key, and rolls back in reverse (revoke maas-api key, delete subscription, delete row) on
-any failure. The controller must also have reconciled the new subscription before maas-api accepts
-it (otherwise creation fails with 4xx/5xx and the rollback runs; the user simply retries).
-
-**Code relying on it.** `MaasKeyService.createApiKey` / `createKey`
-(`services/maas/maas-key.service.ts`).
-
-**Verify.**
-
-```bash
-cat <<EOF2 | oc apply -f -
+cat <<EOF | oc apply -f -
 apiVersion: maas.opendatahub.io/v1alpha1
 kind: MaaSSubscription
 metadata: {name: litemaas-key-test, namespace: $NS}
 spec:
   owner: {users: ["$(oc whoami)"], groups: []}
-  modelRefs: [{name: <ref>, namespace: <ref-ns>, tokenRateLimits: [{limit: 1000, window: "1m"}]}]
+  modelRefs: [{name: $MODEL_REF, namespace: $MODEL_NS, tokenRateLimits: [{limit: 1000, window: "1m"}]}]
   priority: 0
-EOF2
-# immediately (no sleep) request the key; note whether the first attempt fails
-curl -sk -X POST "$MAAS_API/v1/api-keys" -H "Authorization: Bearer $TOKEN" \
+EOF
+# immediately, no sleep:
+curl -sk -i -X POST "$MAAS_API/v1/api-keys" -H "Authorization: Bearer $USER_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"v","description":"d","subscription":"litemaas-key-test","expiresIn":"1d"}' -i
-oc get maassubscription litemaas-key-test -n $NS -o jsonpath='{.status}'
+  -d '{"name":"v","description":"d","subscription":"litemaas-key-test","expiresIn":"1d"}'
+oc -n $NS get maassubscription litemaas-key-test -o jsonpath='{.status}{"\n"}'
+# negative cases: another user's subscription, and a missing one
+curl -sk -o /dev/null -w '%{http_code}\n' -X POST "$MAAS_API/v1/api-keys" -H "Authorization: Bearer $USER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"name":"v","subscription":"does-not-exist","expiresIn":"1d"}'
+# without tokenRateLimits: apply the same object without tokenRateLimits; it must be accepted
 ```
 
-Also check what is returned when the token user is NOT in `owner.users` (expect 403/400) and when
-the subscription name does not exist.
+**Expected.**
 
-**If wrong.** If the controller needs time, add a short poll on `status.phase` of the
-MaaSSubscription between the apply and the maas-api call in `MaasKeyService.createKey`.
+- The first call succeeds. A failure followed by success after a few seconds means the
+  controller needs reconcile time.
+- The negative cases return 4xx.
+- A subscription without `tokenRateLimits` is accepted. Find out whether it means unlimited or
+  denied.
 
-## A19. Who may revoke a maas-api key (owner token vs service account)
+**If different.**
 
-**Assumption.** `DELETE /v1/api-keys/{id}` succeeds with the owner's token. LiteMaaS revokes with the
-owner's stored token first and falls back to the service account token (`K8S_TOKEN` / in-cluster)
-when the user token is expired or missing (admin revoke, expiry cleanup, reconciler). The fallback
-may be refused (403/401). A refusal is not fatal: the key's MaaSSubscription is deleted first, so the
-key cannot authorize requests anyway; the row is flagged `maas_sync_state='pending'` and the
-reconciler retries on every pass (`maasApiRevokePending` in `POST /admin/maas/reconcile`).
+- Controller delay: add a poll on `status.phase` of the `MaaSSubscription` between
+  `applySubscription()` and the maas-api call in `MaasKeyService.createApiKey()`
+  (`backend/src/services/maas/maas-key.service.ts`).
+- `tokenRateLimits` required: change `buildSubscription()` in `maas-resources.ts` to always send a
+  limit, and make TPM mandatory for MaaS keys in `MaasKeyService.validateTpm()`.
 
-**Code relying on it.** `revokeInMaasApi` in `maas-key.service.ts`, `MaasReconcilerService`.
+### A11. MaaSAuthPolicy semantics
+
+**Assumption.**
+
+- LiteMaaS keeps one policy per user: `litemaas-<sanitized-username>` in `$NS`, with
+  `spec.subjects.users=[<username>]` and `spec.modelRefs=[{name, namespace}]`. The `namespace`
+  is the `MaaSModelRef`'s namespace.
+- Several policies naming the same user combine as a union.
+- A user with **no** policy for a model is denied.
+- LiteMaaS deletes the policy instead of writing an empty `modelRefs`.
+- Access needs **both** a policy (authorization) and a subscription (owner plus rate limits).
 
 **Verify.**
 
 ```bash
-SA_TOKEN=$(oc create token litemaas -n <litemaas-ns>)
-curl -sk -X DELETE "$MAAS_API/v1/api-keys/<id-of-a-key-owned-by-another-user>" \
-  -H "Authorization: Bearer $SA_TOKEN" -i      # 2xx = SA may revoke; 401/403 = it may not
+cat <<EOF | oc apply -f -
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSAuthPolicy
+metadata: {name: litemaas-validation, namespace: $NS}
+spec:
+  subjects: {users: ["$(oc whoami)"], groups: []}
+  modelRefs: [{name: $MODEL_REF, namespace: $MODEL_NS}]
+EOF
+oc -n $NS get maasauthpolicy litemaas-validation -o jsonpath='{.status}{"\n"}'
+curl -sk -o /dev/null -w '%{http_code}\n' "$EP/v1/chat/completions" -H "Authorization: Bearer $SK" \
+  -H 'Content-Type: application/json' -d "{\"model\":\"$MODEL_REF\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":5}"
+oc -n $NS delete maasauthpolicy litemaas-validation      # then repeat the curl
 ```
 
-**If wrong.** Grant the service account whatever maas-api requires for admin revocation (see the
-maas-api docs for its admin group), or accept the dangling-key behaviour: after the subscription is
-deleted a leftover maas-api key is inert. `maas-api` may also garbage collect such keys itself.
+**Expected.** The call returns 200 while the policy exists, and 401 or 403 a short time after it is
+deleted. Record the delay under A12. Also check:
 
-## A20. Key expiry and extension
+- Does the RHOAI installation ship a default policy granting a group such as
+  `system:authenticated` access to every model? If so, LiteMaaS approvals don't restrict anything.
+- Does a policy referencing an unknown model fail as a whole, or ignore that entry?
 
-**Assumption.** `expiresIn: "<n>d"` sets the key lifetime and the response contains `expiresAt`
-(stored in `api_keys.expires_at`). maas-api offers no endpoint to extend or change the expiry, so
-LiteMaaS accepts only a **shorter** expiration afterwards (`PATCH` with a later date or `null` -> 400;
-the owner rotates the key instead) and enforces it itself: the cleanup job
-(`POST /api-keys/admin/cleanup-expired`) and the reconciler deactivate expired keys, delete their
-MaaSSubscription and revoke the maas-api key. Without `expiresAt` no `expiresIn` is sent.
+**If different.**
 
-**Code relying on it.** `MaasKeyService.updateExpiration`, `cleanupExpiredKeys`, reconciler
-`keysExpired`.
+- Policy spec: `buildAuthPolicy()` in `maas-resources.ts`.
+- Delete-versus-empty behavior: `MaasAccessService.syncUserAuthPolicy()` in
+  `maas-access.service.ts`.
 
-**Verify.** Create a key with `"expiresIn":"1d"` and compare `expiresAt` with now+24h. Check the
-maas-api default when `expiresIn` is omitted (never expires? a platform maximum?), and whether `"1d"`
-is accepted in addition to hours (`"24h"`). Confirm maas-api itself rejects the key after
-`expiresAt` (use it against the gateway).
+If a default allow-all policy exists, document that it must be removed for restricted models to
+work.
 
-**If wrong.** Adjust `formatExpiresIn` in `maas-api.client.ts`. If maas-api does offer an expiry
-update, implement it in `MaasKeyService.updateExpiration` and relax the "shorten only" rule.
+### A12 and A23. Revocation latency and editing live subscriptions
 
-## A21. Rotation: two keys on one subscription
+**Assumption.** An already-issued key loses access within seconds to a minute, with no maas-api
+revoke, when any of these happens:
 
-**Assumption.** A second key can be created for the same MaaSSubscription while the first exists, so
-rotation can create the new key before revoking the old one (a failure leaves the old key working).
-The key name may be reused. `POST /v1/api-keys/search` is not used by the key lifecycle.
+- its `MaaSSubscription` is deleted,
+- a model is removed from the subscription's `modelRefs`,
+- the user's policy loses the model.
 
-**Code relying on it.** `MaasKeyService.rotateApiKey`.
-
-**Verify.** Create two keys with the same `name` and `subscription`; both must work against the
-gateway; deleting one must not affect the other.
-
-**If wrong.** If names must be unique or only one key per subscription is allowed, rotate as
-revoke-then-create (accepting a short outage) in `rotateApiKey`.
-
-## A22. Gateway base URL handed to clients (`baseUrl`)
-
-**Assumption.** API responses carry `baseUrl = MAAS_GATEWAY_URL` for MaaS keys and clients call the
-OpenAI-compatible routes under it. Whether per-model paths are needed
-(`<gateway>/<namespace>/<model>/v1/...` vs `<gateway>/v1/...` with the model in the body) is not
-assumed: the model's own `maas_endpoint` (from `MaaSModelRef.status.endpoint`) is exposed on
-`GET /models` as `maasEndpoint`, the frontend should prefer it per model and fall back to `baseUrl`.
-The model name sent in requests is the model's `backend_model_name` (see A13).
+Changing `tokenRateLimits` on a live subscription changes the effective limit for existing keys.
 
 **Verify.**
 
 ```bash
-curl -sk "$GATEWAY/<ns>/<model>/v1/models" -H "Authorization: Bearer sk-oai-..." | jq
-curl -sk "$GATEWAY/v1/chat/completions" -H "Authorization: Bearer sk-oai-..." \
-  -H 'Content-Type: application/json' -d '{"model":"<served-name>","messages":[{"role":"user","content":"hi"}]}'
+t0=$(date +%s)
+oc -n $NS patch maassubscription litemaas-key-test --type=json -p '[{"op":"replace","path":"/spec/modelRefs/0/tokenRateLimits/0/limit","value":10}]'
+# send requests until 429, and record the seconds since t0
+oc -n $NS delete maassubscription litemaas-key-test
+while [ "$(curl -sk -o /dev/null -w '%{http_code}' "$EP/v1/models" -H "Authorization: Bearer $SK")" = 200 ]; do sleep 2; done
+echo "revoked after $(( $(date +%s) - t0 ))s"
 ```
 
-## A23. Editing a MaaSSubscription affects existing keys
+**Expected.** Requests start returning 429 after the lower limit, and 401 or 403 after the
+deletion, both within roughly 60 s. Write the measured delays in
+[MaaS backend → Limitations](../features/maas-backend.md#limitations).
 
-**Assumption.** Replacing `spec.modelRefs` / `tokenRateLimits` of a MaaSSubscription changes the
-effective models and TPM limits of keys already issued against it (no re-issue needed), within the
-revocation latency described in A12. LiteMaaS relies on this for TPM edits and model add/remove on
-existing keys (`MaasKeyService.updateLimits` / `updateModels`; cluster first, database second).
+**If different.** If a deleted subscription does **not** stop the key, revocation must also revoke
+the key in maas-api synchronously. Change `MaasKeyService.clusterRevoke()` (`maas-key.service.ts`)
+to fail the operation when `revokeInMaasApi()` fails, instead of marking the key `pending`.
 
-**Verify.** Create a key, call a model, then lower `tokenRateLimits.limit` / remove the model from
-the subscription and observe the next requests (429 / 403) and how long it takes.
+### A19. Who may revoke a maas-api key
 
-## A24. Stored plaintext, key prefix and encryption
+**Assumption.** The owner's token can revoke the key. The LiteMaaS ServiceAccount token may or may
+not be able to; LiteMaaS treats SA revocation as best effort.
 
-**Assumption.** The plaintext key returned once by maas-api is stored AES-256-GCM encrypted in
-`api_keys.encrypted_key` (secret from `ENCRYPTION_KEY`, see A9) so View Key and the playground keep
-working; this is a deliberate trade-off versus maas-api's show-once semantics. `keyPrefix` from
-maas-api (for example `sk-oai-ab12`) is stored in `key_prefix` (`VARCHAR(20)`, truncated if longer).
-Rotating `ENCRYPTION_KEY` makes stored keys unreadable (`500 ... cannot be decrypted`); affected users
-rotate the key.
-
-**Verify.** Confirm `keyPrefix` is at most 20 characters and check the plaintext is not logged:
-`grep -c "sk-oai-" logs/backend.log` should be 0 after creating and revealing a key.
-
-## A25. Re-login prompt contract
-
-**Assumption.** `MAAS_REAUTH_REQUIRED` is returned as **HTTP 403** (not 401, which makes the SPA
-log the user out), body `{error: {code: 'MAAS_REAUTH_REQUIRED', details: {reason}}}`. Operations
-that fail with it: creating and rotating MaaS keys. Revoke, delete, archive, expiry cleanup, TPM and
-model edits do not need the user token (they use the service account for the cluster and fall back
-to the SA token for maas-api); a missing token only leaves the maas-api key to the reconciler. The
-frontend must key on `error.code`, not on the HTTP status.
-
-## F1. Frontend: browser calls to the MaaS gateway (Playground, curl examples)
-
-**Assumption.** The Playground calls `<base>/v1/chat/completions` directly from the browser, where
-`<base>` is the model's `maasEndpoint` (trailing `/v1` stripped) if present, else the key's
-`baseUrl`, and sends `model = backendModelName` (falling back to the part after `/` of the model id).
-This needs the maas gateway (Envoy/Authorino route) to answer CORS preflight for the LiteMaaS origin
-and to accept `Authorization: Bearer sk-oai-...`. If CORS is not enabled the Playground fails for MaaS
-keys while curl examples still work.
-
-**Verify.**
+**Verify.** Create a key as the user, then:
 
 ```bash
-curl -sk -i -X OPTIONS "$GATEWAY/<ns>/<model>/v1/chat/completions" \
-  -H 'Origin: https://litemaas.apps.example.com' \
-  -H 'Access-Control-Request-Method: POST' \
-  -H 'Access-Control-Request-Headers: authorization,content-type'
+SA_TOKEN=$(oc -n $LM_NS create token $RELEASE)     # after LiteMaaS is deployed; or any SA
+curl -sk -i -X DELETE "$MAAS_API/v1/api-keys/$KEY_ID" -H "Authorization: Bearer $SA_TOKEN"
+curl -sk -i -X DELETE "$MAAS_API/v1/api-keys/$KEY_ID" -H "Authorization: Bearer $USER_TOKEN"
 ```
 
-## F2. Frontend: backend info on subscriptions
+**Expected.** The owner gets a 2xx (and a 404 on a second call). The SA gets 2xx or 401/403;
+record which.
 
-**Assumption.** `GET /subscriptions` does not return the model's backend. The Subscriptions page
-infers MaaS from a `/` in `modelId` and, when MaaS is enabled, enriches backend and migration info
-from `GET /models`. If the subscription payload later gains `modelBackendType`,
-`modelMigrationState`, `modelMigrationGraceUntil` they are used directly.
+**If different.** If the SA must be in a maas-api admin group, add the group or RBAC to the charts
+(`maas-rbac.yaml`) and document it. Without SA rights, keys revoked while the user's token is
+expired stay `pending`. They are harmless, because their subscription is gone, and are retried by
+`MaasReconcilerService.revokeInMaasApi()`.
 
-**Verify.** `curl -s -H "Authorization: Bearer $JWT" $API/api/v1/subscriptions | jq '.data[0]'`.
+### A20. Key expiry
 
-## F3. Frontend: per-key model details
+**Assumption.** `expiresIn` sets the lifetime, the response contains `expiresAt`, and maas-api has
+**no** call to extend a key.
 
-**Assumption.** Key `modelDetails[]` may optionally carry `backendType`, `backendModelName`,
-`migrationState`, `migrationGraceUntil`; when absent the API Keys page falls back to the models list
-from `GET /models` (loaded for subscribed models only) for the grace-period banner and curl example.
+**Verify.** Compare `expiresAt` from A4 with now plus 30 days. Check the maas-api OpenAPI spec, if
+it serves one (`curl -sk $MAAS_API/openapi.json`), for a PATCH or extend call.
 
-**Verify.** `curl -s -H "Authorization: Bearer $JWT" $API/api/v1/api-keys | jq '.data[0].modelDetails'`.
+**If different.** If an extend call exists, implement it in `MaasKeyService.updateExpiration()`
+(`maas-key.service.ts`) and remove the shorten-only rule there, along with its route check in
+`backend/src/routes/api-keys.ts` (`updateMaasExpiration`).
 
-## A26. Limitador metric names and labels in Thanos
+### A21. Two keys on one subscription (rotation)
 
-**Assumption.** Usage is read from Thanos Querier (`PROMETHEUS_URL`) as
-`sum by (subscription, model) (increase(authorized_hits{subscription=~"(.*/)?litemaas-key-.+"}[86400s]))`
-(tokens) and the same with `authorized_calls` (requests), where `subscription` is the
-MaaSSubscription name (optionally `<namespace>/<name>`) and `model` is the MaaSModelRef name, the
-served name, or `<namespace>/<name>`. Metric names are configurable with `MAAS_USAGE_HITS_METRIC` /
-`MAAS_USAGE_CALLS_METRIC`; extra matchers (e.g. `namespace="kuadrant-system"`) with
-`MAAS_USAGE_LABEL_MATCHERS`. If the `subscription` label does not exist (Limitador only labels what
-the RateLimitPolicy/TokenRateLimitPolicy `counters` expose) there is no usage at all.
+**Assumption.** A second key can be created on the same subscription with the same name, and
+revoking one leaves the other working.
 
-**Verify.**
+**Verify.** Create two keys with identical `name` and `subscription` (as in A4), call the model with
+both, revoke one, and call again with the other.
+
+**If different.** Change `MaasKeyService.rotateApiKey()` to revoke first and then create (a short
+outage is accepted).
+
+### A26. Limitador metric names and labels in Thanos
+
+**Assumption.** Thanos exposes `authorized_hits` (tokens) and `authorized_calls` (requests) with the
+labels `subscription` (the `MaaSSubscription` name, possibly `<ns>/<name>`) and `model`.
+
+**Verify.** Send a few requests with `$SK` first.
 
 ```bash
-TOKEN=$(oc whoami -t)
-curl -sk -H "Authorization: Bearer $TOKEN" "$PROMETHEUS_URL/api/v1/label/__name__/values" | jq -r '.data[]' | grep -i authorized
-curl -sk -H "Authorization: Bearer $TOKEN" --data-urlencode 'query=authorized_hits' "$PROMETHEUS_URL/api/v1/query" | jq '.data.result[0].metric'
-# expect labels subscription and model; if absent the policy must add them as counters
+PT=$(oc whoami -t)        # a cluster-admin token works; the SA uses cluster-monitoring-view
+curl -sk -H "Authorization: Bearer $PT" "$PROM_ROUTE/api/v1/label/__name__/values" | jq -r '.data[]' | grep -iE 'authorized|limitador'
+curl -sk -H "Authorization: Bearer $PT" --data-urlencode 'query=authorized_hits' "$PROM_ROUTE/api/v1/query" | jq '.data.result[].metric'
+curl -sk -H "Authorization: Bearer $PT" --data-urlencode 'query=authorized_calls' "$PROM_ROUTE/api/v1/query" | jq '.data.result[].metric'
 ```
 
-## A27. Usage windows, extrapolation and retention
+**Expected.** Both metrics exist and carry `subscription` and `model` labels whose values match
+`litemaas-key-test` and the model.
 
-**Assumption.** A UTC day is `increase(<metric>[86400s])` evaluated at the next 00:00:00Z; today is
-evaluated now over the seconds elapsed since 00:00:00Z. `increase()` extrapolates to the window
-boundaries and is rounded to whole tokens/calls, so day totals can differ slightly from exact
-counts, and a series created inside the window undercounts its first increment. Days older than the
-Prometheus/Thanos retention (OpenShift default is about 15 days for the platform Prometheus) return
-nothing and are cached permanently as LiteLLM-only: resync (`Usage Data Sync`) cannot backfill them.
-Completed days are cached by the existing daily cache; a day whose MaaS fetch failed is NOT cached.
+**If different.**
+
+- Different metric names: set `MAAS_USAGE_HITS_METRIC` / `MAAS_USAGE_CALLS_METRIC`.
+- An extra label is needed to pick the right series: set `MAAS_USAGE_LABEL_MATCHERS`.
+- Different label names: change `MaasUsageSource.promql()` / `queryDayRows()`
+  (`backend/src/services/maas/maas-usage.source.ts`) and `stripNamespace()`.
+- No `subscription` label at all: per-key usage can't work. Raise this with the platform team;
+  the TokenRateLimitPolicy counters must include it.
+
+### A27. Usage windows and retention
+
+**Assumption.**
+
+- A UTC day is `increase(<metric>[86400s])` evaluated at the next 00:00:00Z. Today uses the
+  seconds elapsed since 00:00:00Z.
+- Days older than retention return nothing.
+- Retention is about 15 days for platform Prometheus, longer when Thanos has object storage.
 
 **Verify.**
 
 ```bash
 D=$(date -u -d yesterday +%F); END=$(date -u -d "$D +1 day" +%s)
-curl -sk -H "Authorization: Bearer $TOKEN" --data-urlencode "query=sum(increase(authorized_hits[86400s]))" \
-  --data-urlencode "time=$END" "$PROMETHEUS_URL/api/v1/query" | jq '.data.result'
-oc -n openshift-monitoring get prometheus k8s -o jsonpath='{.spec.retention}'
+curl -sk -H "Authorization: Bearer $PT" --data-urlencode 'query=sum(increase(authorized_hits[86400s]))' \
+  --data-urlencode "time=$END" "$PROM_ROUTE/api/v1/query" | jq '.data.result'
+oc -n openshift-monitoring get prometheus k8s -o jsonpath='{.spec.retention}{"\n"}'
+oc -n openshift-user-workload-monitoring get prometheus user-workload -o jsonpath='{.spec.retention}{"\n"}' 2>/dev/null
 ```
 
-## A28. Cost estimate and missing token split
+**Expected.** A number close to the tokens you sent, and a known retention period. Write the
+retention down; it bounds what the Usage Data Sync tool can backfill.
 
-**Assumption.** Limitador records total tokens only (`authorized_hits` = hits_addend). Cost is
-estimated as `tokens x blended price`, blended = `(input_cost_per_token + output_cost_per_token) / 2`
-(or the single configured price; 0 when none). Prompt/completion split is unavailable: the admin
-usage pipeline re-derives `total_tokens = prompt + completion`, so MaaS tokens are carried in
-`prompt_tokens` (completion = 0) and the day's `rawData.sources.maas = { tokenSplitAvailable: false,
-costEstimated: true }`. Streaming responses may count tokens only when the response completes
-(TokenRateLimitPolicy extracts usage from the response body); verify streamed requests are counted.
-Failed requests after authorization cannot be distinguished: `successful_requests = authorized_calls`,
-`failed_requests = 0`.
+**If different.** Window logic is `dayWindow()` in `maas-usage.source.ts`.
 
-**Verify.** Send one non-streamed and one streamed request with a MaaS key, wait one scrape interval,
-and compare `increase(authorized_hits[5m])` for the key's subscription with the `usage` object in the
-responses (`prompt_tokens + completion_tokens`).
+### A28. Token accounting and streaming
 
-## A29. Model label to LiteMaaS model resolution
+**Assumption.**
 
-**Assumption.** The Limitador `model` label equals the MaaSModelRef name, the served model name
-(`backend_model_name`) or `<namespace>/<name>`; matching is case-insensitive. An unresolved label is
-still reported (under the raw label, cost 0), which shows up as an unexpected model in the admin
-charts.
+- `authorized_hits` counts the **total** tokens (prompt plus completion) of each request.
+- Streamed responses are counted too.
 
-**Verify.** `curl ... 'query=count by (model, subscription) (authorized_hits)'` and compare the
-`model` values with `oc get maasmodelref -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name`
-and the `backend_model_name` column of the `models` table.
+**Verify.** Send one non-streamed and one streamed (`"stream":true`) request. Wait one scrape
+interval, then compare `increase(authorized_hits{subscription=~".*litemaas-key-test"}[5m])` with the
+`usage` block of the non-streamed response.
 
-## A30. Migration semantics
+**Expected.** The increase equals prompt plus completion tokens for both requests.
 
-**Assumption.** `POST /admin/models/:id/migrate-to-maas` copies the LiteLLM row (or fills an existing
-synced MaaS row without overwriting admin fields, never lowering `restricted_access`), copies
-**active** subscriptions as active (no re-approval), sets the old row `migration_state='migrating'`
-and `migration_grace_until`, and blocks new subscriptions to the old model. LiteLLM access keeps
-working during the grace period. After it, the reconciler (every `MAAS_RECONCILE_INTERVAL_MS`)
-removes the model from users' LiteLLM keys (LiteLLM first; a key that cannot be updated keeps the
-migration pending and is retried), deactivates the old subscriptions and marks the row
-`unavailable` / `completed`. The LiteLLM model itself is NOT deleted from the LiteLLM proxy; the
-admin should remove it there after completion. LiteLLM model sync skips `completed` rows so a model
-still present in LiteLLM is not revived. Existing LiteLLM API keys are not converted: users create a
-new MaaS key for the migrated model.
+**If different.** If only completion or only prompt tokens are counted, adjust the mapping in
+`MaasUsageSource.getDayData()` (it puts all tokens in `prompt_tokens`) and the cost formula
+(`MaasUsageSource.unitPrice()`). If streamed tokens aren't counted, document the gap in the feature
+Limitations.
+
+### A29. `model` label to LiteMaaS model
+
+**Assumption.** The Limitador `model` label is one of: the MaaSModelRef name, the served name
+(`backend_model_name`), or `<namespace>/<name>`. Matching is case-insensitive.
 
 **Verify.**
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' \
-  -d '{"maasModelRef":{"name":"<ref>","namespace":"<ns>"},"graceDays":1}' \
-  "$API/api/v1/admin/models/<litellm-model-id>/migrate-to-maas"
-oc -n models-as-a-service get maasauthpolicy -l app.kubernetes.io/managed-by=litemaas
-# after the grace period: POST /admin/maas/reconcile and check migrationsCompleted
+curl -sk -H "Authorization: Bearer $PT" --data-urlencode 'query=count by (model, subscription) (authorized_hits)' \
+  "$PROM_ROUTE/api/v1/query" | jq -r '.data.result[].metric | "\(.model) \(.subscription)"'
 ```
 
-## A31. Health section
+**Expected.** The `model` values match one of the forms above.
 
-**Assumption.** `GET /api/v1/health` gains a `maas` object (only when `MAAS_ENABLED=true`):
-`{enabled, maasApi, kubernetes, prometheus: healthy|unhealthy|unconfigured, mock}`. Each check has a
-5 s timeout and never affects `status`, `checks` or the HTTP status. The Kubernetes check is a `get`
-of a non-existent MaaSAuthPolicy (404 counts as healthy, 403 as unhealthy) so it needs `get` on
-`maasauthpolicies` in `MAAS_NAMESPACE`; the maas-api check calls `GET /health` of maas-api; the
-Prometheus check runs `vector(1)`.
+**If different.** Extend the resolver in `MaasUsageSource.loadModels()` / `resolver()`
+(`maas-usage.source.ts`).
 
-**Verify.** `curl -s $API/api/v1/health | jq .maas`
+### F1. Browser calls to the gateway (Playground CORS)
+
+**Assumption.** The Playground posts from the browser to `<endpoint>/v1/chat/completions` with
+`Authorization: Bearer sk-oai-...`, so the gateway must answer the CORS preflight.
+
+**Verify.**
+
+```bash
+curl -sk -i -X OPTIONS "$EP/v1/chat/completions" \
+  -H "Origin: https://litemaas.$DOMAIN" -H 'Access-Control-Request-Method: POST' \
+  -H 'Access-Control-Request-Headers: authorization,content-type'
+```
+
+**Expected.** A 2xx with `access-control-allow-origin` covering the LiteMaaS origin.
+
+**If different.** The Playground can't work for MaaS keys; curl and SDK clients are unaffected.
+Either ask the platform team to add a CORS policy on the MaaS HTTPRoute or gateway, or proxy
+Playground calls through the LiteMaaS backend (a new route; frontend `ChatbotPage.tsx` /
+`chat.service.ts`).
+
+**Clean up Phase A.**
+
+```bash
+oc -n $NS delete maassubscription litemaas-key-test --ignore-not-found
+```
+
+Revoke the test keys with `DELETE $MAAS_API/v1/api-keys/<id>`.
+
+---
+
+## Phase B: Deploy LiteMaaS with MaaS enabled
+
+Deploy with Helm (`deployment/helm/litemaas/values.maas.example.yaml`; see the
+[Helm guide](../deployment/helm-deployment.md#rhoai-models-as-a-service-maas)) or with Kustomize
+(`components/maas`). Use the URLs discovered in step 0 and Phase A.
+
+### A6 and A14. ServiceAccount RBAC
+
+**Assumption.** The backend ServiceAccount has these permissions:
+
+- `get/list/watch` on `maasmodelrefs`, cluster-wide or per `MAAS_MODEL_NAMESPACES` namespace.
+- `get/list/watch/create/update/patch/delete` on `maasauthpolicies` and `maassubscriptions` in
+  `$NS`. Updates use `replace`, i.e. PUT with `resourceVersion`.
+- `cluster-monitoring-view`, for Thanos.
+
+**Verify.**
+
+```bash
+oc auth can-i list maasmodelrefs.maas.opendatahub.io --all-namespaces --as=$SA
+for r in maasauthpolicies maassubscriptions; do for v in get list create update patch delete; do
+  printf '%-18s %-7s ' $r $v; oc -n $NS auth can-i $v $r.maas.opendatahub.io --as=$SA; done; done
+oc auth can-i get namespaces --as=$SA        # cluster-monitoring-view implies namespace get
+```
+
+**Expected.** Every check prints `yes`.
+
+**If different.** Fix `deployment/helm/litemaas/templates/maas-rbac.yaml` and
+`deployment/kustomize/components/maas/maas-rbac.yaml.template` /
+`maas-namespace-rbac.yaml.template`.
+
+### A5. TLS trust
+
+**Assumption.** The Kubernetes API and Thanos (`*.svc`) are signed by the service-account CA
+(`ca.crt`) or the service CA (`service-ca.crt`). The maas-api route is signed by the ingress CA,
+which reaches the pod through the injected trusted CA bundle (`NODE_EXTRA_CA_CERTS`).
+`loadClusterCaBundle()` combines the system roots, both service-account CA files and the
+`NODE_EXTRA_CA_CERTS` file.
+
+**Verify.**
+
+```bash
+oc -n $LM_NS get cm $RELEASE-backend-trusted-ca -o jsonpath='{.data.ca-bundle\.crt}' | head -c 100; echo
+oc -n $LM_NS exec deploy/$RELEASE-backend -- sh -c 'ls /var/run/secrets/kubernetes.io/serviceaccount/ /etc/pki/litemaas-trusted-ca/; echo $NODE_EXTRA_CA_CERTS'
+oc -n $LM_NS exec deploy/$RELEASE-backend -- node -e "fetch('$MAAS_API/health').then(r=>console.log(r.status)).catch(e=>console.log(e.cause||e))"
+oc -n $LM_NS logs deploy/$RELEASE-backend | grep -iE 'self.signed|unable to verify|CERT_' | tail
+```
+
+**Expected.** The injected bundle isn't empty, the node fetch prints a status code rather than a
+certificate error, and the logs show no TLS errors.
+
+**If different.** Point `MAAS_API_URL` at the in-cluster maas-api **Service** (signed by the service
+CA), or mount the right CA (`maas.trustedCaBundle.existingConfigMap`). As a last resort for tests
+only, set `K8S_API_SKIP_TLS_VERIFY=true`; it also disables verification for maas-api.
+
+### A7, A31 and A10. In-cluster configuration, health and config
+
+**Assumption.**
+
+- With no `K8S_*` set, the backend uses `KUBERNETES_SERVICE_HOST` and re-reads the projected SA
+  token on every request.
+- Prometheus uses the same token unless `PROMETHEUS_TOKEN` is set.
+- `/health` reports a `maas` section. That section never changes the overall status.
+
+**Verify.**
+
+```bash
+LM=https://$(oc -n $LM_NS get route -o jsonpath='{.items[0].spec.host}')
+curl -sk $LM/api/v1/health | jq '{status, maas}'
+curl -sk $LM/api/v1/config | jq '{maasEnabled, maasGatewayUrl}'
+oc -n $LM_NS logs deploy/$RELEASE-backend | grep -i 'maas' | head
+```
+
+**Expected.** `maas` reports `{enabled:true, maasApi:"healthy", kubernetes:"healthy",
+prometheus:"healthy", mock:false}`, and `maasEnabled` is true. Run the health check again after
+more than one hour (token rotation): it must still be healthy.
+
+**If different.**
+
+- `mock:true` means an endpoint variable is empty. In production it surfaces as 503 errors.
+- `kubernetes:"unhealthy"`: the health check reads a non-existent policy, so this means RBAC
+  (A6).
+- `prometheus` unhealthy: check `PROMETHEUS_URL`, `cluster-monitoring-view` and A5.
+
+The health check code is `checkMaasHealth` in `backend/src/routes/health.ts`.
+
+### A17. Model ids with `/` through the route
+
+**Assumption.** The OpenShift route passes `%2F` through, and Fastify decodes it.
+
+**Verify.**
+
+```bash
+curl -sk -H "Authorization: Bearer $USER_JWT" "$LM/api/v1/models/$MODEL_NS%2F$MODEL_REF" | jq '{id, backendType}'
+```
+
+`USER_JWT` comes from the browser, as described in Phase C.
+
+**Expected.** The model JSON is returned.
+
+**If different.** Any proxy between the route and the backend must preserve encoded slashes (for
+nginx: `proxy_pass` without a URI part, `merge_slashes off`). The frontend container's nginx
+config is in `frontend/`. The alternative is to change `maasModelId()` in `maas-resources.ts` to a
+separator other than `/`; that needs a data migration.
+
+### A16. Multi-replica locking
+
+**Assumption.** The reconciler (lock `0x4d414153`) and the MaaS model sync (`0x4d414154`) use
+session-level `pg_try_advisory_lock`. They are safe with direct PostgreSQL connections, but not
+behind a transaction-mode pooler.
+
+**Verify.** With two backend replicas:
+
+```bash
+PSQL "SELECT pid, objid FROM pg_locks WHERE locktype='advisory'"
+oc -n $LM_NS logs -l app.kubernetes.io/component=api --tail=200 | grep -i 'lock'
+```
+
+**Expected.** At most one holder per lock id.
+
+**If different.** Run a single replica, or connect the backend directly to PostgreSQL rather than
+through pgbouncer in transaction mode.
+
+---
+
+## Phase C: Identity (login token reused for maas-api)
+
+Get LiteMaaS JWTs for the next steps. Log in through the UI as the user, then as the admin, and in
+the browser devtools run `localStorage.getItem('access_token')`. Export the results as `USER_JWT`
+and `ADMIN_JWT`.
+
+### A3. Username match
+
+**Assumption.** `users.username` in LiteMaaS equals the OpenShift `User` name, which is also the
+identity Authorino and maas-api see. It is written into `subjects.users`, `owner.users` and CR
+names.
+
+**Verify.**
+
+```bash
+PSQL "SELECT username FROM users ORDER BY created_at DESC LIMIT 5"
+oc get users -o custom-columns=NAME:.metadata.name,IDENTITIES:.identities
+oc -n $NS get maassubscription,maasauthpolicy -l app.kubernetes.io/managed-by=litemaas \
+  -o custom-columns=NAME:.metadata.name,USER:.metadata.annotations.litemaas\\.io/username
+```
+
+**Expected.** The names are identical. Check special cases: `kube:admin`, emails (OIDC),
+upper-case names, and identity-provider mapping methods `add`/`generate`.
+
+**If different.** Both `MaasAccessService.getUsername()` (`maas-access.service.ts`) and
+`MaasKeyService.getUsername()` (`maas-key.service.ts`) read `users.username`. Map from the OpenShift
+`User` name there; `getOpenShiftUserInfo` in `oauth.service.ts` already reads it as
+`preferred_username`. OIDC deployments may need a prefix such as `oidc:`.
+
+### A1. The login token is accepted by maas-api
+
+**Assumption.** The access token from the LiteMaaS OAuth login is accepted by maas-api. Its default
+scopes are `user:info user:check-access`. It is stored encrypted in `user_oauth_tokens`.
+
+**Verify (authoritative, through LiteMaaS).** Log in as the user, subscribe to the MaaS model, and
+create a MaaS key in the UI. On failure, check the logs:
+
+```bash
+PSQL "SELECT user_id, expires_at, scope FROM user_oauth_tokens"
+oc -n $LM_NS logs deploy/$RELEASE-backend | grep -iE 'maas.*(401|403)|MAAS_REAUTH' | tail
+```
+
+**Expected.** The key is created. A failure with `MAAS_REAUTH_REQUIRED` and
+`details.reason: 'maas-api responded 401/403'`, right after a fresh login, means the scope or
+audience is wrong.
+
+**If different.** Set `OAUTH_SCOPES` (Helm: `maas.oauthScopes`), for example
+`user:info user:check-access user:full`. Then:
+
+- **ServiceAccount OAuth client** (Helm default `oauth.mode=serviceaccount`): it can only request
+  `user:info`, `user:check-access`, `user:list-projects` and `role:<role>:<ns>` scopes. If maas-api
+  needs more, switch to `oauth.mode=external` with an `OAuthClient` that allows the scope
+  (`scopeRestrictions`).
+- **OIDC**: if maas-api needs a token for a different audience, `routes/auth.ts` needs a
+  token-exchange step before `UserTokenService.storeToken()`.
+- In every case, users must log in again.
+
+### A2. Token lifetime
+
+**Assumption.** The token response carries `expires_in`. Tokens count as expired 30 s early, and
+there is no refresh, so an expired token means the user must log in again.
+
+**Verify.**
+
+```bash
+oc get oauth cluster -o jsonpath='{.spec.tokenConfig}{"\n"}'
+oc get oauthclient <client> -o jsonpath='{.accessTokenMaxAgeSeconds}{"\n"}'   # external mode
+PSQL "SELECT user_id, expires_at - now() FROM user_oauth_tokens"
+```
+
+**Expected.** `expires_at` is set, and the remaining time matches the configured lifetime
+(24 h by default).
+
+**If different.** When `expires_in` is missing, expiry is only discovered on a 401/403 from
+maas-api. That is handled, but users get the prompt later. The skew is `EXPIRY_SKEW_MS` in
+`backend/src/services/maas/user-token.service.ts`.
+
+### A25. Re-login prompt
+
+**Assumption.** A missing or expired token returns **HTTP 403** with
+`{error:{code:'MAAS_REAUTH_REQUIRED', details:{reason}}}`. It is deliberately not 401, because 401
+logs the SPA out.
+
+**Verify.**
+
+```bash
+PSQL "DELETE FROM user_oauth_tokens WHERE user_id = (SELECT id FROM users WHERE username='<user>')"
+```
+
+Then create a MaaS key in the UI.
+
+**Expected.** The create modal stays open with a "log in again" alert, and **Re-authenticate**
+returns to API Keys. Afterwards a key can be created.
+
+**If different.** On the frontend, see `isMaasReauthError()` (`frontend/src/utils/modelBackend.ts`)
+and `MaasReauthAlert`. On the backend, `ApplicationError.maasReauthRequired`.
+
+---
+
+## Phase D: Behavior through LiteMaaS
+
+### Model sync (A8 and A13 in practice)
+
+```bash
+curl -sk -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' -d '{}' $LM/api/v1/admin/models/maas/sync | jq
+curl -sk -H "Authorization: Bearer $ADMIN_JWT" $LM/api/v1/admin/models/maas/refs | jq '.data[] | {id, phase, endpoint, imported}'
+PSQL "SELECT id, availability, maas_phase, maas_endpoint, backend_model_name FROM models WHERE backend_type='maas'"
+```
+
+**Expected.** Every Ready ref is imported as available, and refs that aren't Ready are imported as
+unavailable. A LiteLLM model sync afterwards must not touch these rows:
+`POST /api/v1/models/sync` (admin), then re-run the query.
+
+### Subscriptions to policies (A11 in practice)
+
+Subscribe as the user (approve as the admin if the model is restricted), then run:
+
+```bash
+oc -n $NS get maasauthpolicy -l app.kubernetes.io/managed-by=litemaas -o yaml | grep -A8 'spec:'
+```
+
+Cancel the subscription and check that the user's policy loses the model, or is deleted when no
+MaaS model is left.
+
+### Keys (A18, A24)
+
+Create a MaaS key in the UI with a TPM limit, then:
+
+```bash
+oc -n $NS get maassubscription -l app.kubernetes.io/managed-by=litemaas -o yaml | grep -A12 'spec:'
+PSQL "SELECT id, key_prefix, maas_key_id, maas_sync_state, length(encrypted_key) FROM api_keys WHERE backend_type='maas'"
+oc -n $LM_NS logs deploy/$RELEASE-backend | grep -c 'sk-oai-'      # must be 0 (no plaintext in logs)
+```
+
+**Expected.** One `litemaas-key-<id>` per key, with `tokenRateLimits` equal to the TPM. The key row
+is `synced`, and View Key shows the same plaintext.
+
+Then edit the TPM and confirm `tokenRateLimits` changes (A23). Remove a model and confirm
+`modelRefs` changes. Shorten the expiry: a later date must be refused (A20). Rotate the key: the old
+key stops working and the new one works (A21).
+
+### Reconciler (A15)
+
+**Assumption.** The desired spec is compared with the live spec using JSON equality. If the API
+server adds defaults, every pass rewrites every object.
+
+**Verify.**
+
+```bash
+for i in 1 2; do curl -sk -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' -d '{}' $LM/api/v1/admin/maas/reconcile | jq -c .data; done
+```
+
+**Expected.** The second run reports `policiesApplied: 0` and `subscriptionsApplied: 0`.
+
+**If different.** Compare `oc get maassubscription <n> -o jsonpath='{.spec}'` with
+`buildSubscription()` / `buildAuthPolicy()` and normalize the difference. The comparison is in
+`MaasReconcilerService.reconcilePolicies()` / `reconcileSubscriptions()`
+(`maas-reconciler.service.ts`). Also confirm that no operator-created object carries
+`app.kubernetes.io/managed-by=litemaas`, because orphans with that label are deleted.
+
+### Revocation (A12, A19 in practice)
+
+Revoke a key in the UI, then:
+
+```bash
+oc -n $NS get maassubscription litemaas-key-<id>          # NotFound
+PSQL "SELECT is_active, maas_sync_state, maas_last_error FROM api_keys WHERE id='<id>'"
+```
+
+**Expected.** The key is inactive with state `synced`. If the state is `pending`, the maas-api
+revoke was refused (A19); the key is still inert, and the reconciler retries
+(`maasApiRevokePending`).
+
+### Usage (A26 to A29 in practice)
+
+After some traffic with a LiteMaaS-issued key, wait at least five minutes (the MaaS query cache),
+then:
+
+```bash
+curl -sk -H "Authorization: Bearer $USER_JWT" $LM/api/v1/usage/budget | jq '{currentSpend, maasSpend, maasTokens}'
+curl -sk -X POST -H "Authorization: Bearer $ADMIN_JWT" $LM/api/v1/admin/usage/refresh-today
+```
+
+**Expected.** `maasTokens` is greater than 0. Admin Usage shows the MaaS model attributed to the
+right user, with cost equal to tokens × the blended price.
+
+### Migration (A30)
+
+**Assumption.** **Migrate to MaaS** behaves as follows:
+
+- It copies the model and its **active** subscriptions, with no re-approval.
+- It blocks new subscriptions to the LiteLLM model.
+- LiteLLM access keeps working until the grace period ends.
+- When the grace period ends, the reconciler removes the model from users' LiteLLM keys and marks
+  the LiteLLM row `completed`.
+
+**Verify.** Use a test LiteLLM model, with `graceDays: 1` in the UI or through the API:
+
+```bash
+curl -sk -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' \
+  -d "{\"maasModelRef\":{\"name\":\"$MODEL_REF\",\"namespace\":\"$MODEL_NS\"},\"graceDays\":1}" \
+  "$LM/api/v1/admin/models/<litellm-id-url-encoded>/migrate-to-maas" | jq .data
+oc -n $NS get maasauthpolicy -l app.kubernetes.io/managed-by=litemaas
+PSQL "UPDATE models SET migration_grace_until = now() - interval '1 minute' WHERE id='<litellm-id>'"   # fast-forward
+curl -sk -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' -d '{}' $LM/api/v1/admin/maas/reconcile | jq '.data | {migrationsCompleted, migrationsPending}'
+```
+
+**Expected.**
+
+- `subscriptionsCopied` equals the number of active subscriptions, and policies exist for those
+  users.
+- After the fast-forward, `migrationsCompleted` is 1 and the LiteLLM keys no longer list the
+  model. The model still exists in LiteLLM itself; delete it there manually.
+
+**If different.** The logic is in `MaasMigrationService.migrate()` / `processExpiredGrace()`
+(`maas-migration.service.ts`).
+
+### A9. Encryption key
+
+**Assumption.**
+
+- `ENCRYPTION_KEY` is unset, so the key falls back to `LITELLM_MASTER_KEY`, then
+  `LITELLM_API_KEY`.
+- The fallback key is the same one earlier versions used, so existing `models.encrypted_api_key`
+  values still decrypt.
+- Setting `ENCRYPTION_KEY` later breaks them, and there is no automatic re-encryption.
+
+**Verify.**
+
+```bash
+PSQL "SELECT count(*) FROM models WHERE encrypted_api_key IS NOT NULL"
+```
+
+Edit a LiteLLM model in the UI: **Test configuration** must work without re-entering the key.
+
+**If different.** Rotation procedure, not automated:
+
+1. Decrypt the values with the old key and re-encrypt them with the new one, for
+   `models.encrypted_api_key` and `api_keys.encrypted_key`.
+2. Delete `user_oauth_tokens`; users log in again.
+
+### F2 and F3. Frontend backend info (resolved)
+
+`GET /subscriptions` now returns `modelBackendType`, `modelMigrationState` and
+`modelMigrationGraceUntil`. API key `modelDetails[]` now include `backendType`, `backendModelName`,
+`migrationState` and `migrationGraceUntil`.
+
+**Verify.**
+
+```bash
+curl -sk -H "Authorization: Bearer $USER_JWT" $LM/api/v1/subscriptions | jq '.data[] | {modelId, modelBackendType}'
+curl -sk -H "Authorization: Bearer $USER_JWT" $LM/api/v1/api-keys | jq '.data[0].modelDetails'
+```
+
+---
+
+## Phase E: End-to-end acceptance
+
+`dev-tools/maas-acceptance.sh` runs the whole user flow against the live deployment and exits
+non-zero at the first failed check:
+
+1. Config and health (no mock).
+2. Model sync, then the model is visible with `backendType=maas`.
+3. Subscribe, and optionally restrict the model with `RESTRICT=1`.
+4. Admin approves the subscription; it becomes active.
+5. The `MaaSAuthPolicy` names the model.
+6. Create a MaaS key with a TPM limit (`sk-oai-...`).
+7. The `MaaSSubscription` `litemaas-key-<id>` exists.
+8. Inference through the gateway with the served model name returns 200.
+9. View Key returns the same plaintext.
+10. Revoke the key: the subscription is deleted and the gateway returns **401/403**. The script
+    prints the revocation latency.
+11. Usage appears: `GET /usage/budget` shows `maasTokens > 0` and admin analytics contain the
+    model.
+12. A second reconciler pass applies nothing.
+
+```bash
+export LITEMAAS_URL=https://litemaas.$DOMAIN USER_JWT=... ADMIN_JWT=... MODEL_ID=$MODEL_NS/$MODEL_REF
+RESTRICT=1 ./dev-tools/maas-acceptance.sh 2>&1 | tee maas-acceptance.log
+```
+
+Steps 1–10 take a few minutes. Step 11 waits up to `USAGE_WAIT_S` (default 900 s) for Thanos to
+scrape Limitador and for the 5-minute usage query cache to expire. Run the script once as-is, and
+again after an expired-token scenario (A25) to confirm the re-login path.
+
+---
+
+## Code change map
+
+| Finding | File | Function or symbol |
+| --- | --- | --- |
+| CRD group, version or plural differs | `backend/src/services/maas/maas-resources.ts` | `MAAS_API_VERSION`, `MAAS_MODEL_REF`, `MAAS_AUTH_POLICY`, `MAAS_SUBSCRIPTION` |
+| MaaSModelRef fields differ, served name, endpoint | `maas-resources.ts`, `maas-model-sync.service.ts` | `parseModelRef()`, `insertModel()`, `updateModel()` |
+| AuthPolicy or Subscription spec shape | `maas-resources.ts` | `buildAuthPolicy()`, `buildSubscription()`, `TPM_WINDOW` |
+| Empty policy semantics | `maas-access.service.ts` | `syncUserAuthPolicy()` |
+| Username mapping | `maas-access.service.ts`, `maas-key.service.ts` | `getUsername()` |
+| maas-api request, response or status mapping | `maas-api.client.ts` | `MaasApiClient.createKey()`, `revokeKey()`, `searchKeys()`, `formatExpiresIn()` |
+| Controller delay before maas-api accepts a new subscription | `maas-key.service.ts` | `createApiKey()` (between `applySubscription()` and the maas-api call) |
+| Revocation semantics, SA revoke | `maas-key.service.ts`, `maas-reconciler.service.ts` | `clusterRevoke()`, `revokeInMaasApi()` |
+| Expiry or rotation | `maas-key.service.ts` | `updateExpiration()`, `rotateApiKey()` |
+| Reconcile never converges | `maas-reconciler.service.ts` | `reconcilePolicies()`, `reconcileSubscriptions()` |
+| Metric names, labels, windows | env `MAAS_USAGE_*`; `maas-usage.source.ts` | `promql()`, `queryDayRows()`, `dayWindow()`, `stripNamespace()` |
+| Model label resolution, cost | `maas-usage.source.ts` | `loadModels()`, `resolver()`, `getDayData()` |
+| Login token scope or audience | env `OAUTH_SCOPES`; `services/oauth.service.ts`, `routes/auth.ts` | `getScopes()`, callback / `UserTokenService.storeToken()` |
+| Token expiry skew | `maas/user-token.service.ts` | `EXPIRY_SKEW_MS` |
+| TLS trust | `services/http/tls-fetch.ts`, chart values | `loadClusterCaBundle()`, `maas.trustedCaBundle` |
+| RBAC | `deployment/helm/litemaas/templates/maas-rbac.yaml`, `deployment/kustomize/components/maas/` | — |
+| Inference base URL (curl, Playground) | `frontend/src/utils/modelBackend.ts`, `backend/src/services/api-key.service.ts` | `getModelBaseUrl()`, `maasBaseUrl` |
+| Health checks | `backend/src/routes/health.ts` | `checkMaasHealth` |
+
+After any code change, run `cd backend && npx vitest run tests/unit/services/maas tests/integration/routes/maas-*`
+and `cd frontend && npx vitest run src/test/components/maas`.
+
+---
+
+## Results log
+
+Copy this table into the PR or issue and fill it in.
+
+| ID | Result (OK / changed / blocked) | Notes (measured values, links) |
+| --- | --- | --- |
+| A1 token accepted by maas-api | | scopes used: |
+| A2 token lifetime | | |
+| A3 username match | | |
+| A4 maas-api contract | | expiresIn format: |
+| A5 TLS | | |
+| A6/A14 RBAC | | |
+| A7 in-cluster config, token rotation | | |
+| A8 MaaSModelRef shape | | |
+| A9 encryption key | | |
+| A10 config | | |
+| A11 AuthPolicy semantics | | default allow-all policy present? |
+| A12 revocation latency | | seconds: |
+| A13 served name | | |
+| A15 reconcile converges | | |
+| A16 locking | | |
+| A17 `%2F` through route | | |
+| A18 create ordering | | controller delay: |
+| A19 SA revoke | | |
+| A20 expiry | | |
+| A21 rotation | | |
+| A22 endpoint form | | |
+| A23 live subscription edits | | seconds to 429: |
+| A24 key prefix, no plaintext in logs | | |
+| A25 re-login prompt | | |
+| A26 metric names and labels | | |
+| A27 windows and retention | | retention: |
+| A28 token accounting, streaming | | |
+| A29 model label | | |
+| A30 migration | | |
+| A31 health | | |
+| F1 gateway CORS | | |
+| E2E `maas-acceptance.sh` | | log attached |

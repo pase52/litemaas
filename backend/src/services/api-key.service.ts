@@ -868,7 +868,11 @@ export class ApiKeyService extends BaseService {
              'provider', m.provider,
              'context_length', m.context_length,
              'supports_embeddings', COALESCE('embeddings' = ANY(m.features), false),
-             'supports_convert', COALESCE('convert' = ANY(m.features), false)
+             'supports_convert', COALESCE('convert' = ANY(m.features), false),
+             'backendType', COALESCE(m.backend_type, 'litellm'),
+             'backendModelName', m.backend_model_name,
+             'migrationState', m.migration_state,
+             'migrationGraceUntil', m.migration_grace_until
            )) FILTER (WHERE m.id IS NOT NULL) as model_details
          FROM api_keys ak
          LEFT JOIN api_key_models akm ON ak.id = akm.api_key_id
@@ -2245,6 +2249,10 @@ export class ApiKeyService extends BaseService {
             name: string;
             provider: string;
             contextLength?: number;
+            backendType?: 'litellm' | 'maas';
+            backendModelName?: string | null;
+            migrationState?: string | null;
+            migrationGraceUntil?: string | null;
           }>
         | undefined,
       // Keep subscription info for backward compatibility

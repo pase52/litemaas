@@ -741,7 +741,10 @@ export class SubscriptionService extends BaseService {
                m.supports_vision as model_supports_vision,
                m.supports_function_calling as model_supports_function_calling,
                m.supports_parallel_function_calling as model_supports_parallel_function_calling,
-               m.supports_tool_choice as model_supports_tool_choice
+               m.supports_tool_choice as model_supports_tool_choice,
+               m.backend_type as model_backend_type,
+               m.migration_state as model_migration_state,
+               m.migration_grace_until as model_migration_grace_until
         FROM subscriptions s
         LEFT JOIN models m ON s.model_id = m.id
         WHERE s.user_id = $1
@@ -2213,6 +2216,19 @@ export class SubscriptionService extends BaseService {
       modelSupportsParallelFunctionCalling:
         subscription.model_supports_parallel_function_calling as boolean,
       modelSupportsToolChoice: subscription.model_supports_tool_choice as boolean,
+
+      // Backend of the subscribed model (only when the query joined it)
+      ...(subscription.model_backend_type && {
+        modelBackendType: subscription.model_backend_type as 'litellm' | 'maas',
+      }),
+      ...(subscription.model_migration_state && {
+        modelMigrationState: subscription.model_migration_state as string,
+      }),
+      ...(subscription.model_migration_grace_until && {
+        modelMigrationGraceUntil: new Date(
+          subscription.model_migration_grace_until as string | Date,
+        ),
+      }),
     };
 
     return enhanced;

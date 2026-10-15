@@ -17,6 +17,7 @@ This guide covers the **Kustomize-based** deployment method for OpenShift Contai
 - [Accessing the Applications](#accessing-the-applications)
 - [Troubleshooting](#troubleshooting)
 - [Maintenance Operations](#maintenance-operations)
+- [RHOAI Models-as-a-Service (MaaS)](#rhoai-models-as-a-service-maas)
 
 ## Prerequisites
 
@@ -713,6 +714,47 @@ oc logs -l app=litellm --since=1h
 # Follow logs in real-time
 oc logs -f deployment/backend
 ```
+
+## RHOAI Models-as-a-Service (MaaS)
+
+The optional MaaS backend (see [MaaS backend](../features/maas-backend.md)) ships as the kustomize
+component `deployment/kustomize/components/maas`:
+
+| File | Content |
+| --- | --- |
+| `maas-serviceaccount.yaml.template` | ServiceAccount `litemaas-backend` used by the backend |
+| `maas-rbac.yaml.template` | Cluster-scoped: MaaSModelRef reader ClusterRole + binding, `cluster-monitoring-view` binding |
+| `maas-namespace-rbac.yaml.template` | Role + RoleBinding in `MAAS_NAMESPACE` (MaaSAuthPolicy / MaaSSubscription CRUD) — applied separately because the base namespace transformer would move it |
+| `maas-trusted-ca.yaml.template` | ConfigMap with the injected OpenShift trusted CA bundle |
+| `backend-maas-patch.yaml.template` | Backend Deployment patch: ServiceAccount, `MAAS_*` env, CA bundle mount, optional `ENCRYPTION_KEY` |
+
+1. Add to `user-values.env`:
+
+   ```bash
+   MAAS_ENABLED=true
+   MAAS_API_URL=https://maas.apps.cluster.example.com/maas-api
+   MAAS_GATEWAY_URL=https://maas.apps.cluster.example.com
+   # MAAS_NAMESPACE=models-as-a-service
+   # MAAS_MODEL_NAMESPACES=llm-models
+   # PROMETHEUS_URL=https://thanos-querier.openshift-monitoring.svc.cluster.local:9091
+   # OAUTH_SCOPES=user:info user:check-access user:full   # only if maas-api rejects the default token
+   ```
+
+2. Run `./preparation.sh`: it renders the component templates and appends
+   `components: [components/maas]` to `kustomization.yaml`.
+3. As a cluster admin:
+
+   ```bash
+   oc apply -k deployment/kustomize/
+   oc apply -f deployment/kustomize/components/maas/maas-namespace-rbac.yaml.local
+   ```
+
+4. If maas-api needs a broader token scope (`OAUTH_SCOPES`), allow it on the `OAuthClient`
+   (`scopeRestrictions`) and make users log in again.
+
+The component grants MaaSModelRef read access cluster-wide; to restrict it to
+`MAAS_MODEL_NAMESPACES`, replace the ClusterRole/ClusterRoleBinding with one Role/RoleBinding per
+model namespace. Then follow the [live validation runbook](../development/maas-backend-live-validation.md).
 
 ## Security Best Practices
 

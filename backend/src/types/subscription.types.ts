@@ -170,6 +170,11 @@ export interface EnhancedSubscription extends Subscription {
   modelSupportsFunctionCalling?: boolean;
   modelSupportsParallelFunctionCalling?: boolean;
   modelSupportsToolChoice?: boolean;
+
+  // Backend of the subscribed model (MaaS support)
+  modelBackendType?: 'litellm' | 'maas';
+  modelMigrationState?: string;
+  modelMigrationGraceUntil?: Date;
 }
 
 export interface EnhancedCreateSubscriptionDto extends CreateSubscriptionDto {

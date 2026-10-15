@@ -2117,7 +2117,7 @@
       "migrateConfirm": "Migra",
       "migrateDescription": "Crea un modello MaaS per \"{{model}}\" da un MaaSModelRef sul cluster e sposta le sue sottoscrizioni attive. L'accesso LiteLLM viene mantenuto fino al termine del periodo di tolleranza.",
       "migrateError": "Migrazione non riuscita",
-      "migrateNoRefs": "Nessun riferimento di modello disponibile. I riferimenti già importati non sono elencati.",
+      "migrateNoRefs": "Nessun riferimento di modello MaaS trovato nel cluster.",
       "migrateRefLabel": "Riferimento di modello MaaS",
       "migrateRefPlaceholder": "Selezionare un riferimento di modello",
       "migrateSuccessDesc": "{{count}} sottoscrizione/i spostata/e su MaaS. L'accesso LiteLLM resta disponibile fino al {{date}}.",
@@ -2152,6 +2152,9 @@
     },
     "migration": {
       "migratingUntil": "Migrazione a MaaS fino al {{date}}"
+    },
+    "budget": {
+      "estimatedSpend": "Utilizzo MaaS di questo mese (stimato, non conteggiato nel budget): {{amount}} per {{tokens}} token"
     }
   }
 }

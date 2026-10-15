@@ -34,6 +34,14 @@ helm install litemaas deployment/helm/litemaas/ \
 
 Backend and frontend image tags default to the chart's `appVersion` (currently `0.4.0`). Override with `backend.image.tag` / `frontend.image.tag`.
 
+## Optional: RHOAI Models-as-a-Service backend
+
+Set `maas.enabled=true` (see `values.maas.example.yaml`) to serve models through the RHOAI MaaS stack
+next to LiteLLM. The chart then adds the backend ServiceAccount RBAC (`templates/maas-rbac.yaml`,
+requires cluster-admin), the MaaS environment variables and, on OpenShift, the trusted CA bundle.
+Disabled by default; the rendered manifests are unchanged when off. See
+[MaaS backend](../../docs/features/maas-backend.md).
+
 ## Documentation
 
 For the full configuration reference, common scenarios (external database, external OAuth, Ingress/Route setup), and upgrade instructions, see:

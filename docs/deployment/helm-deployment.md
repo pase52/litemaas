@@ -24,6 +24,7 @@ The chart ships with example values files for common deployment scenarios:
 | `values.oidc.example.yaml` | OIDC provider (Keycloak, Auth0, Okta) on Kubernetes |
 | `values.kubernetes.example.yaml` | Kubernetes with Ingress + OIDC + production resources |
 | `values.external-db.example.yaml` | External PostgreSQL and LiteLLM instances |
+| `values.maas.example.yaml` | RHOAI Models-as-a-Service backend next to LiteLLM (OpenShift) |
 
 Copy the closest match and customize it:
 
@@ -420,6 +421,56 @@ backend:
 The backend will auto-discover the authorization, token, and userinfo endpoints from the OIDC provider's `.well-known/openid-configuration` document. Group memberships from the userinfo response are mapped to LiteMaaS roles using the same mapping as OpenShift groups.
 
 > **Note**: Ensure your OIDC provider is configured to include group claims in the userinfo response. Some providers require adding a `groups` scope or configuring a client mapper.
+
+### RHOAI Models-as-a-Service (MaaS)
+
+Enable the optional MaaS backend (see [MaaS backend](../features/maas-backend.md)) next to LiteLLM:
+
+```yaml
+maas:
+  enabled: true
+  apiUrl: "https://maas.apps.cluster.example.com/maas-api"
+  gatewayUrl: "https://maas.apps.cluster.example.com"
+  namespace: models-as-a-service     # MaaSAuthPolicy / MaaSSubscription namespace
+  modelNamespaces: ""                # empty = all namespaces (ClusterRole); "a,b" = one Role per namespace
+  oauthScopes: ""                    # e.g. "user:info user:check-access user:full" if maas-api needs it
+  prometheus:
+    url: "https://thanos-querier.openshift-monitoring.svc.cluster.local:9091"
+```
+
+With `maas.enabled=true` the chart:
+
+- sets the `MAAS_*`, `PROMETHEUS_URL` and `OAUTH_SCOPES` variables in the backend ConfigMap, and
+  `ENCRYPTION_KEY` from the backend Secret key `encryption-key` (optional; only rendered when
+  `maas.encryptionKey` is set — never set it on an existing install, see the warning in the
+  [configuration guide](configuration.md#rhoai-models-as-a-service-maas-backend));
+- renders `templates/maas-rbac.yaml` (when `maas.rbac.create=true`, default) for the backend
+  ServiceAccount:
+
+  | Kind | Namespace | Rules |
+  | --- | --- | --- |
+  | ClusterRole + ClusterRoleBinding `<release>-maas-modelrefs-reader-<ns>` (or a Role per `modelNamespaces` entry) | cluster | `get/list/watch maasmodelrefs.maas.opendatahub.io` |
+  | Role + RoleBinding `<release>-maas-access-manager` | `maas.namespace` | full CRUD on `maassubscriptions`, `maasauthpolicies` |
+  | ClusterRoleBinding `<release>-maas-monitoring-view-<ns>` → `cluster-monitoring-view` | cluster | Thanos Querier queries (`maas.prometheus.clusterMonitoringView`) |
+
+  Installing these requires cluster-admin rights. Set `maas.rbac.create=false` to manage them
+  yourself (same rules).
+- on OpenShift (`maas.trustedCaBundle.enabled`, default) creates a ConfigMap labeled
+  `config.openshift.io/inject-trusted-cabundle=true`, mounts it and sets `NODE_EXTRA_CA_CERTS`, so
+  the backend trusts the ingress CA that signs the maas-api route. On Kubernetes provide
+  `maas.trustedCaBundle.existingConfigMap` (key `ca-bundle.crt`) if needed.
+
+The chart's NetworkPolicies only restrict ingress; egress from the backend to the API server,
+maas-api and Thanos is not blocked. Verify the installation with the
+[live validation runbook](../development/maas-backend-live-validation.md):
+
+```bash
+# The backend ServiceAccount is named after the release fullname (release "litemaas" -> "litemaas")
+SA=system:serviceaccount:litemaas:litemaas
+oc auth can-i create maassubscriptions.maas.opendatahub.io -n models-as-a-service --as=$SA
+oc auth can-i list maasmodelrefs.maas.opendatahub.io --all-namespaces --as=$SA
+curl -s https://<litemaas-host>/api/v1/health | jq .maas   # mock must be false
+```
 
 ## Upgrading
 

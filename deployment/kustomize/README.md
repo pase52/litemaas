@@ -168,3 +168,10 @@ After successful deployment:
 ## Support
 
 For troubleshooting and detailed configuration, see the complete deployment guide in `docs/deployment/kustomize-deployment.md`.
+
+## Optional: RHOAI Models-as-a-Service backend
+
+`components/maas` adds the MaaS backend (ServiceAccount, RBAC, env, trusted CA bundle). Set
+`MAAS_ENABLED=true` and the `MAAS_*` values in `user-values.env` before running `preparation.sh`,
+then also apply `components/maas/maas-namespace-rbac.yaml.local` as a cluster admin. See
+[Kustomize deployment guide](../../docs/deployment/kustomize-deployment.md#rhoai-models-as-a-service-maas).

@@ -1,0 +1,125 @@
+{{/*
+RBAC for the RHOAI Models-as-a-Service (MaaS) backend.
+The backend ServiceAccount must:
+  - read MaaSModelRef objects (model sync)          -> ClusterRole (cluster-wide, or per namespace)
+  - manage MaaSAuthPolicy / MaaSSubscription objects -> Role in maas.namespace
+  - query Thanos Querier for Limitador metrics       -> ClusterRoleBinding to cluster-monitoring-view
+Rendered only when maas.enabled and maas.rbac.create are true.
+*/}}
+{{- if and .Values.maas.enabled .Values.maas.rbac.create }}
+{{- $sa := include "litemaas.serviceAccountName" . }}
+{{- $name := printf "%s-maas" (include "litemaas.fullname" .) }}
+{{- $modelNamespaces := list }}
+{{- range (splitList "," (.Values.maas.modelNamespaces | default "")) }}
+{{- if trim . }}
+{{- $modelNamespaces = append $modelNamespaces (trim .) }}
+{{- end }}
+{{- end }}
+{{- if $modelNamespaces }}
+{{- range $ns := $modelNamespaces }}
+# Read MaaSModelRef objects in model namespace {{ $ns }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-modelrefs-reader
+  namespace: {{ $ns }}
+  labels:
+    {{- include "litemaas.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: ["maas.opendatahub.io"]
+    resources: ["maasmodelrefs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-modelrefs-reader
+  namespace: {{ $ns }}
+  labels:
+    {{- include "litemaas.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-modelrefs-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ $.Release.Namespace }}
+---
+{{- end }}
+{{- else }}
+# Read MaaSModelRef objects in all namespaces (maas.modelNamespaces is empty)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-modelrefs-reader-{{ .Release.Namespace }}
+  labels:
+    {{- include "litemaas.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["maas.opendatahub.io"]
+    resources: ["maasmodelrefs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-modelrefs-reader-{{ .Release.Namespace }}
+  labels:
+    {{- include "litemaas.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}-modelrefs-reader-{{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
+---
+{{- end }}
+# Manage per-user MaaSAuthPolicy and per-key MaaSSubscription objects
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-access-manager
+  namespace: {{ .Values.maas.namespace }}
+  labels:
+    {{- include "litemaas.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["maas.opendatahub.io"]
+    resources: ["maassubscriptions", "maasauthpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-access-manager
+  namespace: {{ .Values.maas.namespace }}
+  labels:
+    {{- include "litemaas.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-access-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.maas.prometheus.clusterMonitoringView }}
+---
+# Query Thanos Querier (openshift-monitoring) for Limitador usage metrics
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-monitoring-view-{{ .Release.Namespace }}
+  labels:
+    {{- include "litemaas.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

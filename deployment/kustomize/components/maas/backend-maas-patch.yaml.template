@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+spec:
+  template:
+    spec:
+      serviceAccountName: litemaas-backend
+      containers:
+        - name: backend
+          env:
+            - name: MAAS_ENABLED
+              value: 'true'
+            # maas-api base URL (e.g. https://maas.apps.<domain>/maas-api)
+            - name: MAAS_API_URL
+              value: '${MAAS_API_URL}'
+            # Public OpenAI-compatible gateway URL handed to users
+            - name: MAAS_GATEWAY_URL
+              value: '${MAAS_GATEWAY_URL}'
+            - name: MAAS_NAMESPACE
+              value: '${MAAS_NAMESPACE}'
+            # Comma-separated MaaSModelRef namespaces; empty = all namespaces
+            - name: MAAS_MODEL_NAMESPACES
+              value: '${MAAS_MODEL_NAMESPACES}'
+            - name: MAAS_MIGRATION_GRACE_DAYS
+              value: '${MAAS_MIGRATION_GRACE_DAYS}'
+            # Thanos Querier for Limitador usage metrics
+            - name: PROMETHEUS_URL
+              value: '${PROMETHEUS_URL}'
+            # Login scopes override (empty = provider default); the stored user token must be
+            # accepted by maas-api
+            - name: OAUTH_SCOPES
+              value: '${OAUTH_SCOPES}'
+            # Trust the cluster CA bundle (ingress CA of the maas-api route)
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/pki/litemaas-trusted-ca/ca-bundle.crt
+            # Optional dedicated encryption key (add "encryption-key" to backend-secret);
+            # defaults to LITELLM_MASTER_KEY. Never set it on an existing install without
+            # re-encrypting (see docs/features/maas-backend.md).
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret
+                  key: encryption-key
+                  optional: true
+          volumeMounts:
+            - name: trusted-ca
+              mountPath: /etc/pki/litemaas-trusted-ca
+              readOnly: true
+      volumes:
+        - name: trusted-ca
+          configMap:
+            name: backend-trusted-ca
+            items:
+              - key: ca-bundle.crt
+                path: ca-bundle.crt
+            optional: true

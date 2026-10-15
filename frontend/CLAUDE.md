@@ -157,6 +157,17 @@ See [`docs/architecture/project-structure.md`](../docs/architecture/project-stru
 - `admin.service.ts` - Admin operations (API key quota defaults CRUD, bulk user limits, system stats)
 - `backup.service.ts` - **Database backup & restore** (capabilities, create, list, download, delete, restore, test-restore)
 
+## 🧩 MaaS Backend Support (opt-in)
+
+When `config.maasEnabled` is true (`hooks/useMaasEnabled.ts`), models and keys may use the RHOAI MaaS backend:
+
+- **Helpers**: `utils/modelBackend.ts` (`isMaasModel`, `getServedModelName`, `getModelBaseUrl`, `isMaasReauthError` — key on `error.code === 'MAAS_REAUTH_REQUIRED'`, never on HTTP status)
+- **Components**: `components/common/BackendBadge.tsx`, `components/common/MaasReauthAlert.tsx`
+- **Pages**: AdminModelsPage (sync, backend column, metadata-only edit, Migrate to MaaS), ApiKeysPage (backend toggle, TPM-only fields, re-auth, gateway curl), ChatbotPage (gateway base URL + served model name), UserApiKeysTab (MaaS models not selectable)
+- **IDs**: MaaS model ids contain `/` — always `encodeURIComponent` in URLs
+- **i18n**: `maas.*` keys in all 9 locales
+- **Tests**: `src/test/components/maas/`
+
 ## 🌍 Routing Structure
 
 **Main Routes**: `/home`, `/models`, `/subscriptions`, `/api-keys`, `/usage`, `/admin/*`

@@ -23,3 +23,21 @@ done
 
 # Rename processed kustomize
 mv kustomization.yaml.local kustomization.yaml
+
+# MaaS component (components/maas): defaults for optional values, then render its templates
+export MAAS_NAMESPACE="${MAAS_NAMESPACE:-models-as-a-service}"
+export MAAS_API_URL="${MAAS_API_URL:-https://maas.${CLUSTER_DOMAIN_NAME}/maas-api}"
+export MAAS_GATEWAY_URL="${MAAS_GATEWAY_URL:-https://maas.${CLUSTER_DOMAIN_NAME}}"
+export MAAS_MODEL_NAMESPACES="${MAAS_MODEL_NAMESPACES:-}"
+export MAAS_MIGRATION_GRACE_DAYS="${MAAS_MIGRATION_GRACE_DAYS:-14}"
+export PROMETHEUS_URL="${PROMETHEUS_URL:-https://thanos-querier.openshift-monitoring.svc.cluster.local:9091}"
+export OAUTH_SCOPES="${OAUTH_SCOPES:-}"
+for template in components/maas/*.yaml.template; do
+    [ -e "$template" ] || continue
+    envsubst < "$template" > "${template%.template}.local"
+done
+
+# Enable the MaaS component in the generated kustomization when requested
+if [ "${MAAS_ENABLED}" = "true" ]; then
+    printf '\n# RHOAI Models-as-a-Service backend\ncomponents:\n  - components/maas\n' >> kustomization.yaml
+fi

@@ -1,0 +1,51 @@
+# =============================================================================
+# LiteMaaS with the RHOAI Models-as-a-Service (MaaS) backend (OpenShift)
+# =============================================================================
+# LiteLLM stays deployed for existing models; MaaS models are synced from MaaSModelRef objects.
+# Requires cluster-admin at install time (ClusterRole / ClusterRoleBindings / Role in the MaaS
+# namespace). See docs/features/maas-backend.md and
+# docs/development/maas-backend-live-validation.md before enabling in production.
+#
+#   helm install litemaas deployment/helm/litemaas/ -n litemaas --create-namespace \
+#     -f deployment/helm/litemaas/values.maas.example.yaml
+global:
+  platform: openshift
+
+backend:
+  auth:
+    jwtSecret: "change-me-to-a-random-32-char-string"
+    adminApiKeys: "change-me-admin-key"
+    litellmApiKey: "sk-change-me-litellm-key"
+
+litellm:
+  auth:
+    masterKey: "sk-change-me-litellm-key"
+    uiPassword: "change-me-ui-password"
+
+postgresql:
+  auth:
+    password: "change-me-pg-password"
+
+route:
+  enabled: true
+
+maas:
+  enabled: true
+  # maas-api and gateway routes of the RHOAI MaaS installation
+  apiUrl: "https://maas.apps.cluster.example.com/maas-api"
+  gatewayUrl: "https://maas.apps.cluster.example.com"
+  namespace: models-as-a-service
+  # Namespaces holding MaaSModelRef objects ("" = all namespaces)
+  modelNamespaces: ""
+  migrationGraceDays: "14"
+  # Uncomment if maas-api rejects the login token (live validation A1). With the default
+  # ServiceAccount OAuth client only user:info / user:check-access / role scopes are allowed;
+  # broader scopes need oauth.mode=external with an OAuthClient.
+  # oauthScopes: "user:info user:check-access user:full"
+  prometheus:
+    url: "https://thanos-querier.openshift-monitoring.svc.cluster.local:9091"
+    clusterMonitoringView: true
+  rbac:
+    create: true
+  trustedCaBundle:
+    enabled: true

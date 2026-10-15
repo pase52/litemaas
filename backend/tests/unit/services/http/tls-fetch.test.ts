@@ -110,9 +110,25 @@ describe('loadClusterCaBundle', () => {
   });
 
   it('appends ca.crt and service-ca.crt to the system roots', () => {
-    const bundle = loadClusterCaBundle((p) => `PEM:${p.split('/').pop()}`)!;
+    const bundle = loadClusterCaBundle((p) => `PEM:${p.split('/').pop()}`, undefined)!;
     expect(bundle.length).toBeGreaterThan(2);
     expect(bundle.slice(-2)).toEqual(['PEM:ca.crt', 'PEM:service-ca.crt']);
+  });
+
+  it('also appends the NODE_EXTRA_CA_CERTS file (ingress / trusted CA bundle)', () => {
+    const bundle = loadClusterCaBundle(
+      (p) => `PEM:${p.split('/').pop()}`,
+      '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem',
+    )!;
+    expect(bundle.slice(-3)).toEqual(['PEM:ca.crt', 'PEM:service-ca.crt', 'PEM:tls-ca-bundle.pem']);
+  });
+
+  it('ignores an unreadable NODE_EXTRA_CA_CERTS file', () => {
+    const bundle = loadClusterCaBundle((p) => {
+      if (p.startsWith('/missing')) throw new Error('ENOENT');
+      return 'PEM';
+    }, '/missing/ca.pem')!;
+    expect(bundle.slice(-2)).toEqual(['PEM', 'PEM']);
   });
 
   it('works with only one of the files', () => {

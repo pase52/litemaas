@@ -15,6 +15,7 @@ This directory contains documentation for key features and functionality in Lite
 - **[Test Chatbot](test-chatbot.md)** - Chatbot testing guide and features
 - **[Audit Log](admin-tools.md#audit-log)** - Admin audit log viewing and filtering
 - **[Backup & Restore](admin-tools.md#backup--restore)** - Database backup and restore for LiteMaaS and LiteLLM
+- **[RHOAI Models-as-a-Service Backend](maas-backend.md)** - Per-model LiteLLM or RHOAI MaaS backend, MaaS keys, usage and migration
 
 ## Feature Categories
 
@@ -28,7 +29,7 @@ This directory contains documentation for key features and functionality in Lite
 
 ### Model Management
 
-- Model synchronization with LiteLLM
+- Model synchronization with LiteLLM and RHOAI MaaS (MaaSModelRef)
 - Model configuration and testing
 - Model popularity rating (1–5 stars based on 30-day usage, displayed on model cards)
 - API key management (multi-model support)

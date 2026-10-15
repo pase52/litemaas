@@ -363,6 +363,67 @@ backend:
     failureThreshold: 3
 
 # =============================================================================
+# RHOAI Models-as-a-Service (MaaS) backend (optional)
+# =============================================================================
+# When enabled, models can be served either by LiteLLM (default) or by the RHOAI 3.x
+# Models-as-a-Service stack (MaaSModelRef / MaaSAuthPolicy / MaaSSubscription + maas-api).
+# Disabled = no behavior change. See docs/features/maas-backend.md.
+maas:
+  # -- Enable the MaaS backend (sets MAAS_ENABLED)
+  enabled: false
+  # -- maas-api base URL, e.g. https://maas.apps.example.com/maas-api (MAAS_API_URL). Required.
+  apiUrl: ""
+  # -- Public OpenAI-compatible gateway URL handed to users, e.g. https://maas.apps.example.com
+  # (MAAS_GATEWAY_URL). Shown in "View Key" and used by the Playground.
+  gatewayUrl: ""
+  # -- Namespace holding MaaSAuthPolicy / MaaSSubscription objects (MAAS_NAMESPACE)
+  namespace: models-as-a-service
+  # -- Comma-separated namespaces scanned for MaaSModelRef objects (MAAS_MODEL_NAMESPACES).
+  # Empty = all namespaces (a ClusterRole is created); otherwise one Role per namespace.
+  modelNamespaces: ""
+  # -- Interval of the MaaSModelRef -> models sync (ms)
+  syncIntervalMs: "300000"
+  # -- Interval of the desired-state reconciler (policies, subscriptions, key retries, grace job) (ms)
+  reconcileIntervalMs: "300000"
+  # -- Default grace period (days) of the "Migrate to MaaS" admin action
+  migrationGraceDays: "14"
+  # -- OAuth scopes requested at login (OAUTH_SCOPES). The stored user token is used to call
+  # maas-api, which may need a broader scope than the default "user:info user:check-access".
+  # Empty = provider default. See docs/development/maas-backend-live-validation.md (A1).
+  oauthScopes: ""
+  # -- Dedicated encryption key for stored user tokens / MaaS keys / provider keys (ENCRYPTION_KEY).
+  # Empty = falls back to backend.auth.litellmMasterKey / litellmApiKey.
+  # WARNING: setting it on an existing install makes previously encrypted values unreadable.
+  # With backend.auth.existingSecret, add an optional "encryption-key" entry to that Secret instead.
+  encryptionKey: ""
+  # -- Kubernetes API overrides (default: in-cluster ServiceAccount). Rarely needed.
+  k8sApiUrl: ""
+  usage:
+    # -- Limitador token counter metric (MAAS_USAGE_HITS_METRIC)
+    hitsMetric: authorized_hits
+    # -- Limitador request counter metric (MAAS_USAGE_CALLS_METRIC)
+    callsMetric: authorized_calls
+    # -- Extra PromQL label matchers, e.g. namespace="kuadrant-system" (MAAS_USAGE_LABEL_MATCHERS)
+    labelMatchers: ""
+  prometheus:
+    # -- Thanos Querier URL (PROMETHEUS_URL). Empty disables MaaS usage collection.
+    url: "https://thanos-querier.openshift-monitoring.svc.cluster.local:9091"
+    # -- Skip TLS verification for Prometheus/Thanos (PROMETHEUS_SKIP_TLS_VERIFY)
+    skipTlsVerify: false
+    # -- Bind the backend ServiceAccount to the cluster-monitoring-view ClusterRole
+    clusterMonitoringView: true
+  rbac:
+    # -- Create the ClusterRole/Role/bindings the backend ServiceAccount needs
+    # (requires cluster-admin at install time). Set false to manage RBAC yourself.
+    create: true
+  trustedCaBundle:
+    # -- OpenShift: create a ConfigMap with the cluster trusted CA bundle injected and set
+    # NODE_EXTRA_CA_CERTS so the backend trusts the ingress CA of the maas-api route.
+    enabled: true
+    # -- Use an existing ConfigMap (key ca-bundle.crt) instead of creating one
+    existingConfigMap: ""
+
+# =============================================================================
 # Frontend
 # =============================================================================
 frontend:

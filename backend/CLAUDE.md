@@ -77,7 +77,7 @@ Fastify plugins are registered in specific order:
 
 **Subscription Approval Workflow**: `subscription_status_history` table tracks all status changes with full audit trail. Models table includes `restricted_access` boolean. Subscriptions enhanced with `status_reason`, `status_changed_at`, `status_changed_by` fields and unique constraint `(user_id, model_id)`.
 
-**Encrypted API Key Storage**: Models table includes `encrypted_api_key` (TEXT) column storing provider API keys encrypted with AES-256-GCM. Used to enable configuration testing during model editing without re-entering the key. Encryption key derived from `LITELLM_MASTER_KEY` (falls back to `LITELLM_API_KEY`). See `src/utils/encryption.ts`.
+**Encrypted API Key Storage**: Models table includes `encrypted_api_key` (TEXT) column storing provider API keys encrypted with AES-256-GCM. Used to enable configuration testing during model editing without re-entering the key. Encryption key from `getEncryptionKey()`: `ENCRYPTION_KEY`, falling back to `LITELLM_MASTER_KEY`, then `LITELLM_API_KEY` (also used for MaaS key plaintext and stored user OAuth tokens). See `src/utils/encryption.ts`.
 
 **Branding Customization**: `branding_settings` singleton table (enforced via `CHECK (id = 1)`) stores login page and header branding — custom logos (base64), title, subtitle, and per-element enable/disable toggles. Public `GET` endpoints serve settings metadata and images; admin `PATCH`/`PUT`/`DELETE` endpoints require `admin:banners:write` permission. See `src/services/branding.service.ts` and `src/routes/branding.ts`.
 
@@ -176,6 +176,18 @@ See [`docs/architecture/services.md`](../docs/architecture/services.md) for comp
 - Day-by-day caching with intelligent TTL
 - Admin-only endpoints with permission checks
 - Database transactions and query helpers
+
+## 🧩 RHOAI MaaS Backend (opt-in)
+
+`MAAS_ENABLED=true` adds a second model backend (see [`docs/features/maas-backend.md`](../docs/features/maas-backend.md)):
+
+- **Code**: `src/services/maas/` (sync, access, keys, reconciler, usage, migration, user token), `src/services/k8s/k8s-client.ts`, `src/services/backends/` (provider interfaces, `fastify.backends` registry from `plugins/backends.ts`), `fastify.maasClients` (undefined when off)
+- **Routing rule**: branch on `models.backend_type` / `api_keys.backend_type` at the top of public service methods; LiteLLM paths stay unchanged and LiteLLM model sync only touches `backend_type='litellm'` rows
+- **Ordering**: revoke on the cluster before the DB change (failure → `maas_sync_state='pending'`, reconciler retries); grants DB first
+- **Errors**: `ApplicationError.maasReauthRequired` (403 `MAAS_REAUTH_REQUIRED`, not 401) and `ApplicationError.maasError` (502)
+- **Mock mode**: unset endpoints in dev/test use `InMemoryK8sClient` / `MockMaasApiClient` / `MockPrometheusClient`
+- **Tests**: `tests/integration/routes/maas-*.test.ts`, `tests/unit/services/maas/`
+- **Unverified cluster assumptions**: [`docs/development/maas-backend-live-validation.md`](../docs/development/maas-backend-live-validation.md)
 
 ## 📄 LiteLLM Integration
 

@@ -226,6 +226,24 @@ export const UserBudgetSummary: React.FC<UserBudgetSummaryProps> = ({
               )}
             </Flex>
           </FlexItem>
+          {budgetData.maasSpend != null && (
+            <FlexItem>
+              <Content
+                component={ContentVariants.small}
+                data-testid="maas-estimated-spend"
+                style={{ color: 'var(--pf-t--global--text--color--subtle)' }}
+              >
+                {t(
+                  'maas.budget.estimatedSpend',
+                  'MaaS usage this month (estimated, not counted against the budget): {{amount}} for {{tokens}} tokens',
+                  {
+                    amount: formatCurrency(budgetData.maasSpend),
+                    tokens: (budgetData.maasTokens ?? 0).toLocaleString(),
+                  },
+                )}
+              </Content>
+            </FlexItem>
+          )}
         </Flex>
       </CardBody>
     </Card>

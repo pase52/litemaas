@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# RHOAI Models-as-a-Service (MaaS) backend component.
+# 1. Set the MAAS_* values in user-values.env and set MAAS_ENABLED=true; preparation.sh then
+#    renders the *.yaml.template files here and adds this component to kustomization.yaml.
+# 2. As a cluster admin, apply the base (it now includes this component) and the Role that
+#    lives in the MaaS namespace:
+#      oc apply -k deployment/kustomize/
+#      oc apply -f deployment/kustomize/components/maas/maas-namespace-rbac.yaml.local
+resources:
+  - maas-serviceaccount.yaml.local
+  - maas-trusted-ca.yaml.local
+  # Cluster-scoped: MaaSModelRef reader + cluster-monitoring-view binding
+  - maas-rbac.yaml.local
+
+patches:
+  - path: backend-maas-patch.yaml.local
+    target:
+      kind: Deployment
+      name: backend

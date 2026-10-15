@@ -1,0 +1,16 @@
+{{/*
+OpenShift trusted CA bundle for the MaaS backend.
+The Cluster Network Operator injects the cluster-wide trusted CA bundle (including the ingress CA
+that signs the maas-api / gateway routes) into a ConfigMap labeled
+config.openshift.io/inject-trusted-cabundle=true. The backend mounts it and points
+NODE_EXTRA_CA_CERTS at it.
+*/}}
+{{- if and (include "litemaas.maas.trustedCa" .) (not .Values.maas.trustedCaBundle.existingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "litemaas.backend.fullname" . }}-trusted-ca
+  labels:
+    {{- include "litemaas.componentLabels" (dict "context" . "component" "api") | nindent 4 }}
+    config.openshift.io/inject-trusted-cabundle: "true"
+{{- end }}

@@ -2117,7 +2117,7 @@
       "migrateConfirm": "마이그레이션",
       "migrateDescription": "클러스터의 MaaSModelRef에서 \"{{model}}\"용 MaaS 모델을 만들고 활성 구독을 이동합니다. 유예 기간이 끝날 때까지 LiteLLM 접근이 유지됩니다.",
       "migrateError": "마이그레이션에 실패했습니다",
-      "migrateNoRefs": "사용 가능한 모델 참조가 없습니다. 이미 가져온 참조는 표시되지 않습니다.",
+      "migrateNoRefs": "클러스터에서 MaaS 모델 참조를 찾을 수 없습니다.",
       "migrateRefLabel": "MaaS 모델 참조",
       "migrateRefPlaceholder": "모델 참조를 선택하세요",
       "migrateSuccessDesc": "구독 {{count}}건이 MaaS로 이동되었습니다. LiteLLM 접근은 {{date}}까지 유지됩니다.",
@@ -2152,6 +2152,9 @@
     },
     "migration": {
       "migratingUntil": "{{date}}까지 MaaS로 마이그레이션 중"
+    },
+    "budget": {
+      "estimatedSpend": "이번 달 MaaS 사용량(추정치, 예산에 포함되지 않음): {{tokens}} 토큰에 {{amount}}"
     }
   }
 }

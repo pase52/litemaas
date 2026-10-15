@@ -1,0 +1,44 @@
+# Read MaaSModelRef objects in all namespaces (model sync).
+# To restrict to MAAS_MODEL_NAMESPACES, replace this ClusterRole/ClusterRoleBinding with one
+# Role + RoleBinding per model namespace (same rules).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: litemaas-maas-modelrefs-reader-${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: litemaas
+rules:
+  - apiGroups: ['maas.opendatahub.io']
+    resources: ['maasmodelrefs']
+    verbs: ['get', 'list', 'watch']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: litemaas-maas-modelrefs-reader-${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: litemaas
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: litemaas-maas-modelrefs-reader-${NAMESPACE}
+subjects:
+  - kind: ServiceAccount
+    name: litemaas-backend
+    namespace: ${NAMESPACE}
+---
+# Query Thanos Querier (openshift-monitoring) for Limitador usage metrics.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: litemaas-maas-monitoring-view-${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: litemaas
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+subjects:
+  - kind: ServiceAccount
+    name: litemaas-backend
+    namespace: ${NAMESPACE}

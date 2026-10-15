@@ -2117,7 +2117,7 @@
       "migrateConfirm": "Migrar",
       "migrateDescription": "Cree un modelo MaaS para \"{{model}}\" a partir de un MaaSModelRef del clúster y traslade sus suscripciones activas. El acceso a LiteLLM se mantiene hasta que termine el período de gracia.",
       "migrateError": "Error en la migración",
-      "migrateNoRefs": "No se encontraron referencias de modelo disponibles. Las referencias ya importadas no aparecen en la lista.",
+      "migrateNoRefs": "No se encontraron referencias de modelo MaaS en el clúster.",
       "migrateRefLabel": "Referencia de modelo MaaS",
       "migrateRefPlaceholder": "Seleccione una referencia de modelo",
       "migrateSuccessDesc": "{{count}} suscripción(es) trasladada(s) a MaaS. El acceso a LiteLLM seguirá disponible hasta el {{date}}.",
@@ -2152,6 +2152,9 @@
     },
     "migration": {
       "migratingUntil": "Migrando a MaaS hasta el {{date}}"
+    },
+    "budget": {
+      "estimatedSpend": "Uso de MaaS este mes (estimado, no se descuenta del presupuesto): {{amount}} por {{tokens}} tokens"
     }
   }
 }

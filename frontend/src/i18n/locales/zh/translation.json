@@ -2117,7 +2117,7 @@
       "migrateConfirm": "迁移",
       "migrateDescription": "根据集群上的 MaaSModelRef 为“{{model}}”创建 MaaS 模型,并迁移其有效订阅。在宽限期结束前将保留 LiteLLM 访问权限。",
       "migrateError": "迁移失败",
-      "migrateNoRefs": "未找到可用的模型引用。已导入的引用不会列出。",
+      "migrateNoRefs": "集群中未找到 MaaS 模型引用。",
       "migrateRefLabel": "MaaS 模型引用",
       "migrateRefPlaceholder": "选择模型引用",
       "migrateSuccessDesc": "已将 {{count}} 个订阅迁移到 MaaS。LiteLLM 访问权限将保留至 {{date}}。",
@@ -2152,6 +2152,9 @@
     },
     "migration": {
       "migratingUntil": "正在迁移到 MaaS,截止 {{date}}"
+    },
+    "budget": {
+      "estimatedSpend": "本月 MaaS 使用量(估算值,不计入预算):{{tokens}} 个令牌,{{amount}}"
     }
   }
 }

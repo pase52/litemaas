@@ -273,7 +273,9 @@ const AdminModelsPage: React.FC = () => {
     },
   });
   const maasRefs: MaasModelRefInfo[] = Array.isArray(refsQuery.data) ? refsQuery.data : [];
-  const selectableRefs = maasRefs.filter((ref) => !ref.imported);
+  // Every ref is a valid target: the startup sync imports all refs, and the migration reuses an
+  // already-synced MaaS row. The backend answers 409 if the ref is already another model's target.
+  const selectableRefs = maasRefs;
 
   // MaaS: sync models from the cluster
   const syncMaasMutation = useMutation(
@@ -316,7 +318,7 @@ const AdminModelsPage: React.FC = () => {
         addNotification({
           title: t('maas.admin.migrateSuccessTitle', 'Migration started'),
           description: t('maas.admin.migrateSuccessDesc', {
-            count: result?.migratedSubscriptions ?? 0,
+            count: result?.subscriptionsCopied ?? 0,
             date: result?.graceUntil ? formatDate(result.graceUntil) : '-',
             defaultValue:
               '{{count}} subscription(s) moved to MaaS. LiteLLM access stays available until {{date}}.',
@@ -1616,7 +1618,7 @@ const AdminModelsPage: React.FC = () => {
                       <HelperTextItem>
                         {t(
                           'maas.admin.migrateNoRefs',
-                          'No available model references found. References that are already imported are not listed.',
+                          'No MaaS model references found on the cluster.',
                         )}
                       </HelperTextItem>
                     </HelperText>
@@ -1630,14 +1632,15 @@ const AdminModelsPage: React.FC = () => {
                     inputName="migrate-grace-days"
                     id="migrate-grace-days"
                     value={migrateGraceDays}
-                    min={0}
+                    min={1}
                     max={365}
                     onChange={(event) => {
                       const value = parseInt((event.target as HTMLInputElement).value, 10);
-                      setMigrateGraceDays(isNaN(value) ? 0 : Math.min(365, Math.max(0, value)));
+                      // Backend accepts 1..365 days
+                      setMigrateGraceDays(isNaN(value) ? 1 : Math.min(365, Math.max(1, value)));
                     }}
                     onPlus={() => setMigrateGraceDays(Math.min(365, migrateGraceDays + 1))}
-                    onMinus={() => setMigrateGraceDays(Math.max(0, migrateGraceDays - 1))}
+                    onMinus={() => setMigrateGraceDays(Math.max(1, migrateGraceDays - 1))}
                   />
                   <HelperText>
                     <HelperTextItem>

@@ -417,6 +417,20 @@ describe('MaaS API keys (MAAS_ENABLED=true)', () => {
       });
       expect(res.body).not.toContain(created.key);
       expect(res.body).not.toContain('encrypted');
+      // modelDetails carry the model backend so the UI can build curl / playground calls
+      const detail = item.modelDetails.find((m: any) => m.id === GRANITE);
+      expect(detail).toMatchObject({ backendType: 'maas' });
+      expect(detail.backendModelName).toBeTruthy();
+
+      // subscriptions list exposes the subscribed model's backend
+      const subs = await app.inject({
+        method: 'GET',
+        url: '/api/v1/subscriptions',
+        headers: { authorization: user() },
+      });
+      expect(subs.statusCode).toBe(200);
+      const sub = JSON.parse(subs.body).data.find((x: any) => x.modelId === GRANITE);
+      expect(sub.modelBackendType).toBe('maas');
 
       const one = await app.inject({
         method: 'GET',

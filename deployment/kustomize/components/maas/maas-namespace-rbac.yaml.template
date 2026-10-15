@@ -1,0 +1,32 @@
+# MaaSAuthPolicy / MaaSSubscription management in the MaaS namespace (${MAAS_NAMESPACE}).
+# This Role lives outside the LiteMaaS namespace, so it is NOT part of the kustomize component
+# (the base kustomization's namespace transformer would move it). Apply it separately as a
+# cluster admin after running preparation.sh:
+#   oc apply -f deployment/kustomize/components/maas/maas-namespace-rbac.yaml.local
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: litemaas-maas-access-manager
+  namespace: ${MAAS_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: litemaas
+rules:
+  - apiGroups: ['maas.opendatahub.io']
+    resources: ['maassubscriptions', 'maasauthpolicies']
+    verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: litemaas-maas-access-manager-${NAMESPACE}
+  namespace: ${MAAS_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: litemaas
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: litemaas-maas-access-manager
+subjects:
+  - kind: ServiceAccount
+    name: litemaas-backend
+    namespace: ${NAMESPACE}

@@ -102,10 +102,11 @@ export class AdminModelsService {
     modelId: string,
     request: MigrateToMaasRequest,
   ): Promise<MigrateToMaasResponse> {
-    return apiClient.post<MigrateToMaasResponse>(
+    const response = await apiClient.post<{ data: MigrateToMaasResponse; message?: string }>(
       `${this.basePath}/${encodeURIComponent(modelId)}/migrate-to-maas`,
       request,
     );
+    return response.data;
   }
 }
 

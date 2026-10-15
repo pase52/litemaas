@@ -104,6 +104,10 @@ export interface UserBudgetInfo {
   currentSpend: number;
   budgetDuration?: string;
   budgetResetAt?: string;
+  /** Estimated MaaS spend for the current UTC month (not part of currentSpend). */
+  maasSpend?: number;
+  /** MaaS tokens for the current UTC month. */
+  maasTokens?: number;
 }
 
 // Budget and limits update request

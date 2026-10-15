@@ -8,6 +8,7 @@ This document consolidates all environment variables used in the LiteMaaS applic
 - [OAuth Configuration](#oauth-configuration)
 - [JWT Configuration](#jwt-configuration)
 - [LiteLLM Integration](#litellm-integration)
+- [RHOAI Models-as-a-Service (MaaS) Backend](#rhoai-models-as-a-service-maas-backend)
 - [Backend API Protection](#backend-api-protection)
 - [Default User Values](#default-user-values)
 - [Admin Analytics Configuration](#admin-analytics-configuration)
@@ -313,6 +314,56 @@ In Helm deployments, `LITELLM_DATABASE_URL` is auto-constructed from PostgreSQL 
 In Kustomize deployments, the value is stored in `backend-secret` and constructed from `PG_ADMIN_PASSWORD` by default.
 
 **Persistent Storage**: Both Helm and Kustomize deployments provision a PersistentVolumeClaim (`5Gi` by default) mounted at `/data/backups` to ensure backup files survive pod restarts. In the Helm chart, configure via `backend.backup.persistence.size` and `backend.backup.persistence.storageClass`. Without persistent storage, backups are written to the ephemeral container filesystem and lost on pod restart.
+
+## RHOAI Models-as-a-Service (MaaS) Backend
+
+Optional second model backend: models served through the RHOAI 3.x Models-as-a-Service stack
+(MaaSModelRef / MaaSAuthPolicy / MaaSSubscription + maas-api). Disabled by default; with
+`MAAS_ENABLED=false` nothing changes. See [MaaS backend](../features/maas-backend.md) for the
+architecture and [live validation runbook](../development/maas-backend-live-validation.md) before
+enabling it in production.
+
+| Variable | Description | Default | Required |
+| --- | --- | --- | --- |
+| `MAAS_ENABLED` | Enable the MaaS backend | `false` | No |
+| `MAAS_API_URL` | maas-api base URL, e.g. `https://maas.apps.<domain>/maas-api` | - | When enabled |
+| `MAAS_GATEWAY_URL` | Public OpenAI-compatible gateway URL shown to users (View Key, curl, Playground fallback) | - | Recommended |
+| `MAAS_NAMESPACE` | Namespace of MaaSAuthPolicy / MaaSSubscription objects | `models-as-a-service` | No |
+| `MAAS_MODEL_NAMESPACES` | Comma-separated namespaces scanned for MaaSModelRef; empty = all namespaces | - | No |
+| `MAAS_SYNC_INTERVAL_MS` | MaaSModelRef → models sync interval | `300000` | No |
+| `MAAS_RECONCILE_INTERVAL_MS` | Reconciler interval (policies, subscriptions, key retries, expiry, migration grace) | `300000` | No |
+| `MAAS_MIGRATION_GRACE_DAYS` | Default grace period of "Migrate to MaaS" (1-365) | `14` | No |
+| `MAAS_USAGE_HITS_METRIC` | Limitador token counter metric | `authorized_hits` | No |
+| `MAAS_USAGE_CALLS_METRIC` | Limitador request counter metric | `authorized_calls` | No |
+| `MAAS_USAGE_LABEL_MATCHERS` | Extra PromQL matchers, e.g. `namespace="kuadrant-system"` | - | No |
+| `PROMETHEUS_URL` | Thanos Querier / Prometheus URL for MaaS usage | - | For usage |
+| `PROMETHEUS_TOKEN` | Bearer token for Prometheus | `K8S_TOKEN` / in-cluster SA token | No |
+| `PROMETHEUS_SKIP_TLS_VERIFY` | Skip TLS verification for Prometheus | `false` | No |
+| `K8S_API_URL` | Kubernetes API URL | in-cluster (`KUBERNETES_SERVICE_HOST`) | No |
+| `K8S_TOKEN` | Kubernetes bearer token | in-cluster SA token (re-read per request) | No |
+| `K8S_API_SKIP_TLS_VERIFY` | Skip TLS verification for the Kubernetes API **and maas-api** | `false` | No |
+| `ENCRYPTION_KEY` | Secret encrypting stored user tokens, MaaS key plaintext and provider API keys | `LITELLM_MASTER_KEY` → `LITELLM_API_KEY` | No |
+| `OAUTH_SCOPES` | Overrides the OAuth/OIDC login scopes (if maas-api needs a broader token) | provider default | No |
+| `NODE_EXTRA_CA_CERTS` | Extra CA bundle (e.g. OpenShift trusted CA bundle with the ingress CA); also added to the cluster CA bundle used for maas-api / Kubernetes / Thanos | - | No |
+
+> **Warning**: setting `ENCRYPTION_KEY` on an existing installation changes the derived encryption
+> key: provider API keys stored on models become unreadable (admins must re-enter them), stored
+> MaaS keys can no longer be revealed, and users must log in again.
+
+In development/test, a MaaS client whose endpoint is not configured runs in **mock mode**
+(in-memory cluster seeded with sample MaaSModelRefs, mock maas-api and Prometheus). In production
+an unconfigured client returns 503.
+
+### Example
+
+```bash
+MAAS_ENABLED=true
+MAAS_API_URL=https://maas.apps.cluster.example.com/maas-api
+MAAS_GATEWAY_URL=https://maas.apps.cluster.example.com
+MAAS_MODEL_NAMESPACES=llm-models
+PROMETHEUS_URL=https://thanos-querier.openshift-monitoring.svc.cluster.local:9091
+# OAUTH_SCOPES="user:info user:check-access user:full"   # only if maas-api rejects the default token
+```
 
 ## Redis Cache
 

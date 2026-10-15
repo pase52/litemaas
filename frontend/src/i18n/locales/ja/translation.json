@@ -2117,7 +2117,7 @@
       "migrateConfirm": "移行",
       "migrateDescription": "クラスター上の MaaSModelRef から「{{model}}」用の MaaS モデルを作成し、有効なサブスクリプションを移動します。猶予期間が終了するまで LiteLLM へのアクセスは維持されます。",
       "migrateError": "移行に失敗しました",
-      "migrateNoRefs": "利用可能なモデル参照が見つかりません。すでにインポート済みの参照は表示されません。",
+      "migrateNoRefs": "クラスター上に MaaS モデル参照が見つかりません。",
       "migrateRefLabel": "MaaS モデル参照",
       "migrateRefPlaceholder": "モデル参照を選択",
       "migrateSuccessDesc": "{{count}} 件のサブスクリプションを MaaS に移動しました。LiteLLM へのアクセスは {{date}} まで利用できます。",
@@ -2152,6 +2152,9 @@
     },
     "migration": {
       "migratingUntil": "{{date}} まで MaaS へ移行中"
+    },
+    "budget": {
+      "estimatedSpend": "今月の MaaS 使用量(推定値、予算には含まれません): {{tokens}} トークンで {{amount}}"
     }
   }
 }

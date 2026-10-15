@@ -63,9 +63,9 @@ interface BackendApiKeyDetails {
     supports_embeddings?: boolean;
     supports_convert?: boolean;
     backendType?: 'litellm' | 'maas';
-    backendModelName?: string;
-    migrationState?: string;
-    migrationGraceUntil?: string;
+    backendModelName?: string | null;
+    migrationState?: string | null;
+    migrationGraceUntil?: string | null;
   }[]; // New field for model details
   lastUsedAt?: string;
   expiresAt?: string;
@@ -177,9 +177,9 @@ class ApiKeysService {
           md.supports_convert ??
           ((md as Record<string, unknown>).supportsConvert as boolean | undefined),
         backendType: md.backendType,
-        backendModelName: md.backendModelName,
-        migrationState: md.migrationState,
-        migrationGraceUntil: md.migrationGraceUntil,
+        backendModelName: md.backendModelName ?? undefined,
+        migrationState: md.migrationState ?? undefined,
+        migrationGraceUntil: md.migrationGraceUntil ?? undefined,
       })),
       maxBudget: backend.maxBudget,
       currentSpend: backend.currentSpend,

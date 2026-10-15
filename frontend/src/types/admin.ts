@@ -214,8 +214,15 @@ export interface MigrateToMaasRequest {
   graceDays?: number;
 }
 
+/** Mirrors backend `POST /admin/models/:id/migrate-to-maas` → `{ data, message }` (unwrapped). */
 export interface MigrateToMaasResponse {
+  oldModelId: string;
   newModelId: string;
-  migratedSubscriptions: number;
+  /** True when a new MaaS model row was created (false = an already-synced row was reused). */
+  created: boolean;
   graceUntil: string;
+  subscriptionsCopied: number;
+  usersNotified: number;
+  /** Users whose MaaSAuthPolicy could not be synced (the reconciler retries). */
+  policyFailures: number;
 }

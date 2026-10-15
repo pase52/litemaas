@@ -41,3 +41,40 @@ data:
   {{- if .Values.backend.auth.k8sApiSkipTlsVerify }}
   K8S_API_SKIP_TLS_VERIFY: {{ .Values.backend.auth.k8sApiSkipTlsVerify | quote }}
   {{- end }}
+  {{- if .Values.maas.enabled }}
+  # RHOAI Models-as-a-Service backend
+  MAAS_ENABLED: "true"
+  {{- with .Values.maas.apiUrl }}
+  MAAS_API_URL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.maas.gatewayUrl }}
+  MAAS_GATEWAY_URL: {{ . | quote }}
+  {{- end }}
+  MAAS_NAMESPACE: {{ .Values.maas.namespace | quote }}
+  {{- with .Values.maas.modelNamespaces }}
+  MAAS_MODEL_NAMESPACES: {{ . | quote }}
+  {{- end }}
+  MAAS_SYNC_INTERVAL_MS: {{ .Values.maas.syncIntervalMs | quote }}
+  MAAS_RECONCILE_INTERVAL_MS: {{ .Values.maas.reconcileIntervalMs | quote }}
+  MAAS_MIGRATION_GRACE_DAYS: {{ .Values.maas.migrationGraceDays | quote }}
+  MAAS_USAGE_HITS_METRIC: {{ .Values.maas.usage.hitsMetric | quote }}
+  MAAS_USAGE_CALLS_METRIC: {{ .Values.maas.usage.callsMetric | quote }}
+  {{- with .Values.maas.usage.labelMatchers }}
+  MAAS_USAGE_LABEL_MATCHERS: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.maas.prometheus.url }}
+  PROMETHEUS_URL: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.maas.prometheus.skipTlsVerify }}
+  PROMETHEUS_SKIP_TLS_VERIFY: "true"
+  {{- end }}
+  {{- with .Values.maas.k8sApiUrl }}
+  K8S_API_URL: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.maas.oauthScopes }}
+  OAUTH_SCOPES: {{ . | quote }}
+  {{- end }}
+  {{- if include "litemaas.maas.trustedCa" . }}
+  NODE_EXTRA_CA_CERTS: "/etc/pki/litemaas-trusted-ca/ca-bundle.crt"
+  {{- end }}
+  {{- end }}

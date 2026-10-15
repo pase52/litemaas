@@ -2117,7 +2117,7 @@
       "migrateConfirm": "Migrieren",
       "migrateDescription": "Erstellen Sie ein MaaS-Modell für „{{model}}“ aus einem MaaSModelRef im Cluster und verschieben Sie die aktiven Abonnements. Der LiteLLM-Zugriff bleibt bis zum Ende der Übergangsfrist bestehen.",
       "migrateError": "Migration fehlgeschlagen",
-      "migrateNoRefs": "Keine verfügbaren Modellreferenzen gefunden. Bereits importierte Referenzen werden nicht aufgeführt.",
+      "migrateNoRefs": "Keine MaaS-Modellreferenzen im Cluster gefunden.",
       "migrateRefLabel": "MaaS-Modellreferenz",
       "migrateRefPlaceholder": "Modellreferenz auswählen",
       "migrateSuccessDesc": "{{count}} Abonnement(s) zu MaaS verschoben. Der LiteLLM-Zugriff bleibt bis {{date}} verfügbar.",
@@ -2152,6 +2152,9 @@
     },
     "migration": {
       "migratingUntil": "Migration zu MaaS bis {{date}}"
+    },
+    "budget": {
+      "estimatedSpend": "MaaS-Nutzung in diesem Monat (geschätzt, nicht auf das Budget angerechnet): {{amount}} für {{tokens}} Token"
     }
   }
 }

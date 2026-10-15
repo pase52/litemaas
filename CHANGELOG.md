@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **RHOAI Models-as-a-Service (MaaS) backend** (opt-in, `MAAS_ENABLED=true`): each model is served either by LiteLLM or by the Red Hat OpenShift AI 3.x Models-as-a-Service stack, side by side, with the same catalog → subscription → approval → API key → usage flow for users. See `docs/features/maas-backend.md`
+  - Per-model `backend_type`; MaaS models are synced from `MaaSModelRef` objects (id `<namespace>/<name>`) and enriched by admins (metadata-only edit, soft delete, "Sync MaaS models" / "Sync and restore removed models")
+  - Active subscriptions are mapped to a per-user `MaaSAuthPolicy`; MaaS API keys are a per-key `MaaSSubscription` (TPM limits as `tokenRateLimits`) plus a key issued by maas-api with the user's own OpenShift token (stored encrypted, re-login prompt when expired); key plaintext stored encrypted for View Key / Playground
+  - Desired-state reconciler with advisory lock (`POST /api/v1/admin/maas/reconcile`, new `admin:maas` permission), revocation-first ordering and retry of pending cluster operations
+  - Usage from Thanos Querier (Limitador `authorized_hits` / `authorized_calls`) merged into admin usage analytics; estimated MaaS spend on the user budget card
+  - Admin "Migrate to MaaS" action with a grace period (`POST /api/v1/admin/models/:id/migrate-to-maas`), "migrating until" labels and an API keys banner
+  - `maas` section in `GET /api/v1/health`; `maasEnabled` / `maasGatewayUrl` in `GET /api/v1/config`; backend info on models, subscriptions and API key model details
+  - Mock mode (in-memory cluster, maas-api and Prometheus) in development/test when the endpoints are not configured
+  - Helm `maas.*` values with `templates/maas-rbac.yaml` and OpenShift trusted CA bundle injection; Kustomize `components/maas`
+  - New environment variables: `MAAS_*`, `K8S_API_URL`, `K8S_TOKEN`, `PROMETHEUS_URL`, `PROMETHEUS_TOKEN`, `PROMETHEUS_SKIP_TLS_VERIFY`, `ENCRYPTION_KEY`, `OAUTH_SCOPES`
+  - Live validation runbook for RHOAI clusters (`docs/development/maas-backend-live-validation.md`) and end-to-end acceptance script (`dev-tools/maas-acceptance.sh`)
+
+### Fixed
+
+- `GET /api/v1/api-keys/:id` returned 500 because the response omitted the required `keyPrefix` and `isActive` fields
+
 ## [0.5.1] - 2026-08-12
 
 ### Added

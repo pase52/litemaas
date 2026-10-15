@@ -2117,7 +2117,7 @@
       "migrateConfirm": "Begin the journey",
       "migrateDescription": "Forge a MaaS model for \"{{model}}\" from a MaaSModelRef of the cluster and carry its active subscriptions across. LiteLLM access is kept until the days of grace end.",
       "migrateError": "The journey failed",
-      "migrateNoRefs": "No model references found. References already brought in are not listed.",
+      "migrateNoRefs": "No MaaS model references dwell upon the cluster.",
       "migrateRefLabel": "MaaS model reference (Echuil vegil)",
       "migrateRefPlaceholder": "Choose a model reference",
       "migrateSuccessDesc": "{{count}} subscription(s) carried over to MaaS. The LiteLLM path remains open until {{date}}.",
@@ -2152,6 +2152,9 @@
     },
     "migration": {
       "migratingUntil": "Journeying to MaaS until {{date}}"
+    },
+    "budget": {
+      "estimatedSpend": "MaaS usage this moon (foreseen, not reckoned against the treasure): {{amount}} for {{tokens}} tokens"
     }
   }
 }

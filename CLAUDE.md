@@ -38,6 +38,16 @@ See [`docs/architecture/project-structure.md`](docs/architecture/project-structu
 - **Redis Cache Flush**: Optional Redis integration (`REDIS_HOST`/`REDIS_PORT`) to flush LiteLLM's cache after model CRUD, ensuring all proxy pods pick up changes immediately
 - **Deployment**: Redis deployment included in Helm (`redis.enabled: true`) and Kustomize charts
 
+**RHOAI Models-as-a-Service (MaaS) Backend** (opt-in, `MAAS_ENABLED`): Per-model backend (`litellm` | `maas`) so models served by the RHOAI 3.x MaaS stack live next to LiteLLM models:
+
+- **Models**: Synced from `MaaSModelRef` (id `<namespace>/<name>`, URL-encode in `:id` routes); admins edit metadata only
+- **Access**: Active subscriptions → per-user `MaaSAuthPolicy`; MaaS keys → per-key `MaaSSubscription` (TPM only) + maas-api key created with the user's stored OpenShift token (`MAAS_REAUTH_REQUIRED`, HTTP 403, when expired)
+- **Reconciler**: DB is source of truth, labeled CRs (`app.kubernetes.io/managed-by=litemaas`), revocation-first, advisory lock
+- **Usage**: Thanos Querier (Limitador metrics) merged into admin analytics; cost estimated
+- **Migration**: Admin "Migrate to MaaS" with grace period
+- **Mock mode** in dev/test without a cluster; **off = zero behavior change**
+- See [`docs/features/maas-backend.md`](docs/features/maas-backend.md) and the live validation runbook [`docs/development/maas-backend-live-validation.md`](docs/development/maas-backend-live-validation.md)
+
 **Model Popularity Rating**: Usage-based 1–5 star rating on model cards, giving users a quick visual indicator of which models are most actively used:
 
 - **Computation**: Last 30 days of usage data with logarithmic min-max scaling (1–5 stars)
@@ -122,6 +132,7 @@ For detailed features, see:
 - [`docs/features/subscription-approval-workflow.md`](docs/features/subscription-approval-workflow.md) - Complete approval workflow guide
 - [`docs/features/users-management.md`](docs/features/users-management.md) - Admin user management guide
 - [`docs/features/branding-customization.md`](docs/features/branding-customization.md) - Branding customization guide
+- [`docs/features/maas-backend.md`](docs/features/maas-backend.md) - RHOAI Models-as-a-Service backend
 - [`docs/archive/features/admin-usage-analytics-implementation-plan.md`](docs/archive/features/admin-usage-analytics-implementation-plan.md) - Comprehensive admin analytics implementation (2000 lines)
 - [`docs/development/chart-components-guide.md`](docs/development/chart-components-guide.md) - Chart component patterns and utilities
 - [`docs/development/pattern-reference.md`](docs/development/pattern-reference.md) - Authoritative code patterns and anti-patterns

@@ -53,6 +53,7 @@ Welcome to the LiteMaaS documentation! This guide will help you understand, depl
 - **[Chart Components Guide](development/chart-components-guide.md)** - Chart component patterns and utilities
 - **[Chatbot Implementation](development/chatbot-implementation.md)** - AI chatbot integration
 - **[Model Sync](development/model-sync.md)** - Model synchronization processes
+- **[MaaS Live Validation Runbook](development/maas-backend-live-validation.md)** - Verifying the RHOAI MaaS backend on a live cluster
 - **[Concurrency Strategy](development/concurrency-strategy.md)** - Concurrency handling patterns
 - **[Code Review Checklist](development/code-review-checklist.md)** - Code review guidelines
 - **[Accessibility Guide](development/accessibility/README.md)** - WCAG 2.1 AA compliance and testing
@@ -67,6 +68,7 @@ Welcome to the LiteMaaS documentation! This guide will help you understand, depl
 - **[Users Management](features/users-management.md)** - Admin user management (profile, budget, API keys, subscriptions)
 - **[Settings and Tools](features/admin-tools.md)** - Administrative settings and tools
 - **[Branding Customization](features/branding-customization.md)** - Custom login page and header branding
+- **[RHOAI Models-as-a-Service Backend](features/maas-backend.md)** - Serve models through RHOAI MaaS next to LiteLLM ([live validation runbook](development/maas-backend-live-validation.md))
 - **[Currency Settings](features/admin-tools.md#currency-settings)** - Configurable currency for monetary displays
 - **[Admin Usage API Key Filter](features/admin-usage-api-key-filter.md)** - API key filtering for usage analytics
 - **[Authentication Flow](features/authentication-flow.md)** - OAuth integration details
@@ -154,6 +156,7 @@ See our [Contributing Guide](../CONTRIBUTING.md) for information on:
 - **Pattern Reference**: `docs/development/pattern-reference.md`
 - **Admin Features**: `docs/features/admin-tools.md`
 - **Branding Customization**: `docs/features/branding-customization.md`
+- **MaaS Backend**: `docs/features/maas-backend.md`
 - **Users Management**: `docs/features/users-management.md`
 - **User Roles/RBAC**: `docs/features/user-roles-administration.md`
 - **PatternFly 6 Components**: `docs/development/pf6-guide/`

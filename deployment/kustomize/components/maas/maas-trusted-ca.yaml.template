@@ -1,0 +1,10 @@
+# The Cluster Network Operator injects the cluster trusted CA bundle (including the ingress CA
+# signing the maas-api / gateway routes) into this ConfigMap (key ca-bundle.crt).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-trusted-ca
+  namespace: ${NAMESPACE}
+  labels:
+    app: backend
+    config.openshift.io/inject-trusted-cabundle: 'true'
