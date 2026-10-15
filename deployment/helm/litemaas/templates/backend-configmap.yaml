@@ -68,6 +68,9 @@ data:
   {{- if .Values.maas.prometheus.skipTlsVerify }}
   PROMETHEUS_SKIP_TLS_VERIFY: "true"
   {{- end }}
+  {{- if .Values.maas.apiSkipTlsVerify }}
+  MAAS_API_SKIP_TLS_VERIFY: "true"
+  {{- end }}
   {{- with .Values.maas.k8sApiUrl }}
   K8S_API_URL: {{ . | quote }}
   {{- end }}

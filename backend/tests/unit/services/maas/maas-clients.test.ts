@@ -51,6 +51,20 @@ describe('createMaasClients', () => {
     expect(c.k8s.mock && c.maasApi.mock && c.prometheus.mock).toBe(false);
   });
 
+  it('does not inherit K8S_API_SKIP_TLS_VERIFY for maas-api; has its own flag with a warning', () => {
+    const insecure = (c: any) => (c.maasApi as any).config.tls?.rejectUnauthorized === false;
+    const base = { MAAS_API_URL: 'https://maas.x', K8S_API_URL: 'https://api.x', K8S_TOKEN: 't' };
+    const k8sOnly = createMaasClients(fastifyWith({ ...base, K8S_API_SKIP_TLS_VERIFY: 'true' }));
+    expect(insecure(k8sOnly)).toBe(false);
+
+    const fastify = fastifyWith({ ...base, MAAS_API_SKIP_TLS_VERIFY: 'true' });
+    const own = createMaasClients(fastify);
+    expect(insecure(own)).toBe(true);
+    expect(fastify.log.warn).toHaveBeenCalledWith(
+      expect.stringContaining('MAAS_API_SKIP_TLS_VERIFY'),
+    );
+  });
+
   it('mixes real and mock clients independently', () => {
     delete process.env.KUBERNETES_SERVICE_HOST;
     const c = createMaasClients(fastifyWith({ MAAS_API_URL: 'https://maas.x' }));

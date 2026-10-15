@@ -144,6 +144,25 @@ describe('buildSubscription', () => {
     ]);
   });
 
+  it('never lets a per-model TPM raise the global limit (the tighter value wins)', () => {
+    const obj = buildSubscription({
+      apiKeyId: 'k',
+      userId: 'u',
+      username: 'a',
+      namespace: 'n',
+      globalTpm: 1000,
+      models: [
+        { name: 'hi', namespace: 'ns', tpm: 1_000_000_000 },
+        { name: 'zero', namespace: 'ns', tpm: 0 },
+        { name: 'lo', namespace: 'ns', tpm: 10 },
+      ],
+    });
+    const byName = Object.fromEntries(obj.spec!.modelRefs.map((m: any) => [m.name, m]));
+    expect(byName.hi.tokenRateLimits[0].limit).toBe(1000);
+    expect(byName.zero.tokenRateLimits[0].limit).toBe(1000);
+    expect(byName.lo.tokenRateLimits[0].limit).toBe(10);
+  });
+
   it('omits tokenRateLimits entirely without any TPM', () => {
     const obj = buildSubscription({
       apiKeyId: 'k',

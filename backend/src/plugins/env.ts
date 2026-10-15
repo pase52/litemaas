@@ -68,6 +68,7 @@ const envSchema = Type.Object({
   PROMETHEUS_URL: Type.Optional(Type.String()),
   PROMETHEUS_TOKEN: Type.Optional(Type.String()),
   PROMETHEUS_SKIP_TLS_VERIFY: Type.Optional(Type.String()),
+  MAAS_API_SKIP_TLS_VERIFY: Type.Optional(Type.String()),
 
   // Usage Cache
   USAGE_CACHE_TTL_MINUTES: Type.String({ default: '5' }),

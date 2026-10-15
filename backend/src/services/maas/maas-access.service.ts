@@ -4,6 +4,8 @@ import { upsertK8sObject, type K8sObject } from '../k8s/k8s-client.js';
 import type { MaasClients } from './maas-clients.js';
 import {
   LABEL_USER_ID,
+  MANAGED_SELECTOR,
+  foreignObjectReason,
   MAAS_AUTH_POLICY,
   MAAS_SUBSCRIPTION,
   authPolicyName,
@@ -129,7 +131,18 @@ export class MaasAccessService extends BaseService {
       const name = authPolicyName(username);
 
       if (models.length === 0) {
-        const deleted = await k8s.delete(MAAS_AUTH_POLICY, name, config.namespace);
+        const existing = await k8s.get(MAAS_AUTH_POLICY, name, config.namespace);
+        const refusal = existing ? foreignObjectReason(existing, userId) : null;
+        if (refusal) {
+          this.fastify.log.error(
+            { userId, policy: name, refusal },
+            'MaaS: auth policy is not managed by LiteMaaS - not deleting',
+          );
+          return { action: 'noop' as const, models: 0 };
+        }
+        const deleted = existing
+          ? await k8s.delete(MAAS_AUTH_POLICY, name, config.namespace)
+          : false;
         this.fastify.log.info({ userId, policy: name, deleted }, 'MaaS auth policy removed');
         return { action: deleted ? ('deleted' as const) : ('noop' as const), models: 0 };
       }
@@ -140,7 +153,9 @@ export class MaasAccessService extends BaseService {
         namespace: config.namespace,
         models,
       });
-      await upsertK8sObject(k8s, MAAS_AUTH_POLICY, policy, config.namespace);
+      await upsertK8sObject(k8s, MAAS_AUTH_POLICY, policy, config.namespace, (existing) =>
+        foreignObjectReason(existing, userId),
+      );
       this.fastify.log.info(
         { userId, policy: name, models: models.length },
         'MaaS auth policy applied',
@@ -221,7 +236,7 @@ export class MaasAccessService extends BaseService {
     const { k8s, config } = this.clients;
     const subs = await k8s.list(MAAS_SUBSCRIPTION, {
       namespace: config.namespace,
-      labelSelector: `${LABEL_USER_ID}=${sanitizeLabelValue(userId)}`,
+      labelSelector: `${MANAGED_SELECTOR},${LABEL_USER_ID}=${sanitizeLabelValue(userId)}`,
     });
 
     for (const sub of subs) {

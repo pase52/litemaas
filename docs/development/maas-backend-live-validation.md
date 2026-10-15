@@ -527,7 +527,7 @@ certificate error, and the logs show no TLS errors.
 
 **If different.** Point `MAAS_API_URL` at the in-cluster maas-api **Service** (signed by the service
 CA), or mount the right CA (`maas.trustedCaBundle.existingConfigMap`). As a last resort for tests
-only, set `K8S_API_SKIP_TLS_VERIFY=true`; it also disables verification for maas-api.
+only, set `MAAS_API_SKIP_TLS_VERIFY=true` (insecure; independent of `K8S_API_SKIP_TLS_VERIFY`, which no longer affects maas-api).
 
 ### A7, A31 and A10. In-cluster configuration, health and config
 
@@ -839,6 +839,27 @@ Edit a LiteLLM model in the UI: **Test configuration** must work without re-ente
 1. Decrypt the values with the old key and re-encrypt them with the new one, for
    `models.encrypted_api_key` and `api_keys.encrypted_key`.
 2. Delete `user_oauth_tokens`; users log in again.
+
+### A32. Old maas-api key stays valid after rotation until revoked
+
+LiteMaaS records the replaced maas-api key id in `api_keys.maas_pending_revoke_ids` and the
+reconciler retries `DELETE /v1/api-keys/{id}` until it succeeds. Verify that a revoked key id is
+rejected on the gateway immediately and that the service-account token may revoke other users' keys.
+
+```bash
+curl -s -X DELETE -H "Authorization: Bearer $(oc whoami -t)" "$MAAS_API_URL/v1/api-keys/$OLD_ID" -o /dev/null -w '%{http_code}\n'
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $OLD_SK" "$GATEWAY_URL/v1/models"   # expect 401/403
+```
+
+### A33. Per-key subscriptions only contain models with an active LiteMaaS subscription
+
+The reconciler drops models from a key's MaaSSubscription when the owner has no `active`
+subscription for them (admin-created keys with models but no subscription lose access, matching
+the AuthPolicy). Verify that no workflow relies on key models without a subscription.
+
+```bash
+oc get maassubscription -n models-as-a-service -l app.kubernetes.io/managed-by=litemaas -o yaml | grep -A3 modelRefs
+```
 
 ### F2 and F3. Frontend backend info (resolved)
 

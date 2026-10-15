@@ -398,6 +398,10 @@ maas:
   encryptionKey: ""
   # -- Kubernetes API overrides (default: in-cluster ServiceAccount). Rarely needed.
   k8sApiUrl: ""
+  # -- INSECURE: skip TLS verification for maas-api (MAAS_API_SKIP_TLS_VERIFY). maas-api receives
+  # users' OpenShift tokens, so prefer trustedCaBundle / NODE_EXTRA_CA_CERTS. Independent of
+  # backend.auth.k8sApiSkipTlsVerify.
+  apiSkipTlsVerify: false
   usage:
     # -- Limitador token counter metric (MAAS_USAGE_HITS_METRIC)
     hitsMetric: authorized_hits

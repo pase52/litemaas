@@ -27,6 +27,7 @@ vi.mock('../../../services/users.service', () => ({
     revokeUserApiKey: vi.fn(),
     createApiKeyForUser: vi.fn(),
     updateApiKeyForUser: vi.fn(),
+    updateUserApiKey: vi.fn(),
   },
 }));
 
@@ -68,6 +69,7 @@ describe('UserApiKeysTab with MaaS keys', () => {
     mockUsers.getUserApiKeys.mockResolvedValue(keysResponse);
     mockModels.getModels.mockResolvedValue(modelsResponse);
     mockUsers.updateApiKeyForUser.mockResolvedValue({});
+    mockUsers.updateUserApiKey.mockResolvedValue({});
   });
 
   it('does not offer MaaS models when creating a key for a user', async () => {
@@ -107,5 +109,28 @@ describe('UserApiKeysTab with MaaS keys', () => {
       expect(within(dialog).getAllByText('Llama MaaS').length).toBeGreaterThan(0),
     );
     expect(within(dialog).queryByText('GPT-4')).not.toBeInTheDocument();
+  });
+
+  it('saves a MaaS key edit without modelIds and without an untouched expiration', async () => {
+    const user = userEvent.setup();
+    renderWithAuth(<UserApiKeysTab userId="u1" canEdit={true} />, { user: mockAdminUser });
+
+    const row = (await screen.findByText('Gateway Key')).closest('tr') as HTMLElement;
+    await user.click(within(row).getByRole('button', { name: /kebab|actions/i }));
+    await user.click(await screen.findByText('Edit'));
+    const dialog = await screen.findByRole('dialog');
+
+    const tpm = dialog.querySelector('#edit-key-tpm') as HTMLInputElement;
+    await user.clear(tpm);
+    await user.type(tpm, '5000');
+    await user.click(within(dialog).getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(mockUsers.updateUserApiKey).toHaveBeenCalled());
+    const [userId, keyId, payload] = mockUsers.updateUserApiKey.mock.calls[0];
+    expect(userId).toBe('u1');
+    expect(keyId).toBe('maas-key');
+    expect(payload).not.toHaveProperty('modelIds');
+    expect(payload).not.toHaveProperty('expiresAt');
+    expect(payload.tpmLimit).toBe(5000);
   });
 });

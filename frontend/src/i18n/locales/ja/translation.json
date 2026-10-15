@@ -1919,7 +1919,8 @@
         "softBudget": "Soft Budget Warning ({{currencyCode}})",
         "softBudgetHelp": "Alert threshold before hitting max budget. Leave at 0 for none.",
         "tpmLimit": "Tokens per Minute (TPM)",
-        "tpmLimitHelp": "制限なしの場合は空欄にしてください。ユーザーレベルの制限が優先されます。"
+        "tpmLimitHelp": "制限なしの場合は空欄にしてください。ユーザーレベルの制限が優先されます。",
+        "maasModelsReadOnly": "MaaS APIキーのモデルは、キーの所有者のみが変更できます。"
       },
       "keyGenerated": "API Key Generated",
       "keyWarning": "Save this key now",

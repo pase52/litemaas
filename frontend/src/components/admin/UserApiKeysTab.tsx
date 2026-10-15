@@ -122,6 +122,8 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
   );
   const [editModelLimits, setEditModelLimits] = useState<Record<string, ModelLimits>>({});
   const [editExpiration, setEditExpiration] = useState('never');
+  // True once the admin touched the expiration control (MaaS keys only send expiresAt then)
+  const [editExpirationDirty, setEditExpirationDirty] = useState(false);
   const [editCustomExpiration, setEditCustomExpiration] = useState('');
 
   // Fetch API keys
@@ -377,6 +379,7 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
       setEditCustomExpiration('');
     }
 
+    setEditExpirationDirty(false);
     loadAvailableModels();
     setEditModalOpen(true);
   };
@@ -489,8 +492,9 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
       // MaaS keys: only TPM (global + per-model), models and expiration can change
       updateMutation.mutate({
         keyId: keyToEdit.id,
-        modelIds: editSelectedModelIds,
-        expiresAt: editExpiresAt,
+        // The models of a MaaS key can only be changed by its owner, so modelIds is never sent;
+        // expiresAt only when the admin changed it (maas-api keys can only be shortened)
+        ...(editExpirationDirty ? { expiresAt: editExpiresAt } : {}),
         tpmLimit: editTpmLimit ?? null,
         ...(Object.keys(modelTpmLimit).length > 0 ? { modelTpmLimit } : {}),
       });
@@ -1394,14 +1398,34 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
               <Content>{keyToEdit?.name}</Content>
             </FormGroup>
 
-            {renderModelSelector(
-              'edit',
-              updateMutation.isLoading,
-              editSelectedModelIds,
-              setEditSelectedModelIds,
-              handleEditModelToggle,
-              () => setEditModelLimits({}),
-              availableModels.filter((m) => isMaasModel(m) === editingMaasKey),
+            {editingMaasKey ? (
+              <FormGroup label={t('users.apiKeys.form.models', 'Models')} fieldId="edit-key-models">
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+                  {editSelectedModelIds.map((id) => (
+                    <Label key={id} color="blue">
+                      {availableModels.find((m) => m.id === id)?.name ?? id}
+                    </Label>
+                  ))}
+                </div>
+                <HelperText>
+                  <HelperTextItem>
+                    {t(
+                      'users.apiKeys.form.maasModelsReadOnly',
+                      'The models of a MaaS API key can only be changed by the key owner.',
+                    )}
+                  </HelperTextItem>
+                </HelperText>
+              </FormGroup>
+            ) : (
+              renderModelSelector(
+                'edit',
+                updateMutation.isLoading,
+                editSelectedModelIds,
+                setEditSelectedModelIds,
+                handleEditModelToggle,
+                () => setEditModelLimits({}),
+                availableModels.filter((m) => isMaasModel(m) === editingMaasKey),
+              )
             )}
 
             {/* Expiration */}
@@ -1414,6 +1438,7 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
                 value={editExpiration}
                 onChange={(_event, value) => {
                   setEditExpiration(value);
+                  setEditExpirationDirty(true);
                   if (value !== 'custom') setEditCustomExpiration('');
                 }}
                 isDisabled={updateMutation.isLoading || !canEdit}
@@ -1450,7 +1475,10 @@ const UserApiKeysTab: React.FC<UserApiKeysTabProps> = ({ userId, canEdit }) => {
               {editExpiration === 'custom' && (
                 <DatePicker
                   value={editCustomExpiration}
-                  onChange={(_event, value) => setEditCustomExpiration(value)}
+                  onChange={(_event, value) => {
+                    setEditCustomExpiration(value);
+                    setEditExpirationDirty(true);
+                  }}
                   aria-label={t('users.apiKeys.form.expiration', 'Expiration')}
                   style={{ marginTop: '0.5rem' }}
                   validators={[

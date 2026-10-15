@@ -341,7 +341,8 @@ enabling it in production.
 | `PROMETHEUS_SKIP_TLS_VERIFY` | Skip TLS verification for Prometheus | `false` | No |
 | `K8S_API_URL` | Kubernetes API URL | in-cluster (`KUBERNETES_SERVICE_HOST`) | No |
 | `K8S_TOKEN` | Kubernetes bearer token | in-cluster SA token (re-read per request) | No |
-| `K8S_API_SKIP_TLS_VERIFY` | Skip TLS verification for the Kubernetes API **and maas-api** | `false` | No |
+| `K8S_API_SKIP_TLS_VERIFY` | Skip TLS verification for the Kubernetes API (not maas-api) | `false` | No |
+| `MAAS_API_SKIP_TLS_VERIFY` | Insecure: skip TLS verification for maas-api (receives user tokens); prefer `NODE_EXTRA_CA_CERTS` | `false` | No |
 | `ENCRYPTION_KEY` | Secret encrypting stored user tokens, MaaS key plaintext and provider API keys | `LITELLM_MASTER_KEY` → `LITELLM_API_KEY` | No |
 | `OAUTH_SCOPES` | Overrides the OAuth/OIDC login scopes (if maas-api needs a broader token) | provider default | No |
 | `NODE_EXTRA_CA_CERTS` | Extra CA bundle (e.g. OpenShift trusted CA bundle with the ingress CA); also added to the cluster CA bundle used for maas-api / Kubernetes / Thanos | - | No |

@@ -24,6 +24,35 @@ interface ErrorWithStatusCode extends Error {
   code?: string;
 }
 
+/**
+ * MaaS TPM cap checks. A MaaS key without a token rate limit is unlimited, so when an admin
+ * maximum is configured: a global limit of 0 (and an explicit null on update) is rejected and
+ * every per-model limit must be a positive value no greater than the maximum. The global value
+ * exceeding the maximum is reported by the generic maximum check.
+ */
+export function maasTpmViolations(
+  maxTpm: number | null | undefined,
+  tpmLimit: number | null | undefined,
+  modelTpmLimit: Record<string, number> | null | undefined,
+  rejectNullGlobal = false,
+): string[] {
+  const violations: string[] = [];
+  if (maxTpm == null) return violations;
+  if (tpmLimit === 0 || (rejectNullGlobal && tpmLimit === null)) {
+    violations.push(`tpmLimit: must be between 1 and ${maxTpm} (unlimited is not allowed)`);
+  }
+  if (modelTpmLimit) {
+    for (const [modelId, limit] of Object.entries(modelTpmLimit)) {
+      if (!(typeof limit === 'number' && limit >= 1 && limit <= maxTpm)) {
+        violations.push(
+          `modelTpmLimit[${modelId}]: must be between 1 and ${maxTpm} (unlimited is not allowed)`,
+        );
+      }
+    }
+  }
+  return violations;
+}
+
 const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
   // Initialize services
   const liteLLMService = new LiteLLMService(fastify);
@@ -264,8 +293,18 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
           ).toISOString();
         }
 
+        // MaaS keys: an unset global TPM falls back to the admin maximum (never unlimited)
+        if (isMaas && maximums.tpmLimit != null && mergedBody.tpmLimit == null) {
+          mergedBody.tpmLimit = maximums.tpmLimit;
+        }
+
         // Enforce maximums
         const violations: string[] = [];
+        if (isMaas) {
+          violations.push(
+            ...maasTpmViolations(maximums.tpmLimit, mergedBody.tpmLimit, mergedBody.modelTpmLimit),
+          );
+        }
         if (
           !isMaas &&
           maximums.maxBudget != null &&
@@ -607,6 +646,18 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
           const { maximums } = quotaConfig;
 
           const violations: string[] = [];
+          if (
+            maximums.tpmLimit != null &&
+            (tpmLimit !== undefined || modelTpmLimit !== undefined)
+          ) {
+            const existingForTpm = await apiKeyService.getApiKey(id, user.userId);
+            if (existingForTpm?.backendType === 'maas') {
+              // null / 0 would remove the cap on a MaaS key, so they are rejected here
+              violations.push(
+                ...maasTpmViolations(maximums.tpmLimit, tpmLimit, modelTpmLimit, true),
+              );
+            }
+          }
           if (maximums.maxBudget != null && maxBudget != null && maxBudget > maximums.maxBudget) {
             violations.push(`maxBudget: ${maxBudget} exceeds maximum ${maximums.maxBudget}`);
           }

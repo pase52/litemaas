@@ -1919,7 +1919,8 @@
         "softBudget": "Soft Budget Warning ({{currencyCode}})",
         "softBudgetHelp": "Alert threshold before hitting max budget. Leave at 0 for none.",
         "tpmLimit": "Tokens per Minute (TPM)",
-        "tpmLimitHelp": "留空表示无限制。以用户级别限制为准。"
+        "tpmLimitHelp": "留空表示无限制。以用户级别限制为准。",
+        "maasModelsReadOnly": "MaaS API 密钥的模型只能由密钥所有者更改。"
       },
       "keyGenerated": "API Key Generated",
       "keyWarning": "Save this key now",

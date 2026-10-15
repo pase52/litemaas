@@ -1919,7 +1919,8 @@
         "softBudget": "Soft Budget Warning ({{currencyCode}})",
         "softBudgetHelp": "Alert threshold before hitting max budget. Leave at 0 for none.",
         "tpmLimit": "Tokens per Minute (TPM)",
-        "tpmLimitHelp": "Leave empty for no limit. Superseded by user-level limit."
+        "tpmLimitHelp": "Leave empty for no limit. Superseded by user-level limit.",
+        "maasModelsReadOnly": "Na mallë nin MaaS API-kelvar ranya ten i kelvar heru erda."
       },
       "keyGenerated": "API Key Generated",
       "keyWarning": "Save this key now",

@@ -270,10 +270,41 @@ class SubscriptionHookManager {
     }
   }
 
+  /**
+   * MaaS revocation-first: remove cluster access (auth policy + per-key subscriptions) and the
+   * model from the owner's MaaS keys BEFORE the subscription row stops being active.
+   * No-op when MaaS is disabled or the model is not a MaaS model. Never throws.
+   */
+  private async revokeMaasAccess(userId: string, modelId: string): Promise<void> {
+    if (!this.fastify.maasClients) return;
+    try {
+      const { MaasAccessService } = await import('../services/maas/maas-access.service.js');
+      const result = await new MaasAccessService(this.fastify).removeModelForUser(userId, modelId);
+      if (!result.applicable) return;
+      const { ApiKeyService } = await import('../services/api-key.service.js');
+      const apiKeyService = new ApiKeyService(this.fastify, this.fastify.liteLLMService);
+      await apiKeyService.removeModelFromUserApiKeys(userId, modelId);
+    } catch (error) {
+      this.fastify.log.error(
+        { error, userId, modelId },
+        'MaaS: revocation on subscription status change failed - reconciler will retry',
+      );
+    }
+  }
+
   private async suspendSubscriptionForQuotaExceeded(
     event: SubscriptionHookEvent & { quotaType: 'requests' | 'tokens' },
   ): Promise<void> {
     try {
+      // MaaS: revoke cluster access before the subscription stops being active
+      if (this.fastify.maasClients) {
+        const active = await this.fastify.dbUtils.queryOne<{ user_id: string; model_id: string }>(
+          `SELECT user_id, model_id FROM subscriptions WHERE id = $1 AND status = 'active'`,
+          [event.subscriptionId],
+        );
+        if (active) await this.revokeMaasAccess(active.user_id, active.model_id);
+      }
+
       // Auto-suspend subscription when quota is exceeded
       await this.fastify.dbUtils.query(
         `UPDATE subscriptions 
@@ -423,6 +454,11 @@ class SubscriptionHookManager {
       let processedCount = 0;
 
       for (const subscription of expiredSubscriptions) {
+        // MaaS: revoke cluster access first (no-op for LiteLLM models / when MaaS is off)
+        if (subscription.status === 'active') {
+          await this.revokeMaasAccess(subscription.user_id, subscription.model_id);
+        }
+
         // Update status to expired
         await this.fastify.dbUtils.query(
           `UPDATE subscriptions 

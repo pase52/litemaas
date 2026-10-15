@@ -105,6 +105,21 @@ export interface MaasModelLimit extends MaasModelRefTarget {
   tpm?: number | null;
 }
 
+/**
+ * Ownership guard for upsertK8sObject / deletes: returns a refusal reason unless the object is
+ * managed by LiteMaaS (and, when `userId` is given, labeled for that user).
+ */
+export function foreignObjectReason(existing: K8sObject, userId?: string): string | null {
+  const labels = existing.metadata.labels ?? {};
+  if (labels[LABEL_MANAGED_BY] !== LABEL_MANAGED_BY_VALUE) {
+    return `not labeled ${LABEL_MANAGED_BY}=${LABEL_MANAGED_BY_VALUE}`;
+  }
+  if (userId !== undefined && labels[LABEL_USER_ID] !== sanitizeLabelValue(userId)) {
+    return `owned by a different user (${LABEL_USER_ID})`;
+  }
+  return null;
+}
+
 function managedLabels(extra: Record<string, string>): Record<string, string> {
   return { [LABEL_MANAGED_BY]: LABEL_MANAGED_BY_VALUE, ...extra };
 }
@@ -173,9 +188,17 @@ export function buildSubscription(input: SubscriptionInput): K8sObject {
     spec: {
       owner: { users: [input.username], groups: [] },
       modelRefs: dedupe(input.models).map((m) => {
-        const tpm = m.tpm ?? input.globalTpm;
+        // A per-model limit may only tighten the key-wide limit, never replace (raise) it
+        const positive = (v?: number | null) => (v && v > 0 ? v : undefined);
+        const modelTpm = positive(m.tpm);
+        const globalTpm = positive(input.globalTpm);
+        const tpm =
+          modelTpm !== undefined && globalTpm !== undefined
+            ? Math.min(modelTpm, globalTpm)
+            : (modelTpm ?? globalTpm);
         const ref: Record<string, unknown> = { name: m.name, namespace: m.namespace };
-        if (tpm && tpm > 0) ref.tokenRateLimits = [{ limit: Math.floor(tpm), window: TPM_WINDOW }];
+        if (tpm !== undefined)
+          ref.tokenRateLimits = [{ limit: Math.floor(tpm), window: TPM_WINDOW }];
         return ref;
       }),
       priority: input.priority ?? 0,

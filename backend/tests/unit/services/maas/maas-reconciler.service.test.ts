@@ -92,6 +92,7 @@ describe('MaasReconcilerService', () => {
   it('marks a key as error when its subscription cannot be applied', async () => {
     const ctx = setup(true);
     ctx.dbUtils.query.mockResolvedValue({});
+    ctx.dbUtils.queryOne.mockResolvedValue({ ok: true });
     ctx.dbUtils.queryMany.mockImplementation(async (sql: string) => {
       if (sql.includes('FROM api_keys ak'))
         return [
@@ -190,6 +191,74 @@ describe('MaasReconcilerService', () => {
       ctx.service.stop();
       await vi.advanceTimersByTimeAsync(5000);
       expect(spy.mock.calls.length).toBeLessThanOrEqual(2); // + the one-off startup run
+    });
+  });
+
+  describe('revocation race and pending revokes', () => {
+    const keyRow = (over: Record<string, unknown> = {}) => ({
+      id: 'k1',
+      user_id: 'u1',
+      username: 'one',
+      tpm_limit: null,
+      model_tpm_limit: null,
+      maas_key_id: 'mk',
+      maas_subscription_name: null,
+      maas_sync_state: 'synced',
+      maas_pending_revoke_ids: [],
+      is_active: true,
+      revoked_at: null,
+      archived_at: null,
+      expires_at: null,
+      ...over,
+    });
+    const modelRow = {
+      api_key_id: 'k1',
+      model_id: 'ns/m',
+      maas_model_ref_name: 'm',
+      maas_model_ref_namespace: 'ns',
+    };
+
+    function wire(ctx: ReturnType<typeof setup>, key: Record<string, unknown>) {
+      ctx.dbUtils.query.mockResolvedValue({});
+      ctx.dbUtils.queryMany.mockImplementation(async (sql: string) => {
+        if (sql.includes('FROM api_keys ak')) return [key];
+        if (sql.includes('FROM api_key_models')) return [modelRow];
+        return [];
+      });
+    }
+
+    it('only considers models with an active subscription of the key owner', async () => {
+      const ctx = setup(true);
+      wire(ctx, keyRow());
+      ctx.dbUtils.queryOne.mockResolvedValue({ ok: true });
+      await ctx.service.reconcile();
+      const sql = String(
+        ctx.dbUtils.queryMany.mock.calls.find(([q]) => String(q).includes('JOIN api_keys ak'))?.[0],
+      );
+      expect(sql).toContain("s.status = 'active'");
+    });
+
+    it('skips the upsert when the key was revoked after the snapshot was read', async () => {
+      const ctx = setup(true);
+      wire(ctx, keyRow());
+      ctx.dbUtils.queryOne.mockResolvedValue({ ok: false });
+      const create = vi.spyOn(ctx.k8s, 'create');
+      const res = await ctx.service.reconcile();
+      expect(create).not.toHaveBeenCalled();
+      expect(res.subscriptionsApplied).toBe(0);
+    });
+
+    it('retries revoking old keys left over from a rotation, even for live keys', async () => {
+      const ctx = setup(true);
+      wire(ctx, keyRow({ maas_sync_state: 'pending', maas_pending_revoke_ids: ['old-1'] }));
+      ctx.dbUtils.queryOne.mockResolvedValue({ ok: true });
+      const res = await ctx.service.reconcile();
+      const clear = ctx.dbUtils.query.mock.calls.find(([q]) =>
+        String(q).includes('SET maas_pending_revoke_ids'),
+      );
+      // no token available in the test double -> stays pending and is counted
+      expect(clear).toBeUndefined();
+      expect(res.maasApiRevokePending).toBe(1);
     });
   });
 });

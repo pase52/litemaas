@@ -108,6 +108,41 @@ describe('MaasAccessService', () => {
     });
   });
 
+  describe('ownership guards', () => {
+    it('does not delete or overwrite an auth policy that LiteMaaS does not manage', async () => {
+      ctx.dbUtils.queryOne.mockResolvedValue({ username: 'jane' });
+      ctx.dbUtils.queryMany.mockResolvedValue([]);
+      const name = 'litemaas-jane';
+      await ctx.k8s.seed(
+        MAAS_AUTH_POLICY,
+        { metadata: { name, namespace: NS }, spec: { subjects: { users: ['x'] } } },
+        NS,
+      );
+      const del = vi.spyOn(ctx.k8s, 'delete');
+      const res = await ctx.service.syncUserAuthPolicy(USER);
+      expect(res.action).toBe('noop');
+      expect(del).not.toHaveBeenCalled();
+
+      ctx.dbUtils.queryMany.mockResolvedValue([row('a', 'm1')]);
+      await expect(ctx.service.syncUserAuthPolicy(USER)).rejects.toThrow(/Refusing to overwrite/);
+      expect((await ctx.k8s.get(MAAS_AUTH_POLICY, name, NS))?.spec?.subjects.users).toEqual(['x']);
+    });
+
+    it('lists only managed subscriptions when revoking a model', async () => {
+      ctx.dbUtils.queryOne
+        .mockResolvedValueOnce({ backend_type: 'maas' })
+        .mockResolvedValueOnce({ username: 'jane' })
+        .mockResolvedValueOnce(row('a', 'm1'));
+      ctx.dbUtils.queryMany.mockResolvedValue([]);
+      const list = vi.spyOn(ctx.k8s, 'list');
+      await ctx.service.removeModelForUser(USER, 'a/m1');
+      const selectors = list.mock.calls.map(([, o]: any) => o?.labelSelector).filter(Boolean);
+      expect(
+        selectors.some((s: string) => s.includes('app.kubernetes.io/managed-by=litemaas')),
+      ).toBe(true);
+    });
+  });
+
   describe('grantModelToUser', () => {
     it('skips non-MaaS models', async () => {
       ctx.dbUtils.queryOne.mockResolvedValue({ backend_type: 'litellm' });
@@ -179,6 +214,12 @@ describe('MaasAccessService', () => {
         .mockResolvedValueOnce({ backend_type: 'maas' })
         .mockResolvedValueOnce({ username: 'jane' });
       ctx.dbUtils.queryMany.mockResolvedValue([]);
+      vi.spyOn(ctx.k8s, 'get').mockResolvedValue({
+        metadata: {
+          name: 'litemaas-jane',
+          labels: { 'app.kubernetes.io/managed-by': 'litemaas', 'litemaas.io/user-id': USER },
+        },
+      } as any);
       vi.spyOn(ctx.k8s, 'delete').mockRejectedValue(new Error('403 forbidden'));
 
       const res = await ctx.service.removeModelForUser(USER, 'a/m1');

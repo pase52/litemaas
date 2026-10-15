@@ -302,7 +302,7 @@ describe('MaasKeyService', () => {
       load(current);
       await expect(ctx.service.updateExpiration('k1', 'u1', null)).rejects.toThrow(/shortened/);
       await expect(
-        ctx.service.updateExpiration('k1', 'u1', new Date(current.getTime() + 1000)),
+        ctx.service.updateExpiration('k1', 'u1', new Date(current.getTime() + 2 * 86_400_000)),
       ).rejects.toThrow(/shortened/);
       const sooner = new Date(current.getTime() - 86_400_000);
       await ctx.service.updateExpiration('k1', 'u1', sooner);
@@ -314,10 +314,152 @@ describe('MaasKeyService', () => {
 
     it('a key without expiry can get one, but cannot be set to never', async () => {
       load(null);
-      await expect(ctx.service.updateExpiration('k1', 'u1', null)).rejects.toThrow();
       await expect(
         ctx.service.updateExpiration('k1', 'u1', new Date(Date.now() + 1000)),
       ).resolves.toBeDefined();
+    });
+  });
+
+  describe('updateExpiration (unchanged values)', () => {
+    const row = (expires: Date | null) => ({
+      id: 'k1',
+      user_id: 'u1',
+      is_active: true,
+      expires_at: expires,
+      models: [],
+      backend_type: 'maas',
+    });
+
+    it('is a no-op when a key without expiry stays "never"', async () => {
+      ctx.db.queryOne.mockResolvedValue(row(null));
+      await expect(ctx.service.updateExpiration('k1', 'u1', null)).resolves.toBeDefined();
+      expect(
+        ctx.db.query.mock.calls.find(([sql]: any) => String(sql).includes('SET expires_at')),
+      ).toBeUndefined();
+    });
+
+    it('does not move the stored timestamp when the same calendar day is sent back', async () => {
+      const current = new Date(Date.now() + 10 * 86_400_000);
+      ctx.db.queryOne.mockResolvedValue(row(current));
+      const dayStart = new Date(current.toISOString().split('T')[0]);
+      await ctx.service.updateExpiration('k1', 'u1', dayStart);
+      expect(
+        ctx.db.query.mock.calls.find(([sql]: any) => String(sql).includes('SET expires_at')),
+      ).toBeUndefined();
+    });
+  });
+
+  describe('updateLimits (partial updates)', () => {
+    function loadKey() {
+      ctx.db.queryOne.mockImplementation(async (sql: string) => {
+        if (sql.includes('FROM api_keys WHERE id')) {
+          return {
+            id: 'k1',
+            user_id: 'u1',
+            name: 'k',
+            is_active: true,
+            backend_type: 'maas',
+            tpm_limit: 500,
+            model_tpm_limit: { 'ns/a': 100 },
+            maas_subscription_name: 'litemaas-key-k1',
+          };
+        }
+        if (sql.includes('FROM users')) return { username: 'alice' };
+        if (sql.startsWith('UPDATE api_keys')) return { id: 'k1' };
+        return null;
+      });
+      ctx.db.queryMany.mockImplementation(async (sql: string) => {
+        if (sql.includes('SELECT model_id FROM api_key_models')) return [{ model_id: 'ns/a' }];
+        if (sql.includes('FROM api_key_models akm JOIN models m')) return [modelRow('ns/a')];
+        return [];
+      });
+    }
+
+    it('patching only tpmLimit keeps the per-model limits', async () => {
+      loadKey();
+      await ctx.service.updateLimits('k1', 'u1', { tpmLimit: 800, modelTpmLimit: undefined });
+      const update = ctx.db.queryOne.mock.calls.find(([sql]: any) =>
+        String(sql).startsWith('UPDATE api_keys'),
+      );
+      expect(update[1][1]).toBe(800);
+      expect(JSON.parse(update[1][2])).toEqual({ 'ns/a': 100 });
+    });
+
+    it('patching only modelTpmLimit keeps the global limit; explicit null clears it', async () => {
+      loadKey();
+      await ctx.service.updateLimits('k1', 'u1', {
+        tpmLimit: undefined,
+        modelTpmLimit: { 'ns/a': 50 },
+      });
+      let update = ctx.db.queryOne.mock.calls.find(([sql]: any) =>
+        String(sql).startsWith('UPDATE api_keys'),
+      );
+      expect(update[1][1]).toBe(500);
+      ctx.db.queryOne.mockClear();
+      loadKey();
+      await ctx.service.updateLimits('k1', 'u1', { tpmLimit: null });
+      update = ctx.db.queryOne.mock.calls.find(([sql]: any) =>
+        String(sql).startsWith('UPDATE api_keys'),
+      );
+      expect(update[1][1]).toBeNull();
+    });
+  });
+
+  describe('rotateApiKey', () => {
+    function setupRotation() {
+      ctx.db.queryOne.mockImplementation(async (sql: string) =>
+        sql.includes('FROM api_keys WHERE id')
+          ? {
+              id: 'k1',
+              user_id: 'u1',
+              name: 'k',
+              key_prefix: 'sk-oai-old',
+              is_active: true,
+              backend_type: 'maas',
+              expires_at: null,
+              maas_key_id: 'old-id',
+              maas_subscription_name: 'litemaas-key-k1',
+            }
+          : null,
+      );
+      ctx.db.queryMany.mockResolvedValue([{ model_id: 'ns/a' }]);
+      const txQueries: Array<[string, unknown[]]> = [];
+      ctx.db.withTransaction.mockImplementation(async (cb: any) =>
+        cb({
+          query: vi.fn().mockImplementation(async (sql: string, params: unknown[]) => {
+            txQueries.push([sql, params]);
+            return { rows: [] };
+          }),
+        }),
+      );
+      return txQueries;
+    }
+
+    it('records the old maas-api key id as pending in the swap transaction and keeps it when revoke fails', async () => {
+      const txQueries = setupRotation();
+      vi.spyOn(ctx.maasApi, 'revokeKey').mockRejectedValue(new Error('maas-api down'));
+      ctx.serviceToken.mockReturnValue(undefined);
+
+      const res = await ctx.service.rotateApiKey('k1', 'u1');
+      expect(res.key).toBeTruthy();
+
+      const swap = txQueries.find(([sql]) => sql.includes('maas_pending_revoke_ids'))!;
+      expect(swap[1]).toContain('pending');
+      expect(swap[1]).toContain('old-id');
+      // the pending id is not cleared because the revoke failed
+      const cleared = ctx.db.query.mock.calls.find(([sql]: any) =>
+        String(sql).includes('array_remove(maas_pending_revoke_ids'),
+      );
+      expect(cleared).toBeUndefined();
+    });
+
+    it('clears the pending id once the old key is revoked', async () => {
+      setupRotation();
+      await ctx.service.rotateApiKey('k1', 'u1');
+      const cleared = ctx.db.query.mock.calls.find(([sql]: any) =>
+        String(sql).includes('array_remove(maas_pending_revoke_ids'),
+      );
+      expect(cleared?.[1]).toEqual(['k1', 'old-id']);
     });
   });
 

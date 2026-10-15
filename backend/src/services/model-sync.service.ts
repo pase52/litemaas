@@ -539,7 +539,8 @@ export class ModelSyncService {
       const orphanedKeysResult = await client.query(
         `
         UPDATE api_keys 
-        SET is_active = false, updated_at = CURRENT_TIMESTAMP
+        SET is_active = false, updated_at = CURRENT_TIMESTAMP,
+            maas_sync_state = CASE WHEN backend_type = 'maas' AND maas_key_id IS NOT NULL THEN 'pending' ELSE maas_sync_state END
         WHERE id IN (
           SELECT ak.id 
           FROM api_keys ak

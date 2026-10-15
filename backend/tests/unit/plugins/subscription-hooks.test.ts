@@ -615,6 +615,50 @@ describe('Subscription Hooks Plugin', () => {
       );
     });
 
+    describe('MaaS revocation', () => {
+      afterEach(() => {
+        (app as any).maasClients = undefined;
+      });
+
+      it('revokes MaaS access before marking an active subscription expired', async () => {
+        const { MaasAccessService } = await import(
+          '../../../src/services/maas/maas-access.service'
+        );
+        (app as any).maasClients = { config: { namespace: 'ns' }, k8s: {}, maasApi: {} };
+        const order: string[] = [];
+        const revoke = vi
+          .spyOn(MaasAccessService.prototype, 'removeModelForUser')
+          .mockImplementation(async () => {
+            order.push('revoke');
+            return { applicable: false, revoked: true };
+          });
+        vi.spyOn(app.dbUtils, 'queryMany').mockResolvedValue([
+          { id: 'sub-1', user_id: 'user-1', model_id: 'ns/m', status: 'active' },
+        ]);
+        vi.spyOn(app.dbUtils, 'query').mockImplementation(async (sql: string) => {
+          if (String(sql).includes("SET status = 'expired'")) order.push('update');
+          return { rows: [], rowCount: 1 } as any;
+        });
+
+        await app.subscriptionHooks.processExpiredSubscriptions();
+
+        expect(revoke).toHaveBeenCalledWith('user-1', 'ns/m');
+        expect(order).toEqual(['revoke', 'update']);
+      });
+
+      it('does not touch MaaS when it is disabled', async () => {
+        const { MaasAccessService } = await import(
+          '../../../src/services/maas/maas-access.service'
+        );
+        const revoke = vi.spyOn(MaasAccessService.prototype, 'removeModelForUser');
+        vi.spyOn(app.dbUtils, 'queryMany').mockResolvedValue([
+          { id: 'sub-1', user_id: 'user-1', model_id: 'm', status: 'active' },
+        ]);
+        await app.subscriptionHooks.processExpiredSubscriptions();
+        expect(revoke).not.toHaveBeenCalled();
+      });
+    });
+
     it('should return count of processed subscriptions', async () => {
       vi.spyOn(app.dbUtils, 'queryMany').mockResolvedValue([
         { id: 'sub-1', user_id: 'user-1', model_id: 'model-1', status: 'active' },

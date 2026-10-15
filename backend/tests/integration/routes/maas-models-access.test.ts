@@ -587,6 +587,14 @@ describe('MaaS models, access hooks and reconciler (MAAS_ENABLED=true)', () => {
         `INSERT INTO api_key_models (api_key_id, model_id) VALUES ($1, $2), ($1, $3)`,
         [keyId, LLAMA, GRANITE],
       );
+      // The reconciler only keeps models the owner still has an active subscription for
+      for (const modelId of [LLAMA, GRANITE]) {
+        await app.dbUtils.query(
+          `INSERT INTO subscriptions (user_id, model_id, status) VALUES ($1, $2, 'active')
+           ON CONFLICT (user_id, model_id) DO UPDATE SET status = 'active'`,
+          [TEST_USER_IDS.USER, modelId],
+        );
+      }
 
       const data = JSON.parse((await reconcile(admin())).body).data;
       expect(data.subscriptionsApplied).toBe(1);

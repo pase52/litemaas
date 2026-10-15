@@ -670,17 +670,29 @@ const ApiKeysPage: React.FC = () => {
     try {
       if (isEditMode && editingKey) {
         // Update existing API key
+        // MaaS keys: maas-api can only shorten an expiry, so send expiresAt only when the user
+        // actually changed it ('never' on a key without expiry, or the unchanged date, is a no-op)
+        const expirationUnchanged =
+          isMaasKeyForm &&
+          (editingKey.expiresAt
+            ? newKeyExpiration === 'custom' &&
+              newKeyCustomExpiration === new Date(editingKey.expiresAt).toISOString().split('T')[0]
+            : newKeyExpiration === 'never');
         const updateRequest = {
           name: newKeyName,
           modelIds: selectedModelIds,
-          expiresAt:
-            newKeyExpiration === 'never'
-              ? null
-              : newKeyExpiration === 'custom'
-                ? new Date(newKeyCustomExpiration).toISOString()
-                : new Date(
-                    Date.now() + parseInt(newKeyExpiration) * 24 * 60 * 60 * 1000,
-                  ).toISOString(),
+          ...(expirationUnchanged
+            ? {}
+            : {
+                expiresAt:
+                  newKeyExpiration === 'never'
+                    ? null
+                    : newKeyExpiration === 'custom'
+                      ? new Date(newKeyCustomExpiration).toISOString()
+                      : new Date(
+                          Date.now() + parseInt(newKeyExpiration) * 24 * 60 * 60 * 1000,
+                        ).toISOString(),
+              }),
           // MaaS keys only support TPM limits
           maxBudget: isMaasKeyForm ? undefined : (newKeyMaxBudget ?? undefined),
           budgetDuration: isMaasKeyForm ? undefined : newKeyBudgetDuration || undefined,

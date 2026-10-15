@@ -341,15 +341,31 @@ export class K8sClient implements IK8sClient {
   }
 }
 
+/** Thrown by upsertK8sObject when the ownership guard refuses to overwrite an existing object */
+export class K8sForeignObjectError extends Error {
+  constructor(
+    public readonly kind: string,
+    public readonly objectName: string,
+    reason: string,
+  ) {
+    super(`Refusing to overwrite ${kind}/${objectName}: ${reason}`);
+    this.name = 'K8sForeignObjectError';
+  }
+}
+
 /**
  * Create the object if absent, otherwise replace it (carrying over resourceVersion).
  * Retries once when a concurrent writer wins the create/replace race.
+ *
+ * `ownershipGuard` is called with the existing object; a returned string refuses the overwrite
+ * (K8sForeignObjectError) so objects LiteMaaS does not manage are never taken over.
  */
 export async function upsertK8sObject<T extends K8sObject = K8sObject>(
   client: IK8sClient,
   ref: K8sResourceRef,
   object: K8sObject,
   namespace?: string,
+  ownershipGuard?: (existing: K8sObject) => string | null,
 ): Promise<T> {
   const ns = namespace ?? object.metadata.namespace;
   for (let attempt = 0; ; attempt++) {
@@ -358,6 +374,9 @@ export async function upsertK8sObject<T extends K8sObject = K8sObject>(
       if (!existing) {
         return await client.create<T>(ref, object, ns);
       }
+      const refusal = ownershipGuard?.(existing);
+      if (refusal)
+        throw new K8sForeignObjectError(object.kind ?? 'object', object.metadata.name, refusal);
       const next: K8sObject = {
         ...object,
         metadata: { ...object.metadata, resourceVersion: existing.metadata.resourceVersion },

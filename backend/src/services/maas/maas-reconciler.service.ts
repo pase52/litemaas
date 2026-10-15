@@ -8,6 +8,7 @@ import { MaasMigrationService } from './maas-migration.service.js';
 import {
   LABEL_API_KEY_ID,
   MANAGED_SELECTOR,
+  foreignObjectReason,
   MAAS_AUTH_POLICY,
   MAAS_SUBSCRIPTION,
   buildAuthPolicy,
@@ -60,6 +61,7 @@ interface KeyRow {
   maas_key_id: string | null;
   maas_subscription_name: string | null;
   maas_sync_state: string | null;
+  maas_pending_revoke_ids: string[] | null;
   is_active: boolean;
   revoked_at: Date | null;
   archived_at: Date | null;
@@ -195,22 +197,70 @@ export class MaasReconcilerService extends BaseService {
     }
   }
 
+  /** Active MaaS (user, model) pairs; optionally for a single user */
+  private async loadPolicyRows(userId?: string): Promise<PolicyRow[]> {
+    return this.fastify.dbUtils.queryMany<PolicyRow>(
+      `SELECT DISTINCT u.id AS user_id, u.username,
+              m.maas_model_ref_name, m.maas_model_ref_namespace
+         FROM subscriptions s
+         JOIN users u ON u.id = s.user_id
+         JOIN models m ON m.id = s.model_id
+        WHERE s.status = 'active'
+          AND m.backend_type = 'maas'
+          AND m.maas_model_ref_name IS NOT NULL
+          AND m.maas_model_ref_namespace IS NOT NULL
+          ${userId ? 'AND s.user_id = $1' : ''}`,
+      userId ? [userId] : [],
+    );
+  }
+
+  /**
+   * The pass works on a snapshot taken before slow cluster calls, while user-facing revocation
+   * runs concurrently. Right before granting, re-read the DB and report whether every model of
+   * the desired state is still granted; otherwise the upsert is skipped (the next pass converges).
+   */
+  private async policyStillGranted(userId: string, models: MaasModelRefTarget[]): Promise<boolean> {
+    const fresh = await this.loadPolicyRows(userId);
+    const keys = new Set(
+      fresh.map((r) => `${r.maas_model_ref_namespace}/${r.maas_model_ref_name}`),
+    );
+    return models.every((m) => keys.has(`${m.namespace}/${m.name}`));
+  }
+
+  /** Same re-check for a per-key subscription: key still live and every model still active */
+  private async keyStillGranted(
+    keyId: string,
+    userId: string,
+    limits: MaasModelLimit[],
+  ): Promise<boolean> {
+    const fresh = await this.fastify.dbUtils.queryOne<{ ok: boolean }>(
+      `SELECT (is_active AND revoked_at IS NULL AND archived_at IS NULL
+               AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)) AS ok
+         FROM api_keys WHERE id = $1`,
+      [keyId],
+    );
+    if (!fresh?.ok) return false;
+    const rows = await this.fastify.dbUtils.queryMany<KeyModelRow>(
+      `SELECT akm.api_key_id, akm.model_id, m.maas_model_ref_name, m.maas_model_ref_namespace
+         FROM api_key_models akm
+         JOIN models m ON m.id = akm.model_id
+        WHERE akm.api_key_id = $1
+          AND EXISTS (
+            SELECT 1 FROM subscriptions s
+             WHERE s.user_id = $2 AND s.model_id = akm.model_id AND s.status = 'active'
+          )`,
+      [keyId, userId],
+    );
+    const keys = new Set(rows.map((r) => `${r.maas_model_ref_namespace}/${r.maas_model_ref_name}`));
+    return limits.every((l) => keys.has(`${l.namespace}/${l.name}`));
+  }
+
   // ------------------------------------------------------------------ policies
 
   private async reconcilePolicies(result: ReconcileResult): Promise<void> {
     const { k8s, config } = this.clients;
     try {
-      const rows = await this.fastify.dbUtils.queryMany<PolicyRow>(
-        `SELECT DISTINCT u.id AS user_id, u.username,
-                m.maas_model_ref_name, m.maas_model_ref_namespace
-           FROM subscriptions s
-           JOIN users u ON u.id = s.user_id
-           JOIN models m ON m.id = s.model_id
-          WHERE s.status = 'active'
-            AND m.backend_type = 'maas'
-            AND m.maas_model_ref_name IS NOT NULL
-            AND m.maas_model_ref_namespace IS NOT NULL`,
-      );
+      const rows = await this.loadPolicyRows();
 
       const byUser = new Map<string, { username: string; models: MaasModelRefTarget[] }>();
       for (const r of rows) {
@@ -237,7 +287,16 @@ export class MaasReconcilerService extends BaseService {
         try {
           const current = existingByName.get(desired.metadata.name);
           if (current && JSON.stringify(current.spec) === JSON.stringify(desired.spec)) continue;
-          await upsertK8sObject(k8s, MAAS_AUTH_POLICY, desired, config.namespace);
+          if (!(await this.policyStillGranted(userId, models))) {
+            this.fastify.log.info(
+              { userId },
+              'MaaS reconcile: grant changed during the pass - skipping stale policy upsert',
+            );
+            continue;
+          }
+          await upsertK8sObject(k8s, MAAS_AUTH_POLICY, desired, config.namespace, (e) =>
+            foreignObjectReason(e, userId),
+          );
           result.policiesApplied++;
         } catch (error) {
           result.errors.push(`policy ${desired.metadata.name}: ${errMsg(error)}`);
@@ -266,7 +325,7 @@ export class MaasReconcilerService extends BaseService {
     try {
       const keys = await this.fastify.dbUtils.queryMany<KeyRow>(
         `SELECT ak.id, ak.user_id, u.username, ak.tpm_limit, ak.model_tpm_limit, ak.maas_key_id,
-                ak.maas_subscription_name, ak.maas_sync_state, ak.is_active, ak.revoked_at,
+                ak.maas_subscription_name, ak.maas_sync_state, ak.maas_pending_revoke_ids, ak.is_active, ak.revoked_at,
                 ak.archived_at, ak.expires_at
            FROM api_keys ak
            JOIN users u ON u.id = ak.user_id
@@ -279,7 +338,11 @@ export class MaasReconcilerService extends BaseService {
            JOIN models m ON m.id = akm.model_id
           WHERE m.backend_type = 'maas'
             AND m.maas_model_ref_name IS NOT NULL
-            AND m.maas_model_ref_namespace IS NOT NULL`,
+            AND m.maas_model_ref_namespace IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM subscriptions s
+               WHERE s.user_id = ak.user_id AND s.model_id = akm.model_id AND s.status = 'active'
+            )`,
       );
       const modelsByKey = new Map<string, KeyModelRow[]>();
       for (const km of keyModels) {
@@ -345,12 +408,48 @@ export class MaasReconcilerService extends BaseService {
             desiredNames.add(name);
             const current = existingByName.get(name);
             if (!current || JSON.stringify(current.spec) !== JSON.stringify(desired.spec)) {
-              await upsertK8sObject(k8s, MAAS_SUBSCRIPTION, desired, config.namespace);
+              if (!(await this.keyStillGranted(key.id, key.user_id, limits))) {
+                this.fastify.log.info(
+                  { keyId: key.id },
+                  'MaaS reconcile: key changed during the pass - skipping stale subscription upsert',
+                );
+                continue;
+              }
+              await upsertK8sObject(k8s, MAAS_SUBSCRIPTION, desired, config.namespace, (e) =>
+                foreignObjectReason(e, key.user_id),
+              );
               result.subscriptionsApplied++;
             }
           } else if (existingByName.has(name)) {
             await k8s.delete(MAAS_SUBSCRIPTION, name, config.namespace);
             result.subscriptionsDeleted++;
+          }
+
+          // Old keys replaced by a rotation whose revoke failed: they still authorize requests
+          // through the live subscription, so retry until maas-api confirms
+          const pendingIds = key.maas_pending_revoke_ids ?? [];
+          if (pendingIds.length > 0) {
+            const stillPending: string[] = [];
+            for (const oldId of pendingIds) {
+              const ok = await revokeInMaasApi(this.fastify, this.clients, key.user_id, oldId);
+              if (!ok) stillPending.push(oldId);
+            }
+            if (stillPending.length !== pendingIds.length) {
+              await this.fastify.dbUtils.query(
+                `UPDATE api_keys SET maas_pending_revoke_ids = $2::text[] WHERE id = $1`,
+                [key.id, stillPending],
+              );
+            }
+            if (stillPending.length > 0) {
+              result.maasApiRevokePending++;
+              await this.fastify.dbUtils.query(
+                `UPDATE api_keys SET maas_sync_state = 'pending', maas_last_error = $2,
+                        updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+                [key.id, 'previous maas-api key not revoked yet (no usable token)'],
+              );
+              continue;
+            }
+            key.maas_sync_state = key.maas_key_id ? 'pending' : key.maas_sync_state;
           }
 
           if (

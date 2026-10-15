@@ -1919,7 +1919,8 @@
         "softBudget": "Soft Budget Warning ({{currencyCode}})",
         "softBudgetHelp": "Alert threshold before hitting max budget. Leave at 0 for none.",
         "tpmLimit": "Tokens per Minute (TPM)",
-        "tpmLimitHelp": "Dejar vacío para sin límite. Reemplazado por el límite a nivel de usuario."
+        "tpmLimitHelp": "Dejar vacío para sin límite. Reemplazado por el límite a nivel de usuario.",
+        "maasModelsReadOnly": "Los modelos de una clave de API MaaS solo puede cambiarlos el propietario de la clave."
       },
       "keyGenerated": "API Key Generated",
       "keyWarning": "Save this key now",

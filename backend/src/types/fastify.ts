@@ -66,6 +66,7 @@ declare module 'fastify' {
       PROMETHEUS_URL?: string;
       PROMETHEUS_TOKEN?: string;
       PROMETHEUS_SKIP_TLS_VERIFY?: string;
+      MAAS_API_SKIP_TLS_VERIFY?: string;
 
       // Usage Cache
       USAGE_CACHE_TTL_MINUTES: string;

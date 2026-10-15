@@ -15,6 +15,7 @@ import { UserTokenService } from './user-token.service.js';
 import {
   MAAS_SUBSCRIPTION,
   buildSubscription,
+  foreignObjectReason,
   subscriptionName,
   type MaasModelLimit,
 } from './maas-resources.js';
@@ -419,7 +420,9 @@ export class MaasKeyService extends BaseService implements KeyBackendProvider {
       globalTpm: input.tpm,
     });
     desired.metadata.name = input.subName;
-    await upsertK8sObject(k8s, MAAS_SUBSCRIPTION, desired, config.namespace);
+    await upsertK8sObject(k8s, MAAS_SUBSCRIPTION, desired, config.namespace, (e) =>
+      foreignObjectReason(e, input.userId),
+    );
   }
 
   private async deleteSubscription(subName: string): Promise<void> {
@@ -945,9 +948,11 @@ export class MaasKeyService extends BaseService implements KeyBackendProvider {
 
     const modelIds = row.models ?? [];
     const tpm =
-      'tpmLimit' in updates ? ((updates.tpmLimit as number | null) ?? null) : row.tpm_limit;
+      updates.tpmLimit !== undefined
+        ? ((updates.tpmLimit as number | null) ?? null)
+        : row.tpm_limit;
     const modelTpm =
-      'modelTpmLimit' in updates
+      updates.modelTpmLimit !== undefined
         ? ((updates.modelTpmLimit as Record<string, number> | null) ?? null)
         : (row.model_tpm_limit ?? null);
     this.validateTpm(tpm, modelTpm, modelIds);
@@ -1070,6 +1075,16 @@ export class MaasKeyService extends BaseService implements KeyBackendProvider {
   ): Promise<MaasApiKeyRow> {
     const row = await this.requireActiveKey(keyId, userId);
     const current = row.expires_at ? new Date(row.expires_at) : null;
+    // Unchanged expiry ('never' stays 'never', or same calendar day as today's value): no-op, so
+    // editing other fields never shifts the stored timestamp
+    if (!expiresAt && !current) return row;
+    if (
+      expiresAt &&
+      current &&
+      expiresAt.toISOString().slice(0, 10) === current.toISOString().slice(0, 10)
+    ) {
+      return row;
+    }
     if (!expiresAt || (current && expiresAt.getTime() > current.getTime())) {
       throw this.createValidationError(
         'The expiration of a MaaS API key can only be shortened',
@@ -1121,7 +1136,9 @@ export class MaasKeyService extends BaseService implements KeyBackendProvider {
           `UPDATE api_keys
               SET maas_key_id = $2, key_prefix = $3, encrypted_key = $4,
                   expires_at = COALESCE($5, expires_at), updated_at = CURRENT_TIMESTAMP,
-                  maas_sync_state = 'synced', maas_last_error = NULL
+                  maas_sync_state = $6, maas_last_error = NULL,
+                  maas_pending_revoke_ids = CASE WHEN $7::text IS NULL THEN maas_pending_revoke_ids
+                                                 ELSE array_append(maas_pending_revoke_ids, $7::text) END
             WHERE id = $1`,
           [
             keyId,
@@ -1129,6 +1146,10 @@ export class MaasKeyService extends BaseService implements KeyBackendProvider {
             prefix,
             encryptApiKey(created.key, secret),
             created.expiresAt ? new Date(created.expiresAt) : null,
+            // The old id is recorded as pending in the same transaction as the swap, so a failed
+            // revoke below can never lose track of a still-valid (possibly leaked) key
+            row.maas_key_id ? 'pending' : 'synced',
+            row.maas_key_id ?? null,
           ],
         );
         await client.query(
@@ -1169,11 +1190,24 @@ export class MaasKeyService extends BaseService implements KeyBackendProvider {
         row.maas_key_id,
         this.tokens,
       );
-      if (!revoked) {
+      if (revoked) {
+        await this.fastify.dbUtils.query(
+          `UPDATE api_keys
+              SET maas_pending_revoke_ids = array_remove(maas_pending_revoke_ids, $2::text),
+                  maas_sync_state = CASE WHEN cardinality(array_remove(maas_pending_revoke_ids, $2::text)) = 0
+                                         THEN 'synced' ELSE maas_sync_state END
+            WHERE id = $1`,
+          [keyId, row.maas_key_id],
+        );
+      } else {
         this.fastify.log.warn(
           { keyId, oldMaasKeyId: row.maas_key_id },
-          'MaaS: previous maas-api key could not be revoked after rotation',
+          'MaaS: previous maas-api key could not be revoked after rotation - reconciler will retry',
         );
+        await this.fastify.dbUtils.query(`UPDATE api_keys SET maas_last_error = $2 WHERE id = $1`, [
+          keyId,
+          'previous maas-api key not revoked yet',
+        ]);
       }
     }
     return { id: keyId, key: created.key, keyPrefix: prefix };
@@ -1228,11 +1262,11 @@ export class MaasKeyService extends BaseService implements KeyBackendProvider {
   ): Promise<boolean> {
     const remaining = (await this.loadKeyModels(row.id)).filter((m) => m.id !== modelId);
     if (remaining.length === 0) {
-      await this.clusterRevoke(row, { throwOnSubscriptionError: true });
+      const result = await this.clusterRevoke(row, { throwOnSubscriptionError: true });
       await this.fastify.dbUtils.query(
         `UPDATE api_keys SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP),
-                maas_sync_state = 'synced', maas_last_error = NULL WHERE id = $1`,
-        [row.id],
+                maas_sync_state = $2, maas_last_error = $3 WHERE id = $1`,
+        [row.id, this.syncStateOf(result), result.error ?? null],
       );
       return true;
     }

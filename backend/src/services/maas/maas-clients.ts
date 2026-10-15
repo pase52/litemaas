@@ -118,10 +118,15 @@ export function createMaasClients(fastify: FastifyInstance): MaasClients {
   // maas-api
   let maasApi: IMaasApiClient;
   if (config.apiUrl) {
-    maasApi = new MaasApiClient(
-      { baseUrl: config.apiUrl, tls: clusterTls(cfg.K8S_API_SKIP_TLS_VERIFY === 'true') },
-      log,
-    );
+    // Dedicated flag: maas-api receives users' OpenShift tokens, so it must not inherit
+    // K8S_API_SKIP_TLS_VERIFY (which only concerns the OAuth user-info call)
+    const skipMaasTls = cfg.MAAS_API_SKIP_TLS_VERIFY === 'true';
+    if (skipMaasTls) {
+      log.warn(
+        'MaaS: MAAS_API_SKIP_TLS_VERIFY is enabled - maas-api certificates are NOT verified and user tokens can be intercepted; use NODE_EXTRA_CA_CERTS instead',
+      );
+    }
+    maasApi = new MaasApiClient({ baseUrl: config.apiUrl, tls: clusterTls(skipMaasTls) }, log);
   } else if (mockAllowed) {
     maasApi = new MockMaasApiClient();
     log.info('MaaS: MAAS_API_URL not set - using mock maas-api');

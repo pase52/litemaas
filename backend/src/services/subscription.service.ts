@@ -1044,7 +1044,8 @@ export class SubscriptionService extends BaseService {
             `UPDATE api_keys
              SET is_active = false,
                  archived_at = ${litellmDeleted ? 'CURRENT_TIMESTAMP' : 'archived_at'},
-                 updated_at = CURRENT_TIMESTAMP
+                 updated_at = CURRENT_TIMESTAMP,
+                 maas_sync_state = CASE WHEN backend_type = 'maas' AND maas_key_id IS NOT NULL THEN 'pending' ELSE maas_sync_state END
              WHERE id = $1`,
             [key.id],
           );
@@ -1211,7 +1212,8 @@ export class SubscriptionService extends BaseService {
             `UPDATE api_keys
              SET is_active = false,
                  archived_at = ${litellmDeleted ? 'CURRENT_TIMESTAMP' : 'archived_at'},
-                 updated_at = CURRENT_TIMESTAMP
+                 updated_at = CURRENT_TIMESTAMP,
+                 maas_sync_state = CASE WHEN backend_type = 'maas' AND maas_key_id IS NOT NULL THEN 'pending' ELSE maas_sync_state END
              WHERE id = $1`,
             [key.id],
           );

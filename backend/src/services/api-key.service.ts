@@ -2051,7 +2051,8 @@ export class ApiKeyService extends BaseService {
         const keyIds = expiredKeys.map((k) => String(k.id));
         await client.query(
           `UPDATE api_keys 
-           SET is_active = false, updated_at = CURRENT_TIMESTAMP
+           SET is_active = false, updated_at = CURRENT_TIMESTAMP,
+               maas_sync_state = CASE WHEN backend_type = 'maas' AND maas_key_id IS NOT NULL THEN 'pending' ELSE maas_sync_state END
            WHERE id = ANY($1::text[])`,
           [`{${keyIds.join(',')}}`],
         );
@@ -2414,7 +2415,8 @@ export class ApiKeyService extends BaseService {
         // Archive keys that now have zero models
         await client.query(
           `UPDATE api_keys
-           SET is_active = false, archived_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+           SET is_active = false, archived_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
+               maas_sync_state = CASE WHEN backend_type = 'maas' AND maas_key_id IS NOT NULL THEN 'pending' ELSE maas_sync_state END
            WHERE id = ANY($1)
              AND archived_at IS NULL
              AND id NOT IN (SELECT DISTINCT api_key_id FROM api_key_models)`,

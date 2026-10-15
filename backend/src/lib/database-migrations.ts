@@ -330,6 +330,8 @@ ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS maas_subscription_name VARCHAR(255
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS encrypted_key TEXT;
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS maas_sync_state VARCHAR(20);
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS maas_last_error TEXT;
+-- maas-api key ids that were replaced (rotation) but could not be revoked yet; the reconciler retries
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS maas_pending_revoke_ids TEXT[] NOT NULL DEFAULT '{}';
 
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'api_keys_backend_type_check') THEN
