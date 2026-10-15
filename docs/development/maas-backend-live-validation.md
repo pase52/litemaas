@@ -75,6 +75,14 @@ service, and at least one `MaaSModelRef` reports `PHASE=Ready`.
 `backend/src/services/maas/maas-resources.ts`. Then fix the RBAC rules in
 `deployment/helm/litemaas/templates/maas-rbac.yaml` and `deployment/kustomize/components/maas/*.template`.
 
+**Note: 403 can mean a missing CRD.** A sandbox smoke test of `k8s-client.ts` against OpenShift
+showed that, for an identity without cluster-wide rights, requests on a CRD that is **not installed**
+return **403 Forbidden** and not 404, because RBAC is evaluated before the resource is resolved.
+When the backend logs `cannot get resource "maasmodelrefs"` (or the MaaS health check reports 403),
+check both the service account RBAC
+(`oc auth can-i list maasmodelrefs.maas.opendatahub.io -A --as=system:serviceaccount:$LM_NS:<sa>`)
+and the CRD presence (`oc get crd maasmodelrefs.maas.opendatahub.io`).
+
 ---
 
 ## Phase A: Cluster discovery (no LiteMaaS needed)
