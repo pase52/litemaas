@@ -517,6 +517,45 @@ describe('MaasKeyService', () => {
     });
   });
 
+  describe('deleteApiKey', () => {
+    const keyRow = {
+      id: 'k1',
+      user_id: 'u1',
+      name: 'n',
+      key_prefix: 'sk-',
+      maas_key_id: 'mk1',
+      maas_subscription_name: null,
+      maas_pending_revoke_ids: [] as string[],
+    };
+    const sqls = () => ctx.db.query.mock.calls.map((c: any[]) => String(c[0]));
+
+    it('deletes the row when cluster revocation fully succeeded', async () => {
+      ctx.db.queryOne.mockResolvedValue({ ...keyRow });
+      await ctx.service.deleteApiKey('k1', 'u1');
+      expect(sqls().some((q: string) => q.includes('DELETE FROM api_keys'))).toBe(true);
+    });
+
+    it('keeps and deactivates the row (pending) when the subscription delete fails', async () => {
+      ctx.db.queryOne.mockResolvedValue({ ...keyRow });
+      vi.spyOn(ctx.k8s, 'delete').mockRejectedValue(new Error('apiserver down'));
+      await expect(ctx.service.deleteApiKey('k1', 'u1')).rejects.toMatchObject({
+        code: 'MAAS_ERROR',
+        statusCode: 502,
+      });
+      expect(sqls().some((q: string) => q.includes('DELETE FROM api_keys'))).toBe(false);
+      const upd = sqls().find((q: string) => q.includes("maas_sync_state = 'pending'"));
+      expect(upd).toContain('is_active = false');
+    });
+
+    it('keeps the row when the maas-api revoke fails or old rotated keys are pending', async () => {
+      ctx.db.queryOne.mockResolvedValue({ ...keyRow, maas_pending_revoke_ids: ['old'] });
+      await expect(ctx.service.deleteApiKey('k1', 'u1')).rejects.toMatchObject({
+        code: 'MAAS_ERROR',
+      });
+      expect(sqls().some((q: string) => q.includes('DELETE FROM api_keys'))).toBe(false);
+    });
+  });
+
   describe('provider revokeKey / updateKey', () => {
     it('revokeKey is a no-op for unknown keys and never throws on cluster errors', async () => {
       await expect(ctx.service.revokeKey('missing')).resolves.toBeUndefined();

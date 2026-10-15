@@ -11,7 +11,7 @@ kind: Component
 resources:
   - maas-serviceaccount.yaml.local
   - maas-trusted-ca.yaml.local
-  # Cluster-scoped: MaaSModelRef reader + cluster-monitoring-view binding
+  # Cluster-scoped: MaaSModelRef reader
   - maas-rbac.yaml.local
 
 patches:

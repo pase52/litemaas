@@ -652,4 +652,65 @@ describe('MaaS models, access hooks and reconciler (MAAS_ENABLED=true)', () => {
       expect(row?.action).toBe('MAAS_RECONCILE');
     });
   });
+
+  describe('low-severity review fixes', () => {
+    it('admin-added subscription for a MaaS model grants the policy immediately', async () => {
+      await syncAsAdmin();
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/admin/users/${TEST_USER_IDS.USER}/subscriptions`,
+        headers: { authorization: admin() },
+        payload: { modelIds: [LLAMA] },
+      });
+      expect(res.statusCode).toBeLessThan(300);
+      expect(await policyModels()).toContain(LLAMA);
+    });
+
+    it('migrate-to-maas rejects dot-segment and malformed names with 400', async () => {
+      await syncAsAdmin();
+      for (const ref of [
+        { name: '..', namespace: NS },
+        { name: 'ok', namespace: '..' },
+        { name: 'Bad/Name', namespace: NS },
+      ]) {
+        const res = await app.inject({
+          method: 'POST',
+          url: `/api/v1/admin/models/${enc(LLAMA)}/migrate-to-maas`,
+          headers: { authorization: admin() },
+          payload: { maasModelRef: ref },
+        });
+        expect(res.statusCode).toBe(400);
+      }
+    });
+
+    it('Test configuration returns missing_stored_key when the stored key cannot be decrypted', async () => {
+      const { encryptApiKey } = await import('../../../src/utils/encryption');
+      const id = `${NS}/enc-test`;
+      await app.dbUtils.query(
+        `INSERT INTO models (id, name, provider, backend_type, encrypted_api_key)
+         VALUES ($1, 'enc-test', 'openai', 'litellm', $2)`,
+        [id, encryptApiKey('sk-old', 'a-different-old-key')],
+      );
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/admin/models/test',
+        headers: { authorization: admin() },
+        payload: { api_base: 'https://example.invalid/v1', backend_model_name: 'x', model_id: id },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toMatchObject({ success: false, result: 'missing_stored_key' });
+    });
+
+    it('GET /health caches the MaaS checks between requests', async () => {
+      const clients = app.maasClients!;
+      const apiSpy = vi.spyOn(clients.maasApi, 'health');
+      const k8sSpy = vi.spyOn(clients.k8s, 'get');
+      const promSpy = vi.spyOn(clients.prometheus, 'health');
+      await app.inject({ method: 'GET', url: '/api/v1/health' });
+      await app.inject({ method: 'GET', url: '/api/v1/health' });
+      expect(apiSpy).toHaveBeenCalledTimes(1);
+      expect(k8sSpy).toHaveBeenCalledTimes(1);
+      expect(promSpy).toHaveBeenCalledTimes(1);
+    });
+  });
 });

@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Optional: lets the backend read cluster metrics (Thanos Querier) for MaaS usage collection.
+# preparation.sh adds this component when MAAS_ENABLED=true, MAAS_CLUSTER_MONITORING_VIEW is
+# not "false" and PROMETHEUS_URL is non-empty.
+resources:
+  - maas-monitoring-rbac.yaml.local

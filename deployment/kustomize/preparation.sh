@@ -30,9 +30,10 @@ export MAAS_API_URL="${MAAS_API_URL:-https://maas.${CLUSTER_DOMAIN_NAME}/maas-ap
 export MAAS_GATEWAY_URL="${MAAS_GATEWAY_URL:-https://maas.${CLUSTER_DOMAIN_NAME}}"
 export MAAS_MODEL_NAMESPACES="${MAAS_MODEL_NAMESPACES:-}"
 export MAAS_MIGRATION_GRACE_DAYS="${MAAS_MIGRATION_GRACE_DAYS:-14}"
-export PROMETHEUS_URL="${PROMETHEUS_URL:-https://thanos-querier.openshift-monitoring.svc.cluster.local:9091}"
+export PROMETHEUS_URL="${PROMETHEUS_URL-https://thanos-querier.openshift-monitoring.svc.cluster.local:9091}"
+export MAAS_CLUSTER_MONITORING_VIEW="${MAAS_CLUSTER_MONITORING_VIEW:-true}"
 export OAUTH_SCOPES="${OAUTH_SCOPES:-}"
-for template in components/maas/*.yaml.template; do
+for template in components/maas/*.yaml.template components/maas-monitoring/*.yaml.template; do
     [ -e "$template" ] || continue
     envsubst < "$template" > "${template%.template}.local"
 done
@@ -40,4 +41,8 @@ done
 # Enable the MaaS component in the generated kustomization when requested
 if [ "${MAAS_ENABLED}" = "true" ]; then
     printf '\n# RHOAI Models-as-a-Service backend\ncomponents:\n  - components/maas\n' >> kustomization.yaml
+    # Optional cluster-monitoring-view binding (usage collection); opt out with MAAS_CLUSTER_MONITORING_VIEW=false
+    if [ "${MAAS_CLUSTER_MONITORING_VIEW}" = "true" ] && [ -n "${PROMETHEUS_URL}" ]; then
+        printf '  - components/maas-monitoring\n' >> kustomization.yaml
+    fi
 fi

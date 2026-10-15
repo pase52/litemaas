@@ -122,8 +122,18 @@ const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
             required: ['name', 'namespace'],
             additionalProperties: false,
             properties: {
-              name: { type: 'string', minLength: 1, maxLength: 253 },
-              namespace: { type: 'string', minLength: 1, maxLength: 253 },
+              name: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 253,
+                pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$',
+              },
+              namespace: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 63,
+                pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$',
+              },
             },
           },
           graceDays: { type: 'integer', minimum: 1, maximum: 365 },
@@ -186,7 +196,20 @@ const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
         if (result?.encrypted_api_key) {
           const encKey = getEncryptionKey(fastify.config);
           if (encKey) {
-            apiKey = decryptApiKey(result.encrypted_api_key, encKey);
+            try {
+              apiKey = decryptApiKey(result.encrypted_api_key, encKey);
+            } catch (error) {
+              fastify.log.warn(
+                { modelId: model_id, error },
+                'Stored provider API key could not be decrypted (encryption key may have changed)',
+              );
+              return {
+                success: false,
+                result: 'missing_stored_key' as const,
+                message:
+                  'The stored API key for this model cannot be decrypted (the encryption key may have changed). Please re-enter the API key.',
+              };
+            }
           }
         }
         if (!apiKey) {

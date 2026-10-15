@@ -175,6 +175,11 @@ export function resolveK8sClientConfig(
 }
 
 export function buildResourcePath(ref: K8sResourceRef, namespace?: string, name?: string): string {
+  for (const segment of [namespace, name]) {
+    if (segment === '.' || segment === '..') {
+      throw new Error('Invalid Kubernetes path segment');
+    }
+  }
   const base = ref.group ? `/apis/${ref.group}/${ref.version}` : `/api/${ref.version}`;
   const ns =
     ref.namespaced !== false && namespace ? `/namespaces/${encodeURIComponent(namespace)}` : '';

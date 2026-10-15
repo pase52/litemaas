@@ -24,6 +24,8 @@ export const MAAS_RECONCILER_LOCK_ID = 0x4d414153;
 
 /** Objects younger than this are never deleted as orphans (a key may still be mid-creation) */
 export const ORPHAN_GRACE_MS = 120_000;
+/** A pending key row without maas_key_id older than this is an abandoned creation (crash) */
+export const ABANDONED_CREATE_GRACE_MS = 10 * 60_000;
 
 export interface ReconcileResult {
   /** False when another replica holds the lock */
@@ -66,6 +68,7 @@ interface KeyRow {
   revoked_at: Date | null;
   archived_at: Date | null;
   expires_at: Date | null;
+  created_at?: Date | string | null;
 }
 
 interface KeyModelRow {
@@ -326,7 +329,7 @@ export class MaasReconcilerService extends BaseService {
       const keys = await this.fastify.dbUtils.queryMany<KeyRow>(
         `SELECT ak.id, ak.user_id, u.username, ak.tpm_limit, ak.model_tpm_limit, ak.maas_key_id,
                 ak.maas_subscription_name, ak.maas_sync_state, ak.maas_pending_revoke_ids, ak.is_active, ak.revoked_at,
-                ak.archived_at, ak.expires_at
+                ak.archived_at, ak.expires_at, ak.created_at
            FROM api_keys ak
            JOIN users u ON u.id = ak.user_id
           WHERE ak.backend_type = 'maas'`,
@@ -362,6 +365,37 @@ export class MaasReconcilerService extends BaseService {
       for (const key of keys) {
         const name = key.maas_subscription_name || subscriptionName(key.id);
         const models = modelsByKey.get(key.id) ?? [];
+
+        // Abandoned creation (process died between the row commit and finalize): the user never
+        // received a key, so remove the row and its subscription (same cleanup as rollbackCreate)
+        if (
+          !key.maas_key_id &&
+          key.maas_sync_state === 'pending' &&
+          !key.revoked_at &&
+          !key.archived_at &&
+          key.created_at &&
+          now - new Date(key.created_at).getTime() > ABANDONED_CREATE_GRACE_MS
+        ) {
+          try {
+            if (existingByName.has(name)) {
+              await k8s.delete(MAAS_SUBSCRIPTION, name, config.namespace);
+              result.subscriptionsDeleted++;
+            }
+            await this.fastify.dbUtils.query(
+              `DELETE FROM api_key_models WHERE api_key_id = $1
+                 AND EXISTS (SELECT 1 FROM api_keys WHERE id = $1 AND maas_key_id IS NULL AND maas_sync_state = 'pending')`,
+              [key.id],
+            );
+            await this.fastify.dbUtils.query(
+              `DELETE FROM api_keys WHERE id = $1 AND maas_key_id IS NULL AND maas_sync_state = 'pending'`,
+              [key.id],
+            );
+            this.fastify.log.warn({ keyId: key.id }, 'MaaS reconcile: removed abandoned key creation');
+          } catch (error) {
+            result.errors.push(`abandoned key ${key.id}: ${errMsg(error)}`);
+          }
+          continue;
+        }
 
         // Expired but still flagged active (cleanup job did not run): deactivate, then fall
         // through as a not-live key so the subscription and the maas-api key are removed

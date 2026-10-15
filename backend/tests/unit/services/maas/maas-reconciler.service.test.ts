@@ -261,4 +261,43 @@ describe('MaasReconcilerService', () => {
       expect(res.maasApiRevokePending).toBe(1);
     });
   });
+
+  describe('abandoned key creation', () => {
+    const keyRow = (createdMsAgo: number) => ({
+      id: 'k1',
+      user_id: 'u1',
+      username: 'one',
+      tpm_limit: null,
+      model_tpm_limit: null,
+      maas_key_id: null,
+      maas_subscription_name: null,
+      maas_sync_state: 'pending',
+      maas_pending_revoke_ids: null,
+      is_active: true,
+      revoked_at: null,
+      archived_at: null,
+      expires_at: null,
+      created_at: new Date(Date.now() - createdMsAgo),
+    });
+    const run = async (createdMsAgo: number) => {
+      const ctx = setup(true);
+      ctx.dbUtils.query.mockResolvedValue({});
+      ctx.dbUtils.queryOne.mockResolvedValue({ ok: true });
+      ctx.dbUtils.queryMany.mockImplementation(async (sql: string) =>
+        sql.includes('FROM api_keys ak') ? [keyRow(createdMsAgo)] : [],
+      );
+      await ctx.service.reconcile();
+      return ctx.dbUtils.query.mock.calls.map((c: any[]) => String(c[0]));
+    };
+
+    it('removes a stale pending row without maas_key_id', async () => {
+      const sqls = await run(60 * 60_000);
+      expect(sqls.some((q: string) => q.includes('DELETE FROM api_keys'))).toBe(true);
+    });
+
+    it('leaves a fresh pending row alone', async () => {
+      const sqls = await run(30_000);
+      expect(sqls.some((q: string) => q.includes('DELETE FROM api_keys'))).toBe(false);
+    });
+  });
 });

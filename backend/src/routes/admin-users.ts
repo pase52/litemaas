@@ -23,6 +23,7 @@ import {
 } from '../schemas/admin-users';
 import { ErrorResponseSchema } from '../schemas/common';
 import { ApplicationError } from '../utils/errors';
+import { MaasAccessService } from '../services/maas/maas-access.service';
 import { LITELLM_UNLIMITED } from '../config/litellm';
 
 interface AdminUserApiKeysQuery {
@@ -1321,6 +1322,15 @@ const adminUsersRoutes: FastifyPluginAsync = async (fastify) => {
 
         // Create/reactivate subscriptions
         const result = await ensureActiveSubscriptions(id, modelIds, currentUser.userId);
+
+        // MaaS grant hook: these subscriptions bypass SubscriptionService. No-op for non-MaaS
+        // models and never throws (the reconciler converges on failure).
+        if (fastify.maasClients) {
+          const maasAccess = new MaasAccessService(fastify, fastify.maasClients);
+          for (const { modelId } of [...result.created, ...result.activated]) {
+            await maasAccess.grantModelToUser(id, modelId);
+          }
+        }
 
         // Audit log
         await fastify.dbUtils.query(

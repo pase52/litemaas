@@ -76,7 +76,7 @@ const healthRoutes: FastifyPluginAsync = async (fastify) => {
 
   // MaaS checks: each one is bounded by a timeout and failures only degrade the maas section
   const MAAS_CHECK_TIMEOUT_MS = 5000;
-  const checkMaasHealth = async (): Promise<MaasHealth | undefined> => {
+  const computeMaasHealth = async (): Promise<MaasHealth | undefined> => {
     const clients = fastify.maasClients;
     if (!clients) return undefined;
 
@@ -127,6 +127,29 @@ const healthRoutes: FastifyPluginAsync = async (fastify) => {
       prometheus,
       mock: clients.maasApi.mock || clients.k8s.mock || clients.prometheus.mock,
     };
+  };
+
+  // Short TTL cache + in-flight de-duplication: unauthenticated /health must not fan out to
+  // the kube-apiserver, maas-api and Prometheus on every request (same pattern as LiteLLM's 30s cache)
+  const MAAS_HEALTH_TTL_MS = 30_000;
+  let maasHealthCache: { at: number; value: MaasHealth | undefined } | null = null;
+  let maasHealthInFlight: Promise<MaasHealth | undefined> | null = null;
+  const checkMaasHealth = async (): Promise<MaasHealth | undefined> => {
+    if (!fastify.maasClients) return undefined;
+    if (maasHealthCache && Date.now() - maasHealthCache.at < MAAS_HEALTH_TTL_MS) {
+      return maasHealthCache.value;
+    }
+    if (!maasHealthInFlight) {
+      maasHealthInFlight = computeMaasHealth()
+        .then((value) => {
+          maasHealthCache = { at: Date.now(), value };
+          return value;
+        })
+        .finally(() => {
+          maasHealthInFlight = null;
+        });
+    }
+    return maasHealthInFlight;
   };
 
   // Helper function to check auth system health

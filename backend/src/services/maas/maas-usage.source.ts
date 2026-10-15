@@ -167,6 +167,26 @@ export function mergeDayData(
     ...((a.sources || b.sources) && { sources: { ...a.sources, ...b.sources } }),
   };
 
+  // Providers sharing a name are summed (b must not overwrite a)
+  for (const [name, p] of Object.entries(b.breakdown.providers ?? {})) {
+    const e = a.breakdown.providers?.[name];
+    if (!e) {
+      merged.breakdown.providers[name] = p;
+      continue;
+    }
+    merged.breakdown.providers[name] = {
+      ...e,
+      metrics: {
+        ...e.metrics,
+        api_requests: e.metrics.api_requests + p.metrics.api_requests,
+        total_tokens: e.metrics.total_tokens + p.metrics.total_tokens,
+        prompt_tokens: (e.metrics.prompt_tokens ?? 0) + (p.metrics.prompt_tokens ?? 0),
+        completion_tokens: (e.metrics.completion_tokens ?? 0) + (p.metrics.completion_tokens ?? 0),
+        spend: e.metrics.spend + p.metrics.spend,
+      },
+    };
+  }
+
   for (const [name, model] of Object.entries(b.breakdown.models)) {
     const existing = merged.breakdown.models[name];
     if (!existing) {
@@ -366,6 +386,12 @@ export class MaasUsageSource implements UsageSource {
       k.metrics.prompt_tokens += row.tokens;
       k.metrics.spend += spend;
       k.metrics.successful_requests = (k.metrics.successful_requests ?? 0) + row.calls;
+
+      const prov = (day.breakdown.providers['maas'] ??= { metrics: emptyMetrics() });
+      prov.metrics.api_requests += row.calls;
+      prov.metrics.total_tokens += row.tokens;
+      prov.metrics.prompt_tokens += row.tokens;
+      prov.metrics.spend += spend;
 
       day.metrics.api_requests += row.calls;
       day.metrics.total_tokens += row.tokens;

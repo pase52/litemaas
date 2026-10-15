@@ -253,6 +253,20 @@ describe('MaasUsageSource.getUsageSummary', () => {
     expect(MaasUsageSource.listDates('2025-01-02', '2025-01-01')).toEqual([]);
   });
 
+  it('reports a single maas provider whose totals equal the day totals', async () => {
+    const { source } = setup((promql) =>
+      promql.includes('authorized_hits')
+        ? [sample('ns/litemaas-key-1', 'llama', 500), sample('ns/litemaas-key-2', 'granite', 100)]
+        : [sample('ns/litemaas-key-1', 'llama', 5), sample('ns/litemaas-key-2', 'granite', 2)],
+    );
+    const pastDay = new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10);
+    const day = await source.getDayData(pastDay);
+    const prov = day!.breakdown.providers['maas'].metrics;
+    expect(prov.api_requests).toBe(day!.metrics.api_requests);
+    expect(prov.total_tokens).toBe(day!.metrics.total_tokens);
+    expect(prov.spend).toBeCloseTo(day!.metrics.spend);
+  });
+
   it('looks up the subscriptions of a user', async () => {
     const { source } = setup(() => []);
     expect(await source.subscriptionsForUser('u1')).toEqual(['litemaas-key-1']);
@@ -271,6 +285,20 @@ describe('mergeDayData / stripNamespace', () => {
     date: '2025-01-01',
     metrics: { ...metrics(0, 0, 0), successful_requests: 0, failed_requests: 0 },
     breakdown: { models, api_keys: {}, providers: {} },
+  });
+
+  it('sums providers present on both sides and keeps the others', () => {
+    const a = day({});
+    a.breakdown.providers = { maas: { metrics: metrics(1, 10, 1) }, openai: { metrics: metrics(2, 20, 2) } };
+    const b = day({});
+    b.breakdown.providers = { maas: { metrics: metrics(3, 30, 3) } };
+    const merged = mergeDayData(a, b)!;
+    expect(merged.breakdown.providers.maas.metrics).toMatchObject({
+      api_requests: 4,
+      total_tokens: 40,
+      spend: 4,
+    });
+    expect(merged.breakdown.providers.openai.metrics.api_requests).toBe(2);
   });
 
   it('passes through when either side is null', () => {

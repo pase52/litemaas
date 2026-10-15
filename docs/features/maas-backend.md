@@ -231,7 +231,7 @@ The backend ServiceAccount needs:
 | --- | --- | --- |
 | `get`, `list`, `watch` `maasmodelrefs.maas.opendatahub.io` | cluster, or each `MAAS_MODEL_NAMESPACES` namespace | model sync |
 | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` `maasauthpolicies`, `maassubscriptions` | `MAAS_NAMESPACE` | access and keys |
-| ClusterRole `cluster-monitoring-view` | cluster | Thanos Querier usage queries |
+| ClusterRole `cluster-monitoring-view` | cluster | Thanos Querier usage queries (optional: Helm `maas.prometheus.clusterMonitoringView`, Kustomize `MAAS_CLUSTER_MONITORING_VIEW`) |
 
 - **Helm.** Set `maas.enabled=true`. The chart renders `templates/maas-rbac.yaml`, wires the
   environment variables, and on OpenShift mounts the injected trusted CA bundle through
@@ -282,3 +282,7 @@ failure, retryable for 5xx and 429).
   `AUTH_PROVIDER=openshift`; OIDC deployments need validation).
 - Revocation takes effect after the operator's reconcile plus the Authorino cache delay; see the
   live validation runbook for how to measure it.
+
+### Abandoned key creation
+
+If the backend process dies after the `api_keys` row is committed but before the key is finalized, the reconciler removes the row (and its MaaSSubscription) once it is older than `ABANDONED_CREATE_GRACE_MS` (10 minutes) and still has no `maas_key_id`. A maas-api key created just before the crash has an unknown id and cannot be revoked by this sweep; with the subscription deleted it can no longer authorize requests.

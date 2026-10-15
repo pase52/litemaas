@@ -75,6 +75,7 @@ export interface MaasApiKeyRow {
   maas_subscription_name: string | null;
   encrypted_key: string | null;
   maas_sync_state: string | null;
+  maas_pending_revoke_ids?: string[] | null;
   models?: string[];
   [column: string]: unknown;
 }
@@ -869,12 +870,39 @@ export class MaasKeyService extends BaseService implements KeyBackendProvider {
       );
     }
     const result = await this.clusterRevoke(row);
+    const pendingOld = (row.maas_pending_revoke_ids ?? []).length > 0;
+    if (this.syncStateOf(result) !== 'synced' || pendingOld) {
+      // Keep the row so the reconciler can finish the revocation; deactivate like a soft revoke
+      const lastError = (result.error ?? 'previous maas-api keys not revoked yet').slice(0, 500);
+      await this.fastify.dbUtils.query(
+        `UPDATE api_keys
+            SET is_active = false, revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP),
+                updated_at = CURRENT_TIMESTAMP, maas_sync_state = 'pending', maas_last_error = $2
+          WHERE id = $1`,
+        [keyId, lastError],
+      );
+      await this.audit(userId, 'API_KEY_REVOKE', keyId, {
+        models: row.models,
+        keyName: row.name,
+        keyPrefix: row.key_prefix,
+        reason: 'Delete deferred: cluster revocation incomplete',
+        clusterRevoked: result.subscriptionDeleted,
+        maasApiRevoked: result.maasApiRevoked,
+      });
+      throw ApplicationError.maasError(
+        'The key was deactivated but could not be fully revoked on the cluster; retry the delete later',
+        undefined,
+        result.error,
+        true,
+      );
+    }
     await this.fastify.dbUtils.query('DELETE FROM api_keys WHERE id = $1', [keyId]);
     await this.audit(userId, 'API_KEY_DELETE', keyId, {
       models: row.models,
       keyName: row.name,
       keyPrefix: row.key_prefix,
       clusterRevoked: result.subscriptionDeleted,
+      maasApiRevoked: result.maasApiRevoked,
     });
     this.fastify.log.info({ userId, apiKeyId: keyId }, 'MaaS API key deleted');
   }

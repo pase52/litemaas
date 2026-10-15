@@ -723,7 +723,8 @@ component `deployment/kustomize/components/maas`:
 | File | Content |
 | --- | --- |
 | `maas-serviceaccount.yaml.template` | ServiceAccount `litemaas-backend` used by the backend |
-| `maas-rbac.yaml.template` | Cluster-scoped: MaaSModelRef reader ClusterRole + binding, `cluster-monitoring-view` binding |
+| `maas-rbac.yaml.template` | Cluster-scoped: MaaSModelRef reader ClusterRole + binding |
+| `components/maas-monitoring/maas-monitoring-rbac.yaml.template` | Optional: `cluster-monitoring-view` binding (skipped when `MAAS_CLUSTER_MONITORING_VIEW=false` or `PROMETHEUS_URL` is empty) |
 | `maas-namespace-rbac.yaml.template` | Role + RoleBinding in `MAAS_NAMESPACE` (MaaSAuthPolicy / MaaSSubscription CRUD) — applied separately because the base namespace transformer would move it |
 | `maas-trusted-ca.yaml.template` | ConfigMap with the injected OpenShift trusted CA bundle |
 | `backend-maas-patch.yaml.template` | Backend Deployment patch: ServiceAccount, `MAAS_*` env, CA bundle mount, optional `ENCRYPTION_KEY` |

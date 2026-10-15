@@ -709,7 +709,11 @@ describe('MaaS usage, migration and health', () => {
         message: 'down',
       });
       vi.spyOn(app.maasClients!.maasApi, 'health').mockRejectedValue(new Error('x'));
+      // The MaaS checks are cached for 30s: move the clock past the TTL
+      const realNow = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(realNow + 31_000);
       const res = await app.inject({ method: 'GET', url: '/api/v1/health' });
+      vi.mocked(Date.now).mockRestore();
       const body = JSON.parse(res.body);
       expect(body.maas).toMatchObject({
         maasApi: 'unhealthy',
