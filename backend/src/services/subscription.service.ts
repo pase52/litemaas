@@ -423,10 +423,28 @@ export class SubscriptionService extends BaseService {
         restricted_access: boolean;
         backend_type?: string;
         availability?: string;
-      }>('SELECT restricted_access, backend_type, availability FROM models WHERE id = $1', [
-        modelId,
-      ]);
+        migration_state?: string | null;
+      }>(
+        'SELECT restricted_access, backend_type, availability, migration_state FROM models WHERE id = $1',
+        [modelId],
+      );
       const isMaasModel = modelDetails?.backend_type === 'maas';
+
+      // A LiteLLM model that is migrating to MaaS (or already migrated) takes no new subscriptions
+      if (!isMaasModel && modelDetails?.migration_state) {
+        const target = await this.fastify.dbUtils.queryOne<{ id: string }>(
+          'SELECT id FROM models WHERE migrated_from_litellm_id = $1',
+          [modelId],
+        );
+        throw this.createValidationError(
+          'Model is migrating to MaaS',
+          'modelId',
+          modelId,
+          target
+            ? `This model is being migrated; subscribe to '${target.id}' instead`
+            : 'This model is being migrated to MaaS and no longer accepts new subscriptions',
+        );
+      }
 
       if (isMaasModel) {
         // MaaS models never touch LiteLLM: validate against the synced model row instead

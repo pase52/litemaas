@@ -3,6 +3,7 @@ import { ApplicationError } from '../../utils/errors.js';
 import type { MaasClients } from '../maas/maas-clients.js';
 import { MAAS_MODEL_REF, parseModelRef } from '../maas/maas-resources.js';
 import { MaasKeyService } from '../maas/maas-key.service.js';
+import { MaasUsageSource } from '../maas/maas-usage.source.js';
 import type {
   BackendHealth,
   BackendKeyResult,
@@ -22,7 +23,7 @@ function notImplemented(what: string): never {
 
 /**
  * MaaS model catalog backed by MaaSModelRef objects. Listing is functional; key lifecycle and
- * usage are filled in by later phases (stubs throw).
+ * usage are provided by MaasKeyService / MaasUsageSource when a Fastify instance is available.
  */
 export class MaasModelBackend implements ModelBackendProvider {
   readonly type = 'maas' as const;
@@ -86,6 +87,7 @@ export class MaasKeyBackend implements KeyBackendProvider {
   }
 }
 
+/** Placeholder usage source used when no Fastify instance is available (needs the DB) */
 export class MaasUsageBackend implements UsageSource {
   readonly type = 'maas' as const;
   constructor(protected readonly clients: MaasClients) {}
@@ -106,6 +108,6 @@ export function createMaasBackend(
     type: 'maas',
     models: new MaasModelBackend(clients),
     keys: fastify ? new MaasKeyService(fastify, clients) : new MaasKeyBackend(clients),
-    usage: new MaasUsageBackend(clients),
+    usage: fastify ? new MaasUsageSource(fastify, clients) : new MaasUsageBackend(clients),
   };
 }

@@ -60,6 +60,9 @@ const envSchema = Type.Object({
   MAAS_SYNC_INTERVAL_MS: Type.String({ default: '300000' }),
   MAAS_RECONCILE_INTERVAL_MS: Type.String({ default: '300000' }),
   MAAS_MIGRATION_GRACE_DAYS: Type.String({ default: '14' }),
+  MAAS_USAGE_HITS_METRIC: Type.String({ default: 'authorized_hits' }), // Limitador token counter
+  MAAS_USAGE_CALLS_METRIC: Type.String({ default: 'authorized_calls' }), // Limitador request counter
+  MAAS_USAGE_LABEL_MATCHERS: Type.Optional(Type.String()), // extra PromQL matchers, e.g. namespace="kuadrant-system"
   K8S_API_URL: Type.Optional(Type.String()),
   K8S_TOKEN: Type.Optional(Type.String()),
   PROMETHEUS_URL: Type.Optional(Type.String()),

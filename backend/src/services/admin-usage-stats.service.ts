@@ -545,6 +545,9 @@ export class AdminUsageStatsService extends BaseService {
       // Without this, getDailyActivity() would return stale cached data
       // even when the database cache is invalidated
       this.liteLLMService.clearActivityCache();
+      if (this.fastify.maasClients && this.fastify.backends?.has('maas')) {
+        (this.fastify.backends.get('maas').usage as { clearCache?: () => void }).clearCache?.();
+      }
 
       // Then invalidate database cache
       if (this.cacheManager) {

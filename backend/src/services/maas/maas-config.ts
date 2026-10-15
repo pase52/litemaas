@@ -15,6 +15,10 @@ export interface MaasConfig {
   syncIntervalMs: number;
   reconcileIntervalMs: number;
   migrationGraceDays: number;
+  /** Limitador counter metric names / extra PromQL label matchers used by the usage source */
+  usageHitsMetric: string;
+  usageCallsMetric: string;
+  usageLabelMatchers?: string;
 }
 
 type ConfigSource = Partial<FastifyInstance['config']> | Record<string, string | undefined>;
@@ -44,6 +48,9 @@ export function getMaasConfig(config: ConfigSource): MaasConfig {
     syncIntervalMs: toInt(c.MAAS_SYNC_INTERVAL_MS, 300_000),
     reconcileIntervalMs: toInt(c.MAAS_RECONCILE_INTERVAL_MS, 300_000),
     migrationGraceDays: toInt(c.MAAS_MIGRATION_GRACE_DAYS, 14),
+    usageHitsMetric: c.MAAS_USAGE_HITS_METRIC?.trim() || 'authorized_hits',
+    usageCallsMetric: c.MAAS_USAGE_CALLS_METRIC?.trim() || 'authorized_calls',
+    usageLabelMatchers: c.MAAS_USAGE_LABEL_MATCHERS?.trim() || undefined,
   };
 }
 

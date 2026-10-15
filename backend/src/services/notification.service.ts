@@ -90,4 +90,21 @@ export class NotificationService {
     );
     // Future: Send bulk email/push to affected users
   }
+
+  /**
+   * Notify users a model they use is migrating to MaaS (old model keeps working until graceUntil)
+   * TODO: Implement email/push notification
+   */
+  async notifyUsersModelMigration(
+    oldModelId: string,
+    newModelId: string,
+    affectedUserIds: string[],
+    graceUntil: Date,
+  ): Promise<void> {
+    this.fastify.log.debug(
+      { oldModelId, newModelId, userCount: affectedUserIds.length, graceUntil },
+      'Notification hook: Model migrating to MaaS (not implemented)',
+    );
+    // Future: Send bulk email/push to affected users
+  }
 }

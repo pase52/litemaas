@@ -1,5 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import { LiteLLMService } from '../services/litellm.service';
+import { MAAS_AUTH_POLICY } from '../services/maas/maas-resources';
 
 interface LiteLLMMetrics {
   cacheSize: number;
@@ -15,6 +16,16 @@ interface LiteLLMMetrics {
   };
 }
 
+type MaasCheckStatus = 'healthy' | 'unhealthy' | 'unconfigured';
+
+interface MaasHealth {
+  enabled: true;
+  maasApi: MaasCheckStatus;
+  kubernetes: MaasCheckStatus;
+  prometheus: MaasCheckStatus;
+  mock: boolean;
+}
+
 interface HealthStatus {
   status: 'healthy' | 'unhealthy';
   timestamp: string;
@@ -24,6 +35,11 @@ interface HealthStatus {
     litellm: 'healthy' | 'unhealthy';
     auth: 'healthy' | 'unhealthy';
   };
+  /**
+   * MaaS component checks (only present when MAAS_ENABLED=true). Informational: never affect the
+   * overall status or the HTTP status code, since LiteLLM-backed models keep working.
+   */
+  maas?: MaasHealth;
   details?: {
     uptime: number;
     memoryUsage: NodeJS.MemoryUsage;
@@ -56,6 +72,61 @@ const healthRoutes: FastifyPluginAsync = async (fastify) => {
       fastify.log.error(error, 'LiteLLM health check failed');
       return 'unhealthy';
     }
+  };
+
+  // MaaS checks: each one is bounded by a timeout and failures only degrade the maas section
+  const MAAS_CHECK_TIMEOUT_MS = 5000;
+  const checkMaasHealth = async (): Promise<MaasHealth | undefined> => {
+    const clients = fastify.maasClients;
+    if (!clients) return undefined;
+
+    const guarded = async (
+      name: string,
+      mock: boolean,
+      fn: () => Promise<boolean>,
+    ): Promise<MaasCheckStatus> => {
+      try {
+        const ok = await Promise.race([
+          fn(),
+          new Promise<boolean>((_, reject) =>
+            setTimeout(() => reject(new Error('timeout')), MAAS_CHECK_TIMEOUT_MS).unref?.(),
+          ),
+        ]);
+        return ok ? 'healthy' : 'unhealthy';
+      } catch (error) {
+        // An unconfigured client (503 proxy) is reported as such, not as a failure
+        const msg = error instanceof Error ? error.message : String(error);
+        if (!mock && /not configured/i.test(msg)) return 'unconfigured';
+        fastify.log.warn({ check: name, error: msg }, 'MaaS health check failed');
+        return 'unhealthy';
+      }
+    };
+
+    const [maasApi, kubernetes, prometheus] = await Promise.all([
+      guarded(
+        'maas-api',
+        clients.maasApi.mock,
+        async () => (await clients.maasApi.health()).healthy,
+      ),
+      guarded('kubernetes', clients.k8s.mock, async () => {
+        // A read of a (non-existent) policy name proves API reachability + RBAC
+        await clients.k8s.get(MAAS_AUTH_POLICY, 'litemaas-healthcheck', clients.config.namespace);
+        return true;
+      }),
+      guarded(
+        'prometheus',
+        clients.prometheus.mock,
+        async () => (await clients.prometheus.health()).healthy,
+      ),
+    ]);
+
+    return {
+      enabled: true,
+      maasApi,
+      kubernetes,
+      prometheus,
+      mock: clients.maasApi.mock || clients.k8s.mock || clients.prometheus.mock,
+    };
   };
 
   // Helper function to check auth system health
@@ -95,6 +166,7 @@ const healthRoutes: FastifyPluginAsync = async (fastify) => {
                 auth: { type: 'string', enum: ['healthy', 'unhealthy'] },
               },
             },
+            maas: { type: 'object', additionalProperties: true },
             details: {
               type: 'object',
               properties: {
@@ -127,6 +199,11 @@ const healthRoutes: FastifyPluginAsync = async (fastify) => {
       const allHealthy = Object.values(checks).every((status) => status === 'healthy');
       const checkDuration = Date.now() - startTime;
 
+      const maas = await checkMaasHealth().catch((error) => {
+        fastify.log.warn(error, 'MaaS health section failed');
+        return undefined;
+      });
+
       // Get additional metrics
       let litellmMetrics: LiteLLMMetrics | undefined = undefined;
       try {
@@ -140,6 +217,7 @@ const healthRoutes: FastifyPluginAsync = async (fastify) => {
         timestamp: new Date().toISOString(),
         version: process.env.npm_package_version || '1.0.0',
         checks,
+        ...(maas && { maas }),
         details: {
           uptime: process.uptime(),
           memoryUsage: process.memoryUsage(),

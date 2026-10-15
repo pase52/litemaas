@@ -58,6 +58,9 @@ declare module 'fastify' {
       MAAS_SYNC_INTERVAL_MS: string;
       MAAS_RECONCILE_INTERVAL_MS: string;
       MAAS_MIGRATION_GRACE_DAYS: string;
+      MAAS_USAGE_HITS_METRIC: string;
+      MAAS_USAGE_CALLS_METRIC: string;
+      MAAS_USAGE_LABEL_MATCHERS?: string;
       K8S_API_URL?: string;
       K8S_TOKEN?: string;
       PROMETHEUS_URL?: string;

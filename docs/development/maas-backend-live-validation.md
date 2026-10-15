@@ -556,3 +556,104 @@ from `GET /models`. If the subscription payload later gains `modelBackendType`,
 from `GET /models` (loaded for subscribed models only) for the grace-period banner and curl example.
 
 **Verify.** `curl -s -H "Authorization: Bearer $JWT" $API/api/v1/api-keys | jq '.data[0].modelDetails'`.
+
+## A26. Limitador metric names and labels in Thanos
+
+**Assumption.** Usage is read from Thanos Querier (`PROMETHEUS_URL`) as
+`sum by (subscription, model) (increase(authorized_hits{subscription=~"(.*/)?litemaas-key-.+"}[86400s]))`
+(tokens) and the same with `authorized_calls` (requests), where `subscription` is the
+MaaSSubscription name (optionally `<namespace>/<name>`) and `model` is the MaaSModelRef name, the
+served name, or `<namespace>/<name>`. Metric names are configurable with `MAAS_USAGE_HITS_METRIC` /
+`MAAS_USAGE_CALLS_METRIC`; extra matchers (e.g. `namespace="kuadrant-system"`) with
+`MAAS_USAGE_LABEL_MATCHERS`. If the `subscription` label does not exist (Limitador only labels what
+the RateLimitPolicy/TokenRateLimitPolicy `counters` expose) there is no usage at all.
+
+**Verify.**
+
+```bash
+TOKEN=$(oc whoami -t)
+curl -sk -H "Authorization: Bearer $TOKEN" "$PROMETHEUS_URL/api/v1/label/__name__/values" | jq -r '.data[]' | grep -i authorized
+curl -sk -H "Authorization: Bearer $TOKEN" --data-urlencode 'query=authorized_hits' "$PROMETHEUS_URL/api/v1/query" | jq '.data.result[0].metric'
+# expect labels subscription and model; if absent the policy must add them as counters
+```
+
+## A27. Usage windows, extrapolation and retention
+
+**Assumption.** A UTC day is `increase(<metric>[86400s])` evaluated at the next 00:00:00Z; today is
+evaluated now over the seconds elapsed since 00:00:00Z. `increase()` extrapolates to the window
+boundaries and is rounded to whole tokens/calls, so day totals can differ slightly from exact
+counts, and a series created inside the window undercounts its first increment. Days older than the
+Prometheus/Thanos retention (OpenShift default is about 15 days for the platform Prometheus) return
+nothing and are cached permanently as LiteLLM-only: resync (`Usage Data Sync`) cannot backfill them.
+Completed days are cached by the existing daily cache; a day whose MaaS fetch failed is NOT cached.
+
+**Verify.**
+
+```bash
+D=$(date -u -d yesterday +%F); END=$(date -u -d "$D +1 day" +%s)
+curl -sk -H "Authorization: Bearer $TOKEN" --data-urlencode "query=sum(increase(authorized_hits[86400s]))" \
+  --data-urlencode "time=$END" "$PROMETHEUS_URL/api/v1/query" | jq '.data.result'
+oc -n openshift-monitoring get prometheus k8s -o jsonpath='{.spec.retention}'
+```
+
+## A28. Cost estimate and missing token split
+
+**Assumption.** Limitador records total tokens only (`authorized_hits` = hits_addend). Cost is
+estimated as `tokens x blended price`, blended = `(input_cost_per_token + output_cost_per_token) / 2`
+(or the single configured price; 0 when none). Prompt/completion split is unavailable: the admin
+usage pipeline re-derives `total_tokens = prompt + completion`, so MaaS tokens are carried in
+`prompt_tokens` (completion = 0) and the day's `rawData.sources.maas = { tokenSplitAvailable: false,
+costEstimated: true }`. Streaming responses may count tokens only when the response completes
+(TokenRateLimitPolicy extracts usage from the response body); verify streamed requests are counted.
+Failed requests after authorization cannot be distinguished: `successful_requests = authorized_calls`,
+`failed_requests = 0`.
+
+**Verify.** Send one non-streamed and one streamed request with a MaaS key, wait one scrape interval,
+and compare `increase(authorized_hits[5m])` for the key's subscription with the `usage` object in the
+responses (`prompt_tokens + completion_tokens`).
+
+## A29. Model label to LiteMaaS model resolution
+
+**Assumption.** The Limitador `model` label equals the MaaSModelRef name, the served model name
+(`backend_model_name`) or `<namespace>/<name>`; matching is case-insensitive. An unresolved label is
+still reported (under the raw label, cost 0), which shows up as an unexpected model in the admin
+charts.
+
+**Verify.** `curl ... 'query=count by (model, subscription) (authorized_hits)'` and compare the
+`model` values with `oc get maasmodelref -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name`
+and the `backend_model_name` column of the `models` table.
+
+## A30. Migration semantics
+
+**Assumption.** `POST /admin/models/:id/migrate-to-maas` copies the LiteLLM row (or fills an existing
+synced MaaS row without overwriting admin fields, never lowering `restricted_access`), copies
+**active** subscriptions as active (no re-approval), sets the old row `migration_state='migrating'`
+and `migration_grace_until`, and blocks new subscriptions to the old model. LiteLLM access keeps
+working during the grace period. After it, the reconciler (every `MAAS_RECONCILE_INTERVAL_MS`)
+removes the model from users' LiteLLM keys (LiteLLM first; a key that cannot be updated keeps the
+migration pending and is retried), deactivates the old subscriptions and marks the row
+`unavailable` / `completed`. The LiteLLM model itself is NOT deleted from the LiteLLM proxy; the
+admin should remove it there after completion. LiteLLM model sync skips `completed` rows so a model
+still present in LiteLLM is not revived. Existing LiteLLM API keys are not converted: users create a
+new MaaS key for the migrated model.
+
+**Verify.**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' \
+  -d '{"maasModelRef":{"name":"<ref>","namespace":"<ns>"},"graceDays":1}' \
+  "$API/api/v1/admin/models/<litellm-model-id>/migrate-to-maas"
+oc -n models-as-a-service get maasauthpolicy -l app.kubernetes.io/managed-by=litemaas
+# after the grace period: POST /admin/maas/reconcile and check migrationsCompleted
+```
+
+## A31. Health section
+
+**Assumption.** `GET /api/v1/health` gains a `maas` object (only when `MAAS_ENABLED=true`):
+`{enabled, maasApi, kubernetes, prometheus: healthy|unhealthy|unconfigured, mock}`. Each check has a
+5 s timeout and never affects `status`, `checks` or the HTTP status. The Kubernetes check is a `get`
+of a non-existent MaaSAuthPolicy (404 counts as healthy, 403 as unhealthy) so it needs `get` on
+`maasauthpolicies` in `MAAS_NAMESPACE`; the maas-api check calls `GET /health` of maas-api; the
+Prometheus check runs `vector(1)`.
+
+**Verify.** `curl -s $API/api/v1/health | jq .maas`

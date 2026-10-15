@@ -4,6 +4,7 @@ import { AdminUsageStatsService } from '../services/admin-usage-stats.service';
 import { DailyUsageCacheManager } from '../services/daily-usage-cache-manager';
 import { LiteLLMService } from '../services/litellm.service';
 import { SettingsService } from '../services/settings.service';
+import type { MaasUsageSource } from '../services/maas/maas-usage.source';
 import { AnalyticsResponseSchema, AdminUsageErrorResponseSchema } from '../schemas/admin-usage';
 import { Type } from '@sinclair/typebox';
 import type { AdminUsageFilters } from '../types/admin-usage.types';
@@ -33,6 +34,8 @@ const usageRoutes: FastifyPluginAsync = async (fastify) => {
             currentSpend: { type: 'number' },
             budgetDuration: { type: 'string', nullable: true },
             budgetResetAt: { type: 'string', nullable: true },
+            maasSpend: { type: 'number', nullable: true },
+            maasTokens: { type: 'number', nullable: true },
           },
         },
       },
@@ -63,11 +66,39 @@ const usageRoutes: FastifyPluginAsync = async (fastify) => {
         );
       }
 
+      // MaaS usage (estimated from tokens x model pricing, current UTC month). Reported next to
+      // the LiteLLM spend, not added to it: MaaS keys carry no budget. Never blocks the response.
+      let maasSpend: number | undefined;
+      let maasTokens: number | undefined;
+      if (fastify.maasClients && fastify.backends?.has('maas')) {
+        try {
+          const source = fastify.backends.get('maas').usage as MaasUsageSource;
+          const subscriptions = await source.subscriptionsForUser(user.userId);
+          if (subscriptions.length > 0) {
+            const now = new Date();
+            const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+            const summary = await source.getUsageSummary(
+              subscriptions,
+              start.toISOString().slice(0, 10),
+              now.toISOString().slice(0, 10),
+            );
+            maasSpend = summary.totalCost;
+            maasTokens = summary.totalTokens;
+          }
+        } catch (err) {
+          fastify.log.warn(
+            { userId: user.userId, error: err instanceof Error ? err.message : err },
+            'Failed to fetch MaaS spend for budget endpoint',
+          );
+        }
+      }
+
       return {
         maxBudget: dbUser?.max_budget != null ? Number(dbUser.max_budget) : undefined,
         currentSpend,
         budgetDuration: dbUser?.budget_duration ?? undefined,
         budgetResetAt,
+        ...(maasSpend !== undefined && { maasSpend, maasTokens }),
       };
     },
   });

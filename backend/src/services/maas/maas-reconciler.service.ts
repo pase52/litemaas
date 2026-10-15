@@ -4,6 +4,7 @@ import { withAdvisoryLock } from '../../utils/advisory-lock.utils.js';
 import { upsertK8sObject, type K8sObject } from '../k8s/k8s-client.js';
 import type { MaasClients } from './maas-clients.js';
 import { revokeInMaasApi } from './maas-key.service.js';
+import { MaasMigrationService } from './maas-migration.service.js';
 import {
   LABEL_API_KEY_ID,
   MANAGED_SELECTOR,
@@ -36,6 +37,9 @@ export interface ReconcileResult {
   keysExpired: number;
   /** Revoked / expired keys whose maas-api key could not be revoked yet (retried next pass) */
   maasApiRevokePending: number;
+  /** LiteLLM -> MaaS migrations finished (grace elapsed) / still waiting on this pass */
+  migrationsCompleted: number;
+  migrationsPending: number;
   errors: string[];
   durationMs: number;
 }
@@ -80,6 +84,8 @@ function emptyResult(): ReconcileResult {
     keysFailed: 0,
     keysExpired: 0,
     maasApiRevokePending: 0,
+    migrationsCompleted: 0,
+    migrationsPending: 0,
     errors: [],
     durationMs: 0,
   };
@@ -167,7 +173,26 @@ export class MaasReconcilerService extends BaseService {
     result.ran = true;
     await this.reconcilePolicies(result);
     await this.reconcileSubscriptions(result);
+    await this.reconcileMigrations(result);
     return result;
+  }
+
+  // ---------------------------------------------------------------- migrations
+
+  /** Grace job: finish LiteLLM -> MaaS migrations whose grace period has elapsed */
+  private async reconcileMigrations(result: ReconcileResult): Promise<void> {
+    try {
+      const grace = await new MaasMigrationService(
+        this.fastify,
+        this.clients,
+      ).processExpiredGrace();
+      result.migrationsCompleted = grace.completed;
+      result.migrationsPending = grace.pending;
+      result.errors.push(...grace.errors);
+    } catch (error) {
+      result.errors.push(`migrations: ${errMsg(error)}`);
+      this.fastify.log.error({ error }, 'MaaS reconcile: migration grace pass failed');
+    }
   }
 
   // ------------------------------------------------------------------ policies

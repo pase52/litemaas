@@ -105,11 +105,18 @@ export class ModelSyncService {
       // Get existing models from database
       const existingModels = await this.getExistingModels();
       const existingModelIds = new Set(existingModels.map((m) => m.id));
+      const migratedModelIds = new Set(
+        existingModels.filter((m) => m.migration_state === 'completed').map((m) => m.id),
+      );
 
       // Process each verified LiteLLM model
       for (const litellmModel of verifiedModels) {
         try {
           const modelId = litellmModel.model_name;
+          if (migratedModelIds.has(modelId)) {
+            // Migrated to MaaS: the row stays unavailable even if LiteLLM still lists the model
+            continue;
+          }
           if (existingModelIds.has(modelId)) {
             // Update existing model
             const updated = await this.updateModel(litellmModel, forceUpdate);
@@ -186,7 +193,7 @@ export class ModelSyncService {
   private async getExistingModels(): Promise<any[]> {
     const result = await this.fastify.dbUtils.query(`
       SELECT id, name, provider, updated_at, availability, 
-             api_base, tpm, rpm, max_tokens
+             api_base, tpm, rpm, max_tokens, migration_state
       FROM models
       WHERE backend_type = 'litellm'
       ORDER BY id

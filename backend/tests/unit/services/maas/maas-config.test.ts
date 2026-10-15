@@ -12,6 +12,9 @@ describe('getMaasConfig', () => {
       syncIntervalMs: 300000,
       reconcileIntervalMs: 300000,
       migrationGraceDays: 14,
+      usageHitsMetric: 'authorized_hits',
+      usageCallsMetric: 'authorized_calls',
+      usageLabelMatchers: undefined,
     });
   });
 
@@ -35,6 +38,19 @@ describe('getMaasConfig', () => {
       syncIntervalMs: 1000,
       reconcileIntervalMs: 2000,
       migrationGraceDays: 3,
+    });
+  });
+
+  it('reads Limitador metric names and extra matchers', () => {
+    const c = getMaasConfig({
+      MAAS_USAGE_HITS_METRIC: ' my_hits ',
+      MAAS_USAGE_CALLS_METRIC: 'my_calls',
+      MAAS_USAGE_LABEL_MATCHERS: ' namespace="kuadrant-system" ',
+    });
+    expect(c).toMatchObject({
+      usageHitsMetric: 'my_hits',
+      usageCallsMetric: 'my_calls',
+      usageLabelMatchers: 'namespace="kuadrant-system"',
     });
   });
 

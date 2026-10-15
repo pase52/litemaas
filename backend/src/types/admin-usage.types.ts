@@ -258,6 +258,13 @@ export interface ProviderBreakdown {
  */
 export interface LiteLLMDayData {
   date: string;
+  /**
+   * Data-quality flags of merged non-LiteLLM backends. MaaS (Limitador) reports total tokens
+   * only, so the prompt/completion split is unavailable and cost is estimated from model pricing.
+   */
+  sources?: {
+    maas?: { tokenSplitAvailable: false; costEstimated: true };
+  };
   metrics: {
     api_requests: number;
     total_tokens: number;

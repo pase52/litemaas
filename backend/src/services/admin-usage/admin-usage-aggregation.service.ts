@@ -26,6 +26,7 @@ import {
   isHistoricalDate,
 } from './admin-usage.utils.js';
 import { LiteLLMService } from '../litellm.service.js';
+import { mergeDayData } from '../maas/maas-usage.source.js';
 import { ApplicationError } from '../../utils/errors.js';
 
 /**
@@ -1351,8 +1352,8 @@ export class AdminUsageAggregationService extends BaseService {
   async refreshSingleDay(dateString: string): Promise<EnrichedDayData> {
     this.fastify.log.info({ date: dateString }, 'Refreshing single day data');
 
-    // Fetch from LiteLLM (will throw on error)
-    const liteLLMData = await this.fetchDailyDataFromLiteLLM(dateString);
+    // Fetch from LiteLLM (will throw on error); MaaS usage is merged in, never blocking
+    const liteLLMData = await this.fetchMergedDayData(dateString).then((r) => r.data);
 
     if (!liteLLMData) {
       throw this.createNotFoundError(
@@ -1400,9 +1401,10 @@ export class AdminUsageAggregationService extends BaseService {
       }
     }
 
-    // Fetch from LiteLLM
+    // Fetch from LiteLLM and merge MaaS usage BEFORE the zero-request check, so a day with only
+    // MaaS traffic (LiteLLM empty) is not dropped
     this.fastify.log.debug({ date: dateString }, 'Fetching fresh data from LiteLLM');
-    const liteLLMData = await this.fetchDailyDataFromLiteLLM(dateString);
+    const { data: liteLLMData, maasFailed } = await this.fetchMergedDayData(dateString);
 
     if (!liteLLMData) {
       return null;
@@ -1411,13 +1413,37 @@ export class AdminUsageAggregationService extends BaseService {
     // Enrich with user mappings
     const enrichedData = await this.enrichWithUserMapping(liteLLMData);
 
-    // Cache if manager available
-    if (this.cacheManager) {
+    // Cache if manager available. A day whose MaaS fetch failed is not cached (historical days
+    // are cached permanently and would otherwise lose their MaaS usage for good).
+    if (this.cacheManager && !maasFailed) {
       const date = parseISO(dateString);
       await this.cacheManager.saveToDailyCache(dateString, enrichedData, isToday(date));
     }
 
     return enrichedData;
+  }
+
+  /**
+   * LiteLLM day data merged with MaaS (Limitador) usage when the MaaS backend is enabled.
+   * LiteLLM errors propagate as before; MaaS errors are logged and reported via `maasFailed`.
+   */
+  private async fetchMergedDayData(
+    dateString: string,
+  ): Promise<{ data: LiteLLMDayData | null; maasFailed: boolean }> {
+    const liteLLMData = await this.fetchDailyDataFromLiteLLM(dateString);
+    if (!this.fastify.maasClients || !this.fastify.backends?.has('maas')) {
+      return { data: liteLLMData, maasFailed: false };
+    }
+    try {
+      const maasData = await this.fastify.backends.get('maas').usage.getDayData(dateString);
+      return { data: mergeDayData(liteLLMData, maasData), maasFailed: false };
+    } catch (error) {
+      this.fastify.log.warn(
+        { error: error instanceof Error ? error.message : error, date: dateString },
+        'MaaS usage fetch failed - continuing with LiteLLM data only',
+      );
+      return { data: liteLLMData, maasFailed: true };
+    }
   }
 
   /**
@@ -1516,7 +1542,7 @@ export class AdminUsageAggregationService extends BaseService {
       if (!this.isDatabaseUnavailable()) {
         const query = `
           SELECT
-            ak.litellm_key_alias,
+            COALESCE(ak.litellm_key_alias, ak.maas_subscription_name) AS litellm_key_alias,
             ak.key_hash,
             ak.user_id,
             ak.name as key_name,

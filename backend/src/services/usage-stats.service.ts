@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import { QueryParameter } from '../types/common.types.js';
 import { LiteLLMService } from './litellm.service.js';
 import { BaseService } from './base.service.js';
+import type { MaasUsageSource } from './maas/maas-usage.source.js';
 
 export interface UsageMetrics {
   totalRequests: number;
@@ -149,6 +150,90 @@ export class UsageStatsService extends BaseService {
     super(fastify);
   }
 
+  /**
+   * Usage of one MaaS API key from Prometheus. Resolves null when the key is not a MaaS key
+   * (caller continues with the LiteLLM path). A Prometheus failure degrades to zeroed metrics
+   * instead of an error. Prompt/completion split is unavailable (reported as 0).
+   */
+  private async getMaasKeyUsage(
+    apiKeyId: string,
+    startDate: Date | undefined,
+    endDate: Date | undefined,
+    aggregateBy: string,
+  ): Promise<UsageStatsResponse | null> {
+    const row = await this.fastify.dbUtils.queryOne<{
+      backend_type: string | null;
+      maas_subscription_name: string | null;
+    }>(`SELECT backend_type, maas_subscription_name FROM api_keys WHERE id = $1`, [apiKeyId]);
+    if (!row || row.backend_type !== 'maas') return null;
+
+    const start = (startDate ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
+      .toISOString()
+      .split('T')[0];
+    const end = (endDate ?? new Date()).toISOString().split('T')[0];
+
+    const zero = (): UsageMetrics => ({
+      totalRequests: 0,
+      totalTokens: 0,
+      totalPromptTokens: 0,
+      totalCompletionTokens: 0,
+      totalCost: 0,
+      averageLatency: 0,
+      errorRate: 0,
+      successRate: 0,
+    });
+
+    if (!row.maas_subscription_name) {
+      return { totalMetrics: zero(), timeSeriesData: aggregateBy === 'time' ? [] : undefined };
+    }
+
+    try {
+      const source = this.fastify.backends.get('maas').usage as MaasUsageSource;
+      const summary = await source.getUsageSummary([row.maas_subscription_name], start, end);
+      const metrics = (m: { requests: number; tokens: number; cost: number }): UsageMetrics => ({
+        totalRequests: m.requests,
+        totalTokens: m.tokens,
+        totalPromptTokens: 0,
+        totalCompletionTokens: 0,
+        totalCost: m.cost,
+        averageLatency: 0,
+        errorRate: 0,
+        successRate: m.requests > 0 ? 100 : 0,
+      });
+      return {
+        totalMetrics: metrics({
+          requests: summary.totalRequests,
+          tokens: summary.totalTokens,
+          cost: summary.totalCost,
+        }),
+        timeSeriesData:
+          aggregateBy === 'time'
+            ? summary.daily.map((d) => ({
+                period: d.date,
+                startTime: new Date(`${d.date}T00:00:00Z`),
+                endTime: new Date(Date.parse(`${d.date}T00:00:00Z`) + 24 * 60 * 60 * 1000),
+                ...metrics(d),
+              }))
+            : undefined,
+        modelBreakdown:
+          aggregateBy === 'model'
+            ? summary.byModel.map((m) => ({
+                modelId: m.modelId,
+                modelName: m.modelId,
+                provider: 'maas',
+                ...metrics(m),
+              }))
+            : undefined,
+      };
+    } catch (error) {
+      this.fastify.log.warn(
+        { apiKeyId, error: error instanceof Error ? error.message : error },
+        'Failed to fetch MaaS key usage from Prometheus',
+      );
+      return { totalMetrics: zero(), timeSeriesData: aggregateBy === 'time' ? [] : undefined };
+    }
+  }
+
   async getUsageStats(query: UsageStatsQuery): Promise<UsageStatsResponse> {
     const cacheKey = this.generateCacheKey('usage_stats', query);
 
@@ -169,6 +254,15 @@ export class UsageStatsService extends BaseService {
         granularity: _granularity = 'day', // eslint-disable-line @typescript-eslint/no-unused-vars
         aggregateBy = 'time',
       } = query;
+
+      // MaaS keys: usage comes from Limitador counters (Prometheus), not LiteLLM
+      if (apiKeyId && this.fastify.maasClients) {
+        const maasResult = await this.getMaasKeyUsage(apiKeyId, startDate, endDate, aggregateBy);
+        if (maasResult) {
+          this.setCache(cacheKey, maasResult);
+          return maasResult;
+        }
+      }
 
       // If apiKeyId is provided, fetch data from LiteLLM
       if (apiKeyId) {

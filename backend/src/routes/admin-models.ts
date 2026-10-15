@@ -17,6 +17,7 @@ import {
 } from '../schemas/admin-models.js';
 import { encryptApiKey, decryptApiKey, getEncryptionKey } from '../utils/encryption.js';
 import { ApplicationError } from '../utils/errors.js';
+import { MaasMigrationService } from '../services/maas/maas-migration.service.js';
 import {
   MaasModelSyncService,
   ADMIN_REMOVED_FLAG,
@@ -97,6 +98,56 @@ const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
           error instanceof Error ? error.message : String(error),
         );
       }
+    },
+  });
+
+  // Migrate a LiteLLM model to a MaaS model (copy row + active subscriptions, grace period)
+  fastify.post<{
+    Params: { id: string };
+    Body: { maasModelRef: { name: string; namespace: string }; graceDays?: number };
+  }>('/:id/migrate-to-maas', {
+    schema: {
+      tags: ['Admin Models'],
+      description:
+        'Migrate a LiteLLM model to MaaS: copies the model and its active subscriptions to the given MaaSModelRef, blocks new subscriptions on the old model and removes LiteLLM access after the grace period',
+      security: [{ bearerAuth: [] }],
+      params: AdminModelParamsSchema,
+      body: {
+        type: 'object',
+        required: ['maasModelRef'],
+        additionalProperties: false,
+        properties: {
+          maasModelRef: {
+            type: 'object',
+            required: ['name', 'namespace'],
+            additionalProperties: false,
+            properties: {
+              name: { type: 'string', minLength: 1, maxLength: 253 },
+              namespace: { type: 'string', minLength: 1, maxLength: 253 },
+            },
+          },
+          graceDays: { type: 'integer', minimum: 1, maximum: 365 },
+        },
+      },
+    },
+    preHandler: [fastify.authenticate, fastify.requirePermission('admin:models')],
+    handler: async (request) => {
+      const user = (request as AuthenticatedRequest).user;
+      if (!fastify.maasClients) {
+        throw ApplicationError.validation(
+          'MaaS backend is not enabled',
+          'MAAS_ENABLED',
+          false,
+          'Set MAAS_ENABLED=true to migrate models to MaaS',
+        );
+      }
+      const result = await new MaasMigrationService(fastify).migrate({
+        modelId: request.params.id,
+        maasModelRef: request.body.maasModelRef,
+        graceDays: request.body.graceDays,
+        adminUserId: user.userId,
+      });
+      return { data: result, message: 'Model migration to MaaS started' };
     },
   });
 
