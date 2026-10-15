@@ -73,6 +73,29 @@ const databasePlugin: FastifyPluginAsync = async (fastify) => {
           }
         });
 
+        // MaaS backend: model sync (startup + interval) and reconciler loop.
+        // Skipped in tests, which drive the services directly.
+        if (fastify.maasClients && process.env.NODE_ENV !== 'test') {
+          try {
+            const { MaasModelSyncService } = await import(
+              '../services/maas/maas-model-sync.service'
+            );
+            const { MaasReconcilerService } = await import(
+              '../services/maas/maas-reconciler.service'
+            );
+            const maasSync = new MaasModelSyncService(fastify);
+            const maasReconciler = new MaasReconcilerService(fastify);
+            maasSync.startPeriodicSync();
+            maasReconciler.start();
+            fastify.addHook('onClose', async () => {
+              maasSync.stopPeriodicSync();
+              maasReconciler.stop();
+            });
+          } catch (maasError) {
+            fastify.log.error({ error: maasError }, 'Failed to start MaaS background jobs');
+          }
+        }
+
         // Initialize LiteLLM integration service for auto-sync
         const litellmIntegrationService = new LiteLLMIntegrationService(fastify);
 

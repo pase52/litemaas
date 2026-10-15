@@ -177,13 +177,18 @@ export class ModelSyncService {
   }
 
   /**
-   * Get all existing models from database
+   * Get all existing LiteLLM-backed models from database.
+   *
+   * CRITICAL: restricted to backend_type = 'litellm'. MaaS models are owned by
+   * MaasModelSyncService; if they were included here they would be absent from LiteLLM's
+   * model table and get marked unavailable (with subscription cascade) on every sync.
    */
   private async getExistingModels(): Promise<any[]> {
     const result = await this.fastify.dbUtils.query(`
       SELECT id, name, provider, updated_at, availability, 
              api_base, tpm, rpm, max_tokens
       FROM models
+      WHERE backend_type = 'litellm'
       ORDER BY id
     `);
     return result.rows;

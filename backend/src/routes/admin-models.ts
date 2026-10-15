@@ -16,16 +16,89 @@ import {
   AdminTestModelConfigResponseSchema,
 } from '../schemas/admin-models.js';
 import { encryptApiKey, decryptApiKey, getEncryptionKey } from '../utils/encryption.js';
+import { ApplicationError } from '../utils/errors.js';
+import {
+  MaasModelSyncService,
+  ADMIN_REMOVED_FLAG,
+} from '../services/maas/maas-model-sync.service.js';
 
 interface ModelRow {
   litellm_model_id: string;
+  backend_type?: string;
 }
+
+/** Fields of the admin update payload that make no sense for a MaaS model (cluster-owned) */
+const MAAS_IGNORED_UPDATE_FIELDS = ['api_base', 'api_key', 'tpm', 'rpm'] as const;
 
 const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
   // Initialize services
   const liteLLMService = new LiteLLMService(fastify);
   const modelSyncService = new ModelSyncService(fastify);
   const subscriptionService = new SubscriptionService(fastify);
+
+  const requireMaas = (): MaasModelSyncService => {
+    if (!fastify.maasClients) {
+      throw ApplicationError.validation(
+        'MaaS backend is not enabled',
+        'MAAS_ENABLED',
+        false,
+        'Set MAAS_ENABLED=true to manage MaaS models',
+      );
+    }
+    return new MaasModelSyncService(fastify);
+  };
+
+  // Synchronise MaaSModelRefs from the cluster into the models table
+  fastify.post<{ Body: { restoreRemoved?: boolean } | undefined }>('/maas/sync', {
+    schema: {
+      tags: ['Admin Models'],
+      description: 'Synchronise MaaSModelRef objects from the cluster into LiteMaaS models',
+      security: [{ bearerAuth: [] }],
+      body: {
+        type: 'object',
+        nullable: true,
+        properties: { restoreRemoved: { type: 'boolean' } },
+        additionalProperties: false,
+      },
+    },
+    preHandler: [fastify.authenticate, fastify.requirePermission('admin:models')],
+    handler: async (request) => {
+      const user = (request as AuthenticatedRequest).user;
+      const service = requireMaas();
+      const result = await service.syncModels({
+        restoreRemoved: request.body?.restoreRemoved === true,
+      });
+      await fastify.dbUtils.query(
+        `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, metadata, success)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [user.userId, 'MAAS_MODEL_SYNC', 'MODEL', 'maas', JSON.stringify(result), result.success],
+      );
+      return result;
+    },
+  });
+
+  // List MaaSModelRefs present on the cluster
+  fastify.get('/maas/refs', {
+    schema: {
+      tags: ['Admin Models'],
+      description: 'List MaaSModelRef objects on the cluster and whether they are imported',
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: [fastify.authenticate, fastify.requirePermission('admin:models')],
+    handler: async () => {
+      const service = requireMaas();
+      try {
+        return { data: await service.listRefs() };
+      } catch (error) {
+        if (error instanceof ApplicationError) throw error;
+        throw ApplicationError.maasError(
+          'Failed to list MaaSModelRefs',
+          (error as { status?: number }).status,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    },
+  });
 
   // Test model configuration (connectivity + model availability)
   fastify.post<{
@@ -435,6 +508,158 @@ const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
     },
   });
 
+  /**
+   * Metadata-only update for MaaS models. Cluster-owned fields (endpoint, TPM/RPM, api_base,
+   * provider key) are ignored; nothing is sent to LiteLLM.
+   */
+  async function updateMaasModelMetadata(
+    modelId: string,
+    data: Record<string, any>,
+    adminUserId: string,
+  ) {
+    const ignored = MAAS_IGNORED_UPDATE_FIELDS.filter((f) => data[f] !== undefined);
+    const existing = await fastify.dbUtils.queryOne<Record<string, any>>(
+      `SELECT features, supports_vision, supports_function_calling,
+              supports_parallel_function_calling, supports_tool_choice
+         FROM models WHERE id = $1`,
+      [modelId],
+    );
+
+    const sets: string[] = [];
+    const params: any[] = [modelId];
+    const add = (column: string, value: unknown) => {
+      params.push(value);
+      sets.push(`${column} = $${params.length}`);
+    };
+
+    if (data.model_name !== undefined) add('name', data.model_name);
+    if (data.description !== undefined) add('description', data.description);
+    if (data.backend_model_name !== undefined) add('backend_model_name', data.backend_model_name);
+    if (data.input_cost_per_token !== undefined)
+      add('input_cost_per_token', data.input_cost_per_token);
+    if (data.output_cost_per_token !== undefined)
+      add('output_cost_per_token', data.output_cost_per_token);
+    if (data.max_tokens !== undefined) {
+      add('max_tokens', data.max_tokens);
+      add('context_length', data.max_tokens);
+    }
+    if (data.supports_vision !== undefined) add('supports_vision', data.supports_vision);
+    if (data.supports_function_calling !== undefined)
+      add('supports_function_calling', data.supports_function_calling);
+    if (data.supports_parallel_function_calling !== undefined)
+      add('supports_parallel_function_calling', data.supports_parallel_function_calling);
+    if (data.supports_tool_choice !== undefined)
+      add('supports_tool_choice', data.supports_tool_choice);
+
+    const capabilityTouched = [
+      'supports_embeddings',
+      'supports_tokenize',
+      'supports_convert',
+      'supports_vision',
+      'supports_function_calling',
+      'supports_parallel_function_calling',
+      'supports_tool_choice',
+    ].some((k) => data[k] !== undefined);
+    if (capabilityTouched) {
+      const current: string[] = (existing?.features as string[]) ?? ['chat'];
+      const flag = (key: string, fallback: boolean) =>
+        data[key] !== undefined ? !!data[key] : fallback;
+      const embeddings = flag('supports_embeddings', current.includes('embeddings'));
+      const convert = flag('supports_convert', current.includes('convert'));
+      const features: string[] = [embeddings ? 'embeddings' : convert ? 'convert' : 'chat'];
+      if (flag('supports_function_calling', !!existing?.supports_function_calling))
+        features.push('function_calling');
+      if (
+        flag('supports_parallel_function_calling', !!existing?.supports_parallel_function_calling)
+      )
+        features.push('parallel_function_calling');
+      if (flag('supports_tool_choice', !!existing?.supports_tool_choice))
+        features.push('tool_choice');
+      if (flag('supports_vision', !!existing?.supports_vision)) features.push('vision');
+      if (flag('supports_tokenize', current.includes('tokenize'))) features.push('tokenize');
+      add('features', features);
+    }
+
+    if (sets.length > 0) {
+      sets.push('updated_at = CURRENT_TIMESTAMP');
+      await fastify.dbUtils.query(
+        `UPDATE models SET ${sets.join(', ')} WHERE id = $1 AND backend_type = 'maas'`,
+        params,
+      );
+    }
+
+    if (data.restrictedAccess !== undefined) {
+      const current = await fastify.dbUtils.queryOne<{ restricted_access: boolean }>(
+        'SELECT restricted_access FROM models WHERE id = $1',
+        [modelId],
+      );
+      if (current && current.restricted_access !== data.restrictedAccess) {
+        await fastify.dbUtils.query('UPDATE models SET restricted_access = $1 WHERE id = $2', [
+          data.restrictedAccess,
+          modelId,
+        ]);
+        await subscriptionService.handleModelRestrictionChange(modelId, data.restrictedAccess);
+      }
+    }
+
+    await fastify.dbUtils.query(
+      `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, metadata)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        adminUserId,
+        'MODEL_UPDATE',
+        'MODEL',
+        modelId,
+        JSON.stringify({ modelId, backendType: 'maas', updateData: data, ignoredFields: ignored }),
+      ],
+    );
+
+    return {
+      success: true,
+      message:
+        ignored.length > 0
+          ? `Model '${modelId}' updated successfully (cluster-managed fields ignored: ${ignored.join(', ')})`
+          : `Model '${modelId}' updated successfully`,
+      model: {
+        id: modelId,
+        model_name: data.model_name || modelId,
+        updated_at: new Date().toISOString(),
+      },
+    };
+  }
+
+  /**
+   * Soft delete of a MaaS model: revoke cluster access, cascade subscriptions/key
+   * associations, keep the row (unavailable + admin_removed so syncs do not revive it).
+   */
+  async function softDeleteMaasModel(modelId: string, adminUserId: string): Promise<void> {
+    if (fastify.maasClients) {
+      const cascade = await new MaasModelSyncService(fastify).markUnavailableWithCascade(modelId);
+      fastify.log.info({ modelId, cascade }, 'MaaS model cascade completed');
+    } else {
+      await modelSyncService.markModelUnavailable(modelId);
+    }
+    await fastify.dbUtils.query(
+      `UPDATE models
+          SET availability = 'unavailable',
+              metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND backend_type = 'maas'`,
+      [modelId, JSON.stringify({ [ADMIN_REMOVED_FLAG]: true })],
+    );
+    await fastify.dbUtils.query(
+      `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, metadata)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        adminUserId,
+        'MODEL_DELETE',
+        'MODEL',
+        modelId,
+        JSON.stringify({ modelId, backendType: 'maas', soft: true }),
+      ],
+    );
+  }
+
   // Update an existing model
   fastify.put<{
     Params: Static<typeof AdminModelParamsSchema>;
@@ -556,9 +781,18 @@ const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
 
         // Get the LiteLLM model ID from the database
         const modelRecord = await fastify.dbUtils.queryOne<ModelRow>(
-          `SELECT litellm_model_id FROM models WHERE id = $1`,
+          `SELECT litellm_model_id, backend_type FROM models WHERE id = $1`,
           [modelId],
         );
+
+        // MaaS models: metadata-only update, no LiteLLM calls
+        if (modelRecord?.backend_type === 'maas') {
+          return await updateMaasModelMetadata(
+            modelId,
+            updateData as Record<string, any>,
+            user.userId,
+          );
+        }
 
         if (!modelRecord || !modelRecord.litellm_model_id) {
           reply.status(400);
@@ -713,9 +947,18 @@ const adminModelsRoutes: FastifyPluginAsync = async (fastify) => {
       try {
         // Get the LiteLLM model ID from the database
         const modelRecord = await fastify.dbUtils.queryOne<ModelRow>(
-          `SELECT litellm_model_id FROM models WHERE id = $1`,
+          `SELECT litellm_model_id, backend_type FROM models WHERE id = $1`,
           [modelId],
         );
+
+        // MaaS models: soft delete + cascade, never touches LiteLLM
+        if (modelRecord?.backend_type === 'maas') {
+          await softDeleteMaasModel(modelId, user.userId);
+          return {
+            success: true,
+            message: `Model '${modelId}' deleted successfully`,
+          };
+        }
 
         if (!modelRecord || !modelRecord.litellm_model_id) {
           reply.status(400);

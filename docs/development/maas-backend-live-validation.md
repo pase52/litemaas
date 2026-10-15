@@ -248,3 +248,134 @@ curl -s http://localhost:8081/api/v1/config | jq '{maasEnabled, maasGatewayUrl}'
 oc get gateway -A | grep maas
 oc get httproute -A | grep -i maas
 ```
+
+## A11. MaaSAuthPolicy semantics (phase 3: subscriptions -> access)
+
+**Assumption.** One policy per user, `litemaas-<username>` in `MAAS_NAMESPACE`
+(`models-as-a-service`), with `spec.subjects.users=[<username>]` and `spec.modelRefs=[{name,namespace}]`
+where `namespace` is the namespace of the MaaSModelRef (not of the policy). The operator treats
+multiple policies naming the same user as a union. LiteMaaS deletes the policy when the user has no
+active MaaS subscription, rather than writing an empty `modelRefs`, because the behaviour of an empty
+list is unverified.
+
+**Verify.**
+
+```bash
+oc -n models-as-a-service get maasauthpolicy -l app.kubernetes.io/managed-by=litemaas -o yaml
+# Union: a hand-made policy for the same user must not be overwritten or removed by LiteMaaS
+# Empty list: apply a policy with modelRefs: [] and check the user is denied (not allowed-all)
+oc -n models-as-a-service get maasauthpolicy <name> -o jsonpath='{.status}'
+```
+
+Also confirm that a user without a policy naming the model is denied by the gateway (HTTP 403) and
+that a model name in `modelRefs` which does not exist is rejected or ignored (not fatal for the others).
+
+## A12. Revocation latency and request-time subscription validation
+
+**Assumption.** Deleting a user's model from the policy, or removing the model from (or deleting)
+a `MaaSSubscription`, stops already-issued API keys from reaching that model without having to
+revoke them in maas-api (the gateway validates the subscription at request time). LiteMaaS relies on
+this for revocation-first behaviour when a subscription is cancelled/denied/deleted or a model
+becomes restricted/unavailable.
+
+**Verify.**
+
+```bash
+# 1. create a key via maas-api bound to subscription litemaas-key-<id>, call the model -> 200
+# 2. delete the model from the policy / subscription, wait for reconcile of the operator
+oc -n models-as-a-service patch maassubscription litemaas-key-<id> --type=json \
+  -p '[{"op":"remove","path":"/spec/modelRefs/0"}]'
+# 3. call again; measure the time until 403/401
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $KEY" "$MAAS_GATEWAY_URL/<ns>/<model>/v1/models"
+# 4. delete the subscription entirely and repeat
+```
+
+Record the propagation delay (operator reconcile + Authorino cache TTL) in the user documentation.
+
+## A13. Served model name (`backend_model_name`) of synced MaaS models
+
+**Assumption.** The model name clients send in the request body is the `MaaSModelRef` name, so the
+sync sets `models.backend_model_name = <ref name>` on import only (admins can override it via
+`PUT /admin/models/:id`; syncs never overwrite a non-empty value). If the vLLM served name differs
+(e.g. `--served-model-name`), the override is needed.
+
+**Verify.**
+
+```bash
+oc -n <model-ns> get maasmodelref <name> -o jsonpath='{.status.endpoint}{"\n"}'
+curl -s -H "Authorization: Bearer $KEY" "<endpoint>/v1/models" | jq '.data[].id'
+```
+
+Also verify the `status.phase` values used for availability: `Ready` -> available; `Pending`,
+`Failed` or anything else -> unavailable without cascade (access is kept so the model returns when
+healthy). A ref that disappears from the scanned namespaces cascades (subscriptions deactivated,
+API key associations removed, policies/subscriptions revoked).
+
+## A14. Service account RBAC for the phase 2/3 operations
+
+**Assumption.** The LiteMaaS service account can `get/list` MaaSModelRefs in `MAAS_MODEL_NAMESPACES`
+(or cluster-wide when unset), and `get/list/create/update/delete` MaaSAuthPolicies and
+MaaSSubscriptions in `MAAS_NAMESPACE` (the K8s client uses `replace`, i.e. `update`, with
+`resourceVersion`). Deployment RBAC is delivered in phase 7.
+
+**Verify.**
+
+```bash
+SA=system:serviceaccount:litemaas:litemaas-backend
+oc auth can-i list maasmodelrefs.maas.opendatahub.io --all-namespaces --as=$SA
+for v in get list create update delete; do
+  echo -n "$v maasauthpolicies: "; oc -n models-as-a-service auth can-i $v maasauthpolicies.maas.opendatahub.io --as=$SA
+  echo -n "$v maassubscriptions: "; oc -n models-as-a-service auth can-i $v maassubscriptions.maas.opendatahub.io --as=$SA
+done
+```
+
+## A15. Reconciler comparison and API-server defaulting
+
+**Assumption.** The reconciler compares the desired `spec` with the live object using JSON equality
+and only writes when different. If the CRD defaults or normalises fields (e.g. adds `groups: []`,
+reorders), the comparison never matches and every pass re-writes every object (harmless but noisy,
+visible as non-zero `policiesApplied` / `subscriptionsApplied` on `POST /admin/maas/reconcile`
+with no changes).
+
+**Verify.**
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $ADMIN_JWT" http://localhost:8081/api/v1/admin/maas/reconcile | jq .data
+# run twice with no DB changes: the second run must report 0 applied
+```
+
+If it does not converge, compare `oc get maasauthpolicy <n> -o jsonpath='{.spec}'` with the built spec
+in `maas-resources.ts` and normalise the differences.
+
+Orphan deletion only removes objects labeled `app.kubernetes.io/managed-by=litemaas` and, for
+subscriptions, older than 120 s (a key being created is not racing the reconciler). Confirm that no
+operator-created object copies the label.
+
+## A16. Multi-replica locking and Postgres poolers
+
+**Assumption.** The reconciler and the periodic model sync use session-level
+`pg_try_advisory_lock` on a dedicated connection from the pool. This is not safe behind a
+transaction-mode pooler (pgbouncer `pool_mode=transaction`): the lock may be released/shared
+unexpectedly.
+
+**Verify.**
+
+```sql
+-- while a reconcile is running (locks: 1296121171 reconciler, 1296121172 model sync)
+SELECT pid, classid, objid FROM pg_locks WHERE locktype = 'advisory';
+```
+
+With two replicas, exactly one holder at a time and the other logs "skipped: lock held".
+
+## A17. Model ids containing `/` in URLs
+
+**Assumption.** MaaS model ids are `<namespace>/<name>`; admin routes (`/api/v1/admin/models/:id`) and
+public routes (`/api/v1/models/:id`) receive them URL-encoded (`%2F`) and Fastify decodes the
+parameter. Some ingress controllers/proxies reject or decode `%2F` before forwarding.
+
+**Verify.**
+
+```bash
+curl -s -H "Authorization: Bearer $JWT" "https://<litemaas-route>/api/v1/models/maas-demo-models%2Fllama-3-2-3b" | jq .id
+# Expect the model; a 404 here but 200 on localhost:8081 means the route/ingress decodes %2F
+```

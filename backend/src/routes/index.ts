@@ -17,6 +17,7 @@ import adminUsersRoutes from './admin-users';
 import adminSettingsRoutes from './admin-settings';
 import adminAuditRoutes from './admin-audit';
 import adminBackupRoutes from './admin-backup';
+import adminMaasRoutes from './admin-maas';
 import bannerRoutes from './banners';
 import brandingRoutes from './branding';
 
@@ -46,6 +47,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   await fastify.register(adminSettingsRoutes, { prefix: '/admin/settings' });
   await fastify.register(adminAuditRoutes, { prefix: '/admin/audit' });
   await fastify.register(adminBackupRoutes, { prefix: '/admin/backup' });
+  await fastify.register(adminMaasRoutes, { prefix: '/admin/maas' });
 
   // Banner endpoints
   await fastify.register(bannerRoutes, { prefix: '/banners' });

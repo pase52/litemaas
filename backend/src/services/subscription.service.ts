@@ -4,6 +4,7 @@ import { LiteLLMService } from './litellm.service';
 import { BaseService } from './base.service.js';
 import { NotificationService } from './notification.service.js';
 import { LiteLLMSyncUtils } from '../utils/litellm-sync.utils.js';
+import { MaasAccessService } from './maas/maas-access.service.js';
 import {
   SubscriptionStatus,
   EnhancedSubscription,
@@ -377,6 +378,29 @@ export class SubscriptionService extends BaseService {
     this.notificationService = new NotificationService(fastify);
   }
 
+  private maasAccess?: MaasAccessService;
+
+  /** MaaS access service, or null when MAAS_ENABLED is off (hooks become no-ops) */
+  private getMaasAccess(): MaasAccessService | null {
+    if (!this.fastify.maasClients) return null;
+    if (!this.maasAccess) this.maasAccess = new MaasAccessService(this.fastify);
+    return this.maasAccess;
+  }
+
+  /** Grant hook: after a subscription became active. Never throws (reconciler converges). */
+  private async maasGrant(userId: string, modelId: string): Promise<void> {
+    const access = this.getMaasAccess();
+    if (!access) return;
+    await access.grantModelToUser(userId, modelId);
+  }
+
+  /** Revocation-first hook: call BEFORE the subscription stops being active. Never throws. */
+  private async maasRevoke(userId: string, modelId: string): Promise<void> {
+    const access = this.getMaasAccess();
+    if (!access) return;
+    await access.removeModelForUser(userId, modelId);
+  }
+
   async createSubscription(
     userId: string,
     request: EnhancedCreateSubscriptionDto,
@@ -394,24 +418,48 @@ export class SubscriptionService extends BaseService {
     } = request;
 
     try {
-      // NEW: Ensure user exists in LiteLLM before creating subscription
-      await LiteLLMSyncUtils.ensureUserExistsInLiteLLM(userId, this.fastify, this.liteLLMService);
+      // Resolve restriction and serving backend from the local models table
+      const modelDetails = await this.fastify.dbUtils.queryOne<{
+        restricted_access: boolean;
+        backend_type?: string;
+        availability?: string;
+      }>('SELECT restricted_access, backend_type, availability FROM models WHERE id = $1', [
+        modelId,
+      ]);
+      const isMaasModel = modelDetails?.backend_type === 'maas';
 
-      // Validate model exists
-      const model = await this.liteLLMService.getModelById(modelId);
-      if (!model) {
-        throw this.createNotFoundError(
-          'Model',
-          modelId,
-          'Model not found. Please check the model ID and ensure it exists in the system',
-        );
+      if (isMaasModel) {
+        // MaaS models never touch LiteLLM: validate against the synced model row instead
+        if (!this.fastify.maasClients) {
+          throw this.createValidationError(
+            'MaaS backend is not enabled',
+            'modelId',
+            modelId,
+            'This model is served by MaaS, which is not enabled on this deployment',
+          );
+        }
+        if (modelDetails?.availability === 'unavailable') {
+          throw this.createValidationError(
+            'Model is not available',
+            'modelId',
+            modelId,
+            'This model is currently unavailable and cannot be subscribed to',
+          );
+        }
+      } else {
+        // Ensure user exists in LiteLLM before creating subscription
+        await LiteLLMSyncUtils.ensureUserExistsInLiteLLM(userId, this.fastify, this.liteLLMService);
+
+        // Validate model exists
+        const model = await this.liteLLMService.getModelById(modelId);
+        if (!model) {
+          throw this.createNotFoundError(
+            'Model',
+            modelId,
+            'Model not found. Please check the model ID and ensure it exists in the system',
+          );
+        }
       }
-
-      // Check if model is restricted (requires admin approval)
-      const modelDetails = await this.fastify.dbUtils.queryOne<{ restricted_access: boolean }>(
-        'SELECT restricted_access FROM models WHERE id = $1',
-        [modelId],
-      );
 
       const initialStatus = modelDetails?.restricted_access ? 'pending' : 'active';
 
@@ -498,6 +546,8 @@ export class SubscriptionService extends BaseService {
             `Subscription reactivated from inactive status with ${initialStatus} status`,
           );
 
+          if (initialStatus === 'active') await this.maasGrant(userId, modelId);
+
           return this.mapToEnhancedSubscription(updatedSubscription);
         } else {
           // Subscription exists but is not inactive (active, suspended, etc.)
@@ -580,6 +630,8 @@ export class SubscriptionService extends BaseService {
         },
         'Subscription created',
       );
+
+      if (initialStatus === 'active') await this.maasGrant(userId, modelId);
 
       return this.mapToEnhancedSubscription(subscription);
     } catch (error) {
@@ -836,6 +888,12 @@ export class SubscriptionService extends BaseService {
       updateFields.push(`updated_at = CURRENT_TIMESTAMP`);
       params.push(subscriptionId, userId);
 
+      // MaaS: revoke cluster access BEFORE the row stops being active
+      const statusChanging = status !== undefined && status !== existing.status;
+      if (statusChanging && existing.status === 'active') {
+        await this.maasRevoke(userId, existing.modelId);
+      }
+
       const updatedSubscription = await this.fastify.dbUtils.queryOne(
         `UPDATE subscriptions SET ${updateFields.join(', ')}
          WHERE id = $${paramIndex} AND user_id = $${paramIndex + 1}
@@ -858,6 +916,10 @@ export class SubscriptionService extends BaseService {
         },
         'Subscription updated',
       );
+
+      if (statusChanging && status === 'active') {
+        await this.maasGrant(userId, existing.modelId);
+      }
 
       return this.mapToEnhancedSubscription(updatedSubscription);
     } catch (error) {
@@ -901,6 +963,9 @@ export class SubscriptionService extends BaseService {
       }
 
       const modelId = sub.model_id;
+
+      // MaaS: revoke cluster access BEFORE the database changes (no-op for LiteLLM models)
+      await this.maasRevoke(userId, modelId);
 
       // 2. Mark subscription as inactive (not delete!)
       await client.query(
@@ -1072,6 +1137,9 @@ export class SubscriptionService extends BaseService {
       const sub = subscription.rows[0];
       const modelId = sub.model_id;
       const userId = sub.user_id;
+
+      // MaaS: revoke cluster access BEFORE the database changes (no-op for LiteLLM models)
+      if (sub.status === 'active') await this.maasRevoke(userId, modelId);
 
       // 2. Reuse API key cleanup logic from cancelSubscription
       // Get all user's API keys that have this model
@@ -1314,8 +1382,17 @@ export class SubscriptionService extends BaseService {
     const warnings: string[] = [];
 
     try {
-      // Validate model exists
-      const model = await this.liteLLMService.getModelById(subscriptionData.modelId);
+      // Validate model exists (MaaS models are validated against the synced model row)
+      const maasRow = this.fastify.maasClients
+        ? await this.fastify.dbUtils.queryOne<{ backend_type: string }>(
+            'SELECT backend_type FROM models WHERE id = $1',
+            [subscriptionData.modelId],
+          )
+        : null;
+      const model =
+        maasRow?.backend_type === 'maas'
+          ? maasRow
+          : await this.liteLLMService.getModelById(subscriptionData.modelId);
       if (!model) {
         errors.push(`Model ${subscriptionData.modelId} does not exist`);
       }
@@ -2223,6 +2300,9 @@ export class SubscriptionService extends BaseService {
           ],
         );
 
+        // MaaS: grant cluster access (DB is already committed; reconciler retries on failure)
+        await this.maasGrant(subscription.user_id, subscription.model_id);
+
         // Notify user
         await this.notificationService.notifyUserSubscriptionApproved(
           subscriptionId,
@@ -2285,6 +2365,11 @@ export class SubscriptionService extends BaseService {
         }
 
         const oldStatus = subscription.status;
+
+        // MaaS: revoke cluster access first (no-op for LiteLLM models)
+        if (oldStatus === 'active') {
+          await this.maasRevoke(subscription.user_id, subscription.model_id);
+        }
 
         // Remove model from user's API keys FIRST (security priority)
         await apiKeyService.removeModelFromUserApiKeys(subscription.user_id, subscription.model_id);
@@ -2499,6 +2584,11 @@ export class SubscriptionService extends BaseService {
       );
     }
 
+    // MaaS: revoke cluster access BEFORE an active subscription is reverted
+    if (oldStatus === 'active') {
+      await this.maasRevoke(subscription.user_id, subscription.model_id);
+    }
+
     // Update subscription
     const updated = await this.fastify.dbUtils.queryOne<DatabaseSubscription>(
       `UPDATE subscriptions
@@ -2545,6 +2635,10 @@ export class SubscriptionService extends BaseService {
       { subscriptionId, adminUserId, oldStatus, newStatus },
       'Subscription status reverted',
     );
+
+    if (newStatus === 'active') {
+      await this.maasGrant(subscription.user_id, subscription.model_id);
+    }
 
     // Fetch subscription with user and model details for response
     const enriched = await this.fastify.dbUtils.queryOne<any>(
@@ -2741,8 +2835,11 @@ export class SubscriptionService extends BaseService {
   async handleModelRestrictionChange(modelId: string, isNowRestricted: boolean): Promise<void> {
     if (!isNowRestricted) {
       // Model is no longer restricted - auto-approve all pending subscriptions
-      const pendingSubscriptions = await this.fastify.dbUtils.queryMany<{ id: string }>(
-        `SELECT id FROM subscriptions
+      const pendingSubscriptions = await this.fastify.dbUtils.queryMany<{
+        id: string;
+        user_id?: string;
+      }>(
+        `SELECT id, user_id FROM subscriptions
          WHERE model_id = $1 AND status = 'pending'`,
         [modelId],
       );
@@ -2772,6 +2869,13 @@ export class SubscriptionService extends BaseService {
           );
         }
 
+        // MaaS: grant cluster access to the auto-approved users
+        for (const userId of new Set(
+          pendingSubscriptions.map((s) => s.user_id).filter((u): u is string => !!u),
+        )) {
+          await this.maasGrant(userId, modelId);
+        }
+
         this.fastify.log.info(
           { modelId, count: pendingSubscriptions.length },
           'Auto-approved pending subscriptions due to model restriction removal',
@@ -2799,6 +2903,8 @@ export class SubscriptionService extends BaseService {
     const apiKeyService = new ApiKeyService(this.fastify, this.liteLLMService);
 
     for (const sub of activeSubscriptions) {
+      // MaaS: revoke cluster access first (no-op for LiteLLM models)
+      await this.maasRevoke(sub.user_id, modelId);
       await apiKeyService.removeModelFromUserApiKeys(sub.user_id, modelId);
     }
 

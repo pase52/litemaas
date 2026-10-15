@@ -11,6 +11,7 @@ import { LiteLLMService } from '../services/litellm.service';
 import { ModelSyncService } from '../services/model-sync.service';
 import { ModelPopularityService } from '../services/model-popularity.service';
 import { ApplicationError } from '../utils/errors';
+import { mapBackendFields } from '../utils/model-backend.utils';
 
 const modelsRoutes: FastifyPluginAsync = async (fastify) => {
   // Initialize services
@@ -149,6 +150,11 @@ const modelsRoutes: FastifyPluginAsync = async (fastify) => {
                   supportsTokenize: { type: 'boolean' },
                   supportsConvert: { type: 'boolean' },
                   restrictedAccess: { type: 'boolean' },
+                  // Serving backend
+                  backendType: { type: 'string', enum: ['litellm', 'maas'] },
+                  maasEndpoint: { type: 'string' },
+                  migrationState: { type: 'string' },
+                  migrationGraceUntil: { type: 'string' },
                 },
               },
             },
@@ -221,6 +227,7 @@ const modelsRoutes: FastifyPluginAsync = async (fastify) => {
             supportsTokenize: (model.features as string[])?.includes('tokenize') || false,
             supportsConvert: (model.features as string[])?.includes('convert') || false,
             restrictedAccess: Boolean(model.restricted_access),
+            ...mapBackendFields(model),
           }));
 
           fastify.log.debug({ count: models.length }, 'Using synchronized models from database');
@@ -431,6 +438,10 @@ const modelsRoutes: FastifyPluginAsync = async (fastify) => {
               },
             },
             metadata: { type: 'object' },
+            backendType: { type: 'string', enum: ['litellm', 'maas'] },
+            maasEndpoint: { type: 'string' },
+            migrationState: { type: 'string' },
+            migrationGraceUntil: { type: 'string' },
           },
         },
         404: {
@@ -475,6 +486,7 @@ const modelsRoutes: FastifyPluginAsync = async (fastify) => {
             isActive: model.availability === 'available',
             createdAt: new Date(String(model.created_at)),
             updatedAt: new Date(String(model.updated_at)),
+            ...mapBackendFields(model),
             // Additional metadata fields for ModelDetails
             metadata: {
               litellmModelId: model.litellm_model_id ? String(model.litellm_model_id) : undefined,

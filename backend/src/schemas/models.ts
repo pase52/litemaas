@@ -21,6 +21,10 @@ export const ModelSchema = Type.Object({
   pricing: Type.Optional(ModelPricingSchema),
   isActive: Type.Boolean(),
   restrictedAccess: Type.Optional(Type.Boolean()),
+  backendType: Type.Optional(Type.Union([Type.Literal('litellm'), Type.Literal('maas')])),
+  maasEndpoint: Type.Optional(Type.String()),
+  migrationState: Type.Optional(Type.String()),
+  migrationGraceUntil: Type.Optional(Type.String()),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
 });

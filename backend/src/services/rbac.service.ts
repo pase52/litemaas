@@ -201,6 +201,13 @@ export class RBACService {
       resource: 'admin',
       action: 'backup',
     },
+    {
+      id: 'admin:maas',
+      name: 'MaaS Administration',
+      description: 'Trigger MaaS reconciliation and manage the MaaS backend',
+      resource: 'admin',
+      action: 'maas',
+    },
   ];
 
   // System roles
@@ -215,6 +222,7 @@ export class RBACService {
         'admin:audit',
         'admin:usage',
         'admin:backup',
+        'admin:maas',
         'admin:banners:read',
         'admin:banners:write',
         'admin:subscriptions:read',

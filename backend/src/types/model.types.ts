@@ -23,6 +23,11 @@ export interface Model {
   supportsParallelFunctionCalling?: boolean;
   supportsToolChoice?: boolean;
   restrictedAccess?: boolean; // When true, subscriptions require admin approval
+  // Serving backend (litellm default, maas for RHOAI Models-as-a-Service)
+  backendType?: 'litellm' | 'maas';
+  maasEndpoint?: string;
+  migrationState?: string;
+  migrationGraceUntil?: string; // ISO timestamp
 }
 
 export interface ModelPricing {
