@@ -23,7 +23,7 @@ const backendsPlugin: FastifyPluginAsync = async (fastify) => {
   let maasClients: MaasClients | undefined;
   if (getMaasConfig(fastify.config).enabled) {
     maasClients = createMaasClients(fastify);
-    registry.register(createMaasBackend(maasClients));
+    registry.register(createMaasBackend(maasClients, fastify));
     fastify.log.info(
       {
         k8sMock: maasClients.k8s.mock,

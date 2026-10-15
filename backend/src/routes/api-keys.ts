@@ -91,6 +91,12 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
             revokedAt: apiKey.revokedAt,
             liteLLMKeyAlias: apiKey.liteLLMKeyAlias,
             archivedAt: apiKey.archivedAt,
+            backendType: apiKey.backendType ?? 'litellm',
+            ...(apiKey.backendType === 'maas' && {
+              baseUrl: apiKeyService.maasBaseUrl,
+              maasKeyId: apiKey.maasKeyId,
+              maasSyncState: apiKey.maasSyncState,
+            }),
             liteLLMKeyId: apiKey.liteLLMKeyId,
             lastSyncAt: apiKey.lastSyncAt,
             syncStatus: apiKey.syncStatus,
@@ -161,10 +167,18 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
           id: apiKey.id,
           name: apiKey.name,
           prefix: apiKey.keyPrefix, // Map keyPrefix to prefix for API response
+          keyPrefix: apiKey.keyPrefix, // required by SingleApiKeyResponseSchema
+          isActive: apiKey.isActive,
+          expiresAt: apiKey.expiresAt,
           models: apiKey.models,
           subscriptionId: apiKey.subscriptionDetails?.[0]?.subscriptionId,
           lastUsedAt: apiKey.lastUsedAt,
           createdAt: apiKey.createdAt,
+          backendType: apiKey.backendType ?? 'litellm',
+          ...(apiKey.backendType === 'maas' && {
+            baseUrl: apiKeyService.maasBaseUrl,
+            maasKeyId: apiKey.maasKeyId,
+          }),
         };
       } catch (error) {
         fastify.log.error(error, 'Failed to get API key');
@@ -217,21 +231,30 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
         const quotaConfig = await settingsService.getApiKeyDefaults();
         const { defaults, maximums } = quotaConfig;
 
+        // A key is bound to one backend; MaaS keys only support TPM limits and expiration, so
+        // budget / RPM defaults and maximums are not applied to them
+        const backendType = await apiKeyService.resolveCreateBackend(
+          body.modelIds ?? [],
+          body.backendType,
+        );
+        const isMaas = backendType === 'maas';
+
         // Apply defaults for unset fields (use ?? to preserve 0)
         const mergedBody = { ...body };
-        if (mergedBody.maxBudget == null && defaults.maxBudget != null) {
+        if (isMaas) mergedBody.backendType = 'maas';
+        if (!isMaas && mergedBody.maxBudget == null && defaults.maxBudget != null) {
           mergedBody.maxBudget = defaults.maxBudget;
         }
         if (mergedBody.tpmLimit == null && defaults.tpmLimit != null) {
           mergedBody.tpmLimit = defaults.tpmLimit;
         }
-        if (mergedBody.rpmLimit == null && defaults.rpmLimit != null) {
+        if (!isMaas && mergedBody.rpmLimit == null && defaults.rpmLimit != null) {
           mergedBody.rpmLimit = defaults.rpmLimit;
         }
-        if (mergedBody.budgetDuration == null && defaults.budgetDuration != null) {
+        if (!isMaas && mergedBody.budgetDuration == null && defaults.budgetDuration != null) {
           mergedBody.budgetDuration = defaults.budgetDuration;
         }
-        if (mergedBody.softBudget == null && defaults.softBudget != null) {
+        if (!isMaas && mergedBody.softBudget == null && defaults.softBudget != null) {
           mergedBody.softBudget = defaults.softBudget;
         }
         // Apply default expiration if not set by user
@@ -244,6 +267,7 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
         // Enforce maximums
         const violations: string[] = [];
         if (
+          !isMaas &&
           maximums.maxBudget != null &&
           mergedBody.maxBudget != null &&
           mergedBody.maxBudget > maximums.maxBudget
@@ -260,6 +284,7 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
           violations.push(`tpmLimit: ${mergedBody.tpmLimit} exceeds maximum ${maximums.tpmLimit}`);
         }
         if (
+          !isMaas &&
           maximums.rpmLimit != null &&
           mergedBody.rpmLimit != null &&
           mergedBody.rpmLimit > maximums.rpmLimit
@@ -308,6 +333,11 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
           createdAt: apiKey.createdAt,
           expiresAt: apiKey.expiresAt,
           isActive: apiKey.isActive,
+          backendType: apiKey.backendType ?? 'litellm',
+          ...(apiKey.backendType === 'maas' && {
+            baseUrl: apiKey.baseUrl,
+            maasKeyId: apiKey.maasKeyId,
+          }),
         };
       } catch (error) {
         fastify.log.error(error, 'Failed to create API key');
@@ -539,6 +569,9 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
             subscriptionId: { type: 'string' },
             lastUsedAt: { type: 'string', format: 'date-time' },
             createdAt: { type: 'string', format: 'date-time' },
+            backendType: { type: 'string' },
+            baseUrl: { type: 'string' },
+            maasKeyId: { type: 'string' },
           },
         },
       },
@@ -613,14 +646,25 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
             }
           }
 
-          // Update expiration in DB and sync to LiteLLM
-          await fastify.dbUtils.query(
-            `UPDATE api_keys SET expires_at = $1 WHERE id = $2 AND user_id = $3`,
-            [expiresAt ? new Date(expiresAt) : null, id, user.userId],
-          );
+          // MaaS keys: maas-api cannot extend a key, so only shortening is allowed
+          const existingForExpiry = await apiKeyService.getApiKey(id, user.userId);
+          const isMaasKey = existingForExpiry?.backendType === 'maas';
+          if (isMaasKey) {
+            await apiKeyService.updateMaasExpiration(
+              id,
+              user.userId,
+              expiresAt ? new Date(expiresAt) : null,
+            );
+          } else {
+            // Update expiration in DB and sync to LiteLLM
+            await fastify.dbUtils.query(
+              `UPDATE api_keys SET expires_at = $1 WHERE id = $2 AND user_id = $3`,
+              [expiresAt ? new Date(expiresAt) : null, id, user.userId],
+            );
+          }
 
           // Sync expiration to LiteLLM
-          const keyForExpiry = await apiKeyService.getApiKey(id, user.userId);
+          const keyForExpiry = isMaasKey ? null : await apiKeyService.getApiKey(id, user.userId);
           if (keyForExpiry?.liteLLMKeyId) {
             const liteLLMUpdates: Record<string, unknown> = {};
             if (expiresAt) {
@@ -668,6 +712,11 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
           expiresAt: updatedApiKey.expiresAt,
           isActive: updatedApiKey.isActive,
           revokedAt: updatedApiKey.revokedAt,
+          backendType: updatedApiKey.backendType ?? 'litellm',
+          ...(updatedApiKey.backendType === 'maas' && {
+            baseUrl: apiKeyService.maasBaseUrl,
+            maasKeyId: updatedApiKey.maasKeyId,
+          }),
           liteLLMKeyId: updatedApiKey.liteLLMKeyId,
           lastSyncAt: updatedApiKey.lastSyncAt,
           syncStatus: updatedApiKey.syncStatus,
@@ -1009,7 +1058,7 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
   // Secure API key retrieval endpoint - Phase 2 implementation
   fastify.post<{
     Params: { id: string };
-    Reply: { key: string; keyType: string; retrievedAt: string };
+    Reply: { key: string; keyType: string; retrievedAt: string; baseUrl?: string };
   }>('/:id/reveal', {
     schema: {
       tags: ['API Keys'],
@@ -1035,8 +1084,12 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
             },
             keyType: {
               type: 'string',
-              enum: ['litellm'],
+              enum: ['litellm', 'maas'],
               description: 'Type of API key returned',
+            },
+            baseUrl: {
+              type: 'string',
+              description: 'Gateway base URL for MaaS keys',
             },
             retrievedAt: {
               type: 'string',
@@ -1130,10 +1183,14 @@ const apiKeysRoutes: FastifyPluginAsync = async (fastify) => {
           'API key successfully retrieved via secure endpoint',
         );
 
+        const backendRow = await apiKeyService.getApiKey(id, user.userId);
+        const isMaasKey = backendRow?.backendType === 'maas';
+
         return {
           key: fullKey,
-          keyType: 'litellm',
+          keyType: isMaasKey ? 'maas' : 'litellm',
           retrievedAt: retrievalTimestamp.toISOString(),
+          ...(isMaasKey && { baseUrl: apiKeyService.maasBaseUrl }),
         };
       } catch (error) {
         // Enhanced error logging with security context

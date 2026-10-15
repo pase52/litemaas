@@ -100,6 +100,9 @@ export const UserApiKeySchema = Type.Object({
   expiresAt: Type.Optional(Type.String({ format: 'date-time' })),
   revokedAt: Type.Optional(Type.String({ format: 'date-time' })),
   archivedAt: Type.Optional(Type.String({ format: 'date-time' })),
+  backendType: Type.Optional(Type.String({ description: "'litellm' or 'maas'" })),
+  maasKeyId: Type.Optional(Type.String()),
+  maasSyncState: Type.Optional(Type.String()),
 });
 
 export type UserApiKey = Static<typeof UserApiKeySchema>;

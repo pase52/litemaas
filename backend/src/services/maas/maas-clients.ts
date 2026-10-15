@@ -26,6 +26,11 @@ export interface MaasClients {
   k8s: IK8sClient;
   maasApi: IMaasApiClient;
   prometheus: IPrometheusClient;
+  /**
+   * Bearer token of the LiteMaaS service account (in-cluster token or K8S_TOKEN). Used as a
+   * fallback identity for best-effort maas-api operations when no user token is available.
+   */
+  serviceToken?: () => string | undefined;
 }
 
 /**
@@ -146,5 +151,7 @@ export function createMaasClients(fastify: FastifyInstance): MaasClients {
     log.error('MaaS: PROMETHEUS_URL is not set');
   }
 
-  return { config, k8s, maasApi, prometheus };
+  const serviceToken = () => k8sCfg?.token ?? k8sCfg?.tokenProvider?.();
+
+  return { config, k8s, maasApi, prometheus, serviceToken };
 }

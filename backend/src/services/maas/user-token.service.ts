@@ -31,6 +31,11 @@ export class UserTokenService extends BaseService {
     return mockMaas && isDevOrTest() ? DEV_MOCK_ENCRYPTION_KEY : undefined;
   }
 
+  /** Secret used to encrypt stored credentials (user tokens, MaaS API keys); undefined if none */
+  getEncryptionSecret(): string | undefined {
+    return this.resolveKey();
+  }
+
   /** True when a secret is available to encrypt tokens */
   canStoreTokens(): boolean {
     return !!this.resolveKey();

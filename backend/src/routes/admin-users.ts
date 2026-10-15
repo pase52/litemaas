@@ -673,6 +673,9 @@ const adminUsersRoutes: FastifyPluginAsync = async (fastify) => {
             expiresAt: key.expiresAt ? String(key.expiresAt) : undefined,
             revokedAt: key.revokedAt ? String(key.revokedAt) : undefined,
             archivedAt: key.archivedAt ? String(key.archivedAt) : undefined,
+            backendType: key.backendType ?? 'litellm',
+            maasKeyId: key.maasKeyId,
+            maasSyncState: key.maasSyncState,
             tpmLimit: key.tpmLimit,
             rpmLimit: key.rpmLimit,
             budgetDuration: key.budgetDuration,
@@ -748,6 +751,18 @@ const adminUsersRoutes: FastifyPluginAsync = async (fastify) => {
 
         if (!user) {
           throw fastify.createNotFoundError('User');
+        }
+
+        // MaaS keys need the user's own OpenShift token, so admins cannot create them for
+        // users. Checked before any subscription is auto-created.
+        const maasModelIds = await apiKeyService.findMaasModelIds(body.modelIds);
+        if (maasModelIds.length > 0) {
+          throw ApplicationError.validation(
+            `MaaS models cannot be assigned to API keys by an administrator: ${maasModelIds.join(', ')}`,
+            'modelIds',
+            maasModelIds,
+            'The user must create MaaS API keys themselves',
+          );
         }
 
         // Auto-create/activate subscriptions for requested models
@@ -1011,12 +1026,31 @@ const adminUsersRoutes: FastifyPluginAsync = async (fastify) => {
 
         // Verify the API key belongs to this user
         const apiKey = await fastify.dbUtils.queryOne(
-          'SELECT id, name, user_id FROM api_keys WHERE id = $1 AND user_id = $2',
+          'SELECT id, name, user_id, backend_type FROM api_keys WHERE id = $1 AND user_id = $2',
           [keyId, id],
         );
 
         if (!apiKey) {
           throw fastify.createNotFoundError('API Key');
+        }
+        const isMaasKey = apiKey.backend_type === 'maas';
+
+        // Admins can view, edit TPM / name / expiry and revoke MaaS keys, but not choose MaaS
+        // models (those are tied to the user's own subscriptions and token)
+        if (body.modelIds && body.modelIds.length > 0) {
+          const maasModelIds = isMaasKey
+            ? body.modelIds
+            : await apiKeyService.findMaasModelIds(body.modelIds);
+          if (maasModelIds.length > 0) {
+            throw ApplicationError.validation(
+              isMaasKey
+                ? 'The models of a MaaS API key can only be changed by the key owner'
+                : `MaaS models cannot be added to a LiteLLM API key: ${maasModelIds.join(', ')}`,
+              'modelIds',
+              maasModelIds,
+              'Keys are bound to a single backend; MaaS keys are managed by their owner',
+            );
+          }
         }
 
         // Auto-create/activate subscriptions for requested models
@@ -1066,13 +1100,22 @@ const adminUsersRoutes: FastifyPluginAsync = async (fastify) => {
 
         // Update expiresAt if provided (admin is unrestricted)
         if ('expiresAt' in body) {
-          await fastify.dbUtils.query(
-            `UPDATE api_keys SET expires_at = $1 WHERE id = $2 AND user_id = $3`,
-            [body.expiresAt ? new Date(body.expiresAt) : null, keyId, id],
-          );
+          if (isMaasKey) {
+            // maas-api keys cannot be extended: shortening only
+            await apiKeyService.updateMaasExpiration(
+              keyId,
+              id,
+              body.expiresAt ? new Date(body.expiresAt) : null,
+            );
+          } else {
+            await fastify.dbUtils.query(
+              `UPDATE api_keys SET expires_at = $1 WHERE id = $2 AND user_id = $3`,
+              [body.expiresAt ? new Date(body.expiresAt) : null, keyId, id],
+            );
+          }
 
           // Sync expiration to LiteLLM
-          const keyForExpiry = await apiKeyService.getApiKey(keyId, id);
+          const keyForExpiry = isMaasKey ? null : await apiKeyService.getApiKey(keyId, id);
           if (keyForExpiry?.liteLLMKeyId) {
             const liteLLMUpdates: Record<string, unknown> = {};
             if (body.expiresAt) {

@@ -379,3 +379,180 @@ parameter. Some ingress controllers/proxies reject or decode `%2F` before forwar
 curl -s -H "Authorization: Bearer $JWT" "https://<litemaas-route>/api/v1/models/maas-demo-models%2Fllama-3-2-3b" | jq .id
 # Expect the model; a 404 here but 200 on localhost:8081 means the route/ingress decodes %2F
 ```
+
+## A18. Subscription must exist before the maas-api key (create ordering)
+
+**Assumption.** `POST /v1/api-keys` with `subscription: "litemaas-key-<id>"` only succeeds when the
+named MaaSSubscription already exists and the calling user (token identity) is in its
+`spec.owner.users`. LiteMaaS therefore creates the api_keys row, then the MaaSSubscription, then the
+maas-api key, and rolls back in reverse (revoke maas-api key, delete subscription, delete row) on
+any failure. The controller must also have reconciled the new subscription before maas-api accepts
+it (otherwise creation fails with 4xx/5xx and the rollback runs; the user simply retries).
+
+**Code relying on it.** `MaasKeyService.createApiKey` / `createKey`
+(`services/maas/maas-key.service.ts`).
+
+**Verify.**
+
+```bash
+cat <<EOF2 | oc apply -f -
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSSubscription
+metadata: {name: litemaas-key-test, namespace: $NS}
+spec:
+  owner: {users: ["$(oc whoami)"], groups: []}
+  modelRefs: [{name: <ref>, namespace: <ref-ns>, tokenRateLimits: [{limit: 1000, window: "1m"}]}]
+  priority: 0
+EOF2
+# immediately (no sleep) request the key; note whether the first attempt fails
+curl -sk -X POST "$MAAS_API/v1/api-keys" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"v","description":"d","subscription":"litemaas-key-test","expiresIn":"1d"}' -i
+oc get maassubscription litemaas-key-test -n $NS -o jsonpath='{.status}'
+```
+
+Also check what is returned when the token user is NOT in `owner.users` (expect 403/400) and when
+the subscription name does not exist.
+
+**If wrong.** If the controller needs time, add a short poll on `status.phase` of the
+MaaSSubscription between the apply and the maas-api call in `MaasKeyService.createKey`.
+
+## A19. Who may revoke a maas-api key (owner token vs service account)
+
+**Assumption.** `DELETE /v1/api-keys/{id}` succeeds with the owner's token. LiteMaaS revokes with the
+owner's stored token first and falls back to the service account token (`K8S_TOKEN` / in-cluster)
+when the user token is expired or missing (admin revoke, expiry cleanup, reconciler). The fallback
+may be refused (403/401). A refusal is not fatal: the key's MaaSSubscription is deleted first, so the
+key cannot authorize requests anyway; the row is flagged `maas_sync_state='pending'` and the
+reconciler retries on every pass (`maasApiRevokePending` in `POST /admin/maas/reconcile`).
+
+**Code relying on it.** `revokeInMaasApi` in `maas-key.service.ts`, `MaasReconcilerService`.
+
+**Verify.**
+
+```bash
+SA_TOKEN=$(oc create token litemaas -n <litemaas-ns>)
+curl -sk -X DELETE "$MAAS_API/v1/api-keys/<id-of-a-key-owned-by-another-user>" \
+  -H "Authorization: Bearer $SA_TOKEN" -i      # 2xx = SA may revoke; 401/403 = it may not
+```
+
+**If wrong.** Grant the service account whatever maas-api requires for admin revocation (see the
+maas-api docs for its admin group), or accept the dangling-key behaviour: after the subscription is
+deleted a leftover maas-api key is inert. `maas-api` may also garbage collect such keys itself.
+
+## A20. Key expiry and extension
+
+**Assumption.** `expiresIn: "<n>d"` sets the key lifetime and the response contains `expiresAt`
+(stored in `api_keys.expires_at`). maas-api offers no endpoint to extend or change the expiry, so
+LiteMaaS accepts only a **shorter** expiration afterwards (`PATCH` with a later date or `null` -> 400;
+the owner rotates the key instead) and enforces it itself: the cleanup job
+(`POST /api-keys/admin/cleanup-expired`) and the reconciler deactivate expired keys, delete their
+MaaSSubscription and revoke the maas-api key. Without `expiresAt` no `expiresIn` is sent.
+
+**Code relying on it.** `MaasKeyService.updateExpiration`, `cleanupExpiredKeys`, reconciler
+`keysExpired`.
+
+**Verify.** Create a key with `"expiresIn":"1d"` and compare `expiresAt` with now+24h. Check the
+maas-api default when `expiresIn` is omitted (never expires? a platform maximum?), and whether `"1d"`
+is accepted in addition to hours (`"24h"`). Confirm maas-api itself rejects the key after
+`expiresAt` (use it against the gateway).
+
+**If wrong.** Adjust `formatExpiresIn` in `maas-api.client.ts`. If maas-api does offer an expiry
+update, implement it in `MaasKeyService.updateExpiration` and relax the "shorten only" rule.
+
+## A21. Rotation: two keys on one subscription
+
+**Assumption.** A second key can be created for the same MaaSSubscription while the first exists, so
+rotation can create the new key before revoking the old one (a failure leaves the old key working).
+The key name may be reused. `POST /v1/api-keys/search` is not used by the key lifecycle.
+
+**Code relying on it.** `MaasKeyService.rotateApiKey`.
+
+**Verify.** Create two keys with the same `name` and `subscription`; both must work against the
+gateway; deleting one must not affect the other.
+
+**If wrong.** If names must be unique or only one key per subscription is allowed, rotate as
+revoke-then-create (accepting a short outage) in `rotateApiKey`.
+
+## A22. Gateway base URL handed to clients (`baseUrl`)
+
+**Assumption.** API responses carry `baseUrl = MAAS_GATEWAY_URL` for MaaS keys and clients call the
+OpenAI-compatible routes under it. Whether per-model paths are needed
+(`<gateway>/<namespace>/<model>/v1/...` vs `<gateway>/v1/...` with the model in the body) is not
+assumed: the model's own `maas_endpoint` (from `MaaSModelRef.status.endpoint`) is exposed on
+`GET /models` as `maasEndpoint`, the frontend should prefer it per model and fall back to `baseUrl`.
+The model name sent in requests is the model's `backend_model_name` (see A13).
+
+**Verify.**
+
+```bash
+curl -sk "$GATEWAY/<ns>/<model>/v1/models" -H "Authorization: Bearer sk-oai-..." | jq
+curl -sk "$GATEWAY/v1/chat/completions" -H "Authorization: Bearer sk-oai-..." \
+  -H 'Content-Type: application/json' -d '{"model":"<served-name>","messages":[{"role":"user","content":"hi"}]}'
+```
+
+## A23. Editing a MaaSSubscription affects existing keys
+
+**Assumption.** Replacing `spec.modelRefs` / `tokenRateLimits` of a MaaSSubscription changes the
+effective models and TPM limits of keys already issued against it (no re-issue needed), within the
+revocation latency described in A12. LiteMaaS relies on this for TPM edits and model add/remove on
+existing keys (`MaasKeyService.updateLimits` / `updateModels`; cluster first, database second).
+
+**Verify.** Create a key, call a model, then lower `tokenRateLimits.limit` / remove the model from
+the subscription and observe the next requests (429 / 403) and how long it takes.
+
+## A24. Stored plaintext, key prefix and encryption
+
+**Assumption.** The plaintext key returned once by maas-api is stored AES-256-GCM encrypted in
+`api_keys.encrypted_key` (secret from `ENCRYPTION_KEY`, see A9) so View Key and the playground keep
+working; this is a deliberate trade-off versus maas-api's show-once semantics. `keyPrefix` from
+maas-api (for example `sk-oai-ab12`) is stored in `key_prefix` (`VARCHAR(20)`, truncated if longer).
+Rotating `ENCRYPTION_KEY` makes stored keys unreadable (`500 ... cannot be decrypted`); affected users
+rotate the key.
+
+**Verify.** Confirm `keyPrefix` is at most 20 characters and check the plaintext is not logged:
+`grep -c "sk-oai-" logs/backend.log` should be 0 after creating and revealing a key.
+
+## A25. Re-login prompt contract
+
+**Assumption.** `MAAS_REAUTH_REQUIRED` is returned as **HTTP 403** (not 401, which makes the SPA
+log the user out), body `{error: {code: 'MAAS_REAUTH_REQUIRED', details: {reason}}}`. Operations
+that fail with it: creating and rotating MaaS keys. Revoke, delete, archive, expiry cleanup, TPM and
+model edits do not need the user token (they use the service account for the cluster and fall back
+to the SA token for maas-api); a missing token only leaves the maas-api key to the reconciler. The
+frontend must key on `error.code`, not on the HTTP status.
+
+## F1. Frontend: browser calls to the MaaS gateway (Playground, curl examples)
+
+**Assumption.** The Playground calls `<base>/v1/chat/completions` directly from the browser, where
+`<base>` is the model's `maasEndpoint` (trailing `/v1` stripped) if present, else the key's
+`baseUrl`, and sends `model = backendModelName` (falling back to the part after `/` of the model id).
+This needs the maas gateway (Envoy/Authorino route) to answer CORS preflight for the LiteMaaS origin
+and to accept `Authorization: Bearer sk-oai-...`. If CORS is not enabled the Playground fails for MaaS
+keys while curl examples still work.
+
+**Verify.**
+
+```bash
+curl -sk -i -X OPTIONS "$GATEWAY/<ns>/<model>/v1/chat/completions" \
+  -H 'Origin: https://litemaas.apps.example.com' \
+  -H 'Access-Control-Request-Method: POST' \
+  -H 'Access-Control-Request-Headers: authorization,content-type'
+```
+
+## F2. Frontend: backend info on subscriptions
+
+**Assumption.** `GET /subscriptions` does not return the model's backend. The Subscriptions page
+infers MaaS from a `/` in `modelId` and, when MaaS is enabled, enriches backend and migration info
+from `GET /models`. If the subscription payload later gains `modelBackendType`,
+`modelMigrationState`, `modelMigrationGraceUntil` they are used directly.
+
+**Verify.** `curl -s -H "Authorization: Bearer $JWT" $API/api/v1/subscriptions | jq '.data[0]'`.
+
+## F3. Frontend: per-key model details
+
+**Assumption.** Key `modelDetails[]` may optionally carry `backendType`, `backendModelName`,
+`migrationState`, `migrationGraceUntil`; when absent the API Keys page falls back to the models list
+from `GET /models` (loaded for subscribed models only) for the grace-period banner and curl example.
+
+**Verify.** `curl -s -H "Authorization: Bearer $JWT" $API/api/v1/api-keys | jq '.data[0].modelDetails'`.

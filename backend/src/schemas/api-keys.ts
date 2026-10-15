@@ -30,6 +30,11 @@ export const CreateApiKeySchema = Type.Object({
     description: 'Array of model IDs to associate with this API key',
     examples: [['gpt-4', 'gpt-3.5-turbo']],
   }),
+  backendType: Type.Optional(
+    Type.Union([Type.Literal('litellm'), Type.Literal('maas')], {
+      description: 'Backend that issues the key (inferred from the models when omitted)',
+    }),
+  ),
   name: Type.Optional(
     Type.String({
       minLength: 1,
@@ -184,6 +189,12 @@ export const CreateApiKeyRequestSchema = Type.Object({
         'DEPRECATED: Use modelIds instead. Subscription ID to associate with this API key',
     }),
   ),
+  backendType: Type.Optional(
+    Type.Union([Type.Literal('litellm'), Type.Literal('maas')], {
+      description:
+        'Backend that issues the key. Omitted = inferred from the models (a key cannot mix backends). MaaS keys only support tpmLimit / modelTpmLimit and expiresAt.',
+    }),
+  ),
   // Common optional fields
   name: Type.Optional(
     Type.String({
@@ -299,6 +310,10 @@ export const ApiKeyResponseSchema = Type.Object({
       modelRpmLimit: Type.Optional(Type.Record(Type.String(), Type.Integer())),
       modelTpmLimit: Type.Optional(Type.Record(Type.String(), Type.Integer())),
       liteLLMKeyAlias: Type.Optional(Type.String()),
+      backendType: Type.Optional(Type.String({ description: "'litellm' or 'maas'" })),
+      baseUrl: Type.Optional(Type.String({ description: 'Gateway base URL (MaaS keys)' })),
+      maasKeyId: Type.Optional(Type.String()),
+      maasSyncState: Type.Optional(Type.String()),
       metadata: Type.Optional(Type.Record(Type.String(), Type.Any())),
     }),
   ),
@@ -353,6 +368,10 @@ export const SingleApiKeyResponseSchema = Type.Object({
   ),
   modelRpmLimit: Type.Optional(Type.Record(Type.String(), Type.Integer())),
   modelTpmLimit: Type.Optional(Type.Record(Type.String(), Type.Integer())),
+  // Backend
+  backendType: Type.Optional(Type.String({ description: "'litellm' or 'maas'" })),
+  baseUrl: Type.Optional(Type.String({ description: 'Gateway base URL (MaaS keys)' })),
+  maasKeyId: Type.Optional(Type.String()),
   // LiteLLM fields
   liteLLMKeyId: Type.Optional(Type.String()),
   liteLLMInfo: Type.Optional(

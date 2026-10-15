@@ -16,6 +16,7 @@ import {
 } from '../types/api-key.types.js';
 import { QueryParameter } from '../types/common.types.js';
 import { LITELLM_UNLIMITED } from '../config/litellm.js';
+import { MaasKeyService, type MaasCreateRequest } from './maas/maas-key.service.js';
 
 // Types moved to types/api-key.types.ts for consistency
 // Keeping legacy interface for backward compatibility in service
@@ -61,6 +62,10 @@ export interface ApiKeyWithSecret {
   }>;
   // Backward compatibility
   subscriptionId?: string;
+  // MaaS keys
+  backendType?: 'litellm' | 'maas';
+  maasKeyId?: string;
+  baseUrl?: string;
 }
 
 // Type moved to types/api-key.types.ts for consistency
@@ -124,6 +129,12 @@ interface ApiKeyDbRow {
   metadata?: Record<string, unknown>;
   model_details?: unknown[];
   subscription_id?: string;
+  backend_type?: 'litellm' | 'maas';
+  maas_key_id?: string;
+  maas_subscription_name?: string;
+  maas_sync_state?: 'synced' | 'pending' | 'error';
+  maas_last_error?: string;
+  encrypted_key?: string;
 }
 
 export class ApiKeyService extends BaseService {
@@ -215,9 +226,66 @@ export class ApiKeyService extends BaseService {
     },
   ];
 
-  constructor(fastify: FastifyInstance, liteLLMService: LiteLLMService) {
+  private maasKeyService?: MaasKeyService;
+
+  constructor(
+    fastify: FastifyInstance,
+    liteLLMService: LiteLLMService,
+    maasKeyService?: MaasKeyService,
+  ) {
     super(fastify);
     this.liteLLMService = liteLLMService;
+    this.maasKeyService = maasKeyService;
+  }
+
+  /** MaaS key lifecycle (created lazily: only touched for MaaS keys / when MaaS is enabled) */
+  private get maasKeys(): MaasKeyService {
+    if (!this.maasKeyService) this.maasKeyService = new MaasKeyService(this.fastify);
+    return this.maasKeyService;
+  }
+
+  /** Gateway base URL that clients use with MaaS keys */
+  get maasBaseUrl(): string | undefined {
+    return this.fastify.maasClients?.config.gatewayUrl;
+  }
+
+  /**
+   * Backend a key over these models belongs to. Rejects mixed-backend model sets and an
+   * explicit backendType that contradicts the models. Without MaaS enabled this is always
+   * 'litellm' (no database access).
+   */
+  async resolveCreateBackend(
+    modelIds: string[],
+    requested?: 'litellm' | 'maas',
+  ): Promise<'litellm' | 'maas'> {
+    if (!this.fastify.maasClients) {
+      if (requested === 'maas') {
+        throw this.createValidationError(
+          'The MaaS backend is not enabled',
+          'backendType',
+          requested,
+          'Set MAAS_ENABLED=true to create MaaS API keys',
+        );
+      }
+      return 'litellm';
+    }
+    return this.maasKeys.resolveBackend(modelIds, requested);
+  }
+
+  /** Subset of `modelIds` served by MaaS (always queries; used by admin routes) */
+  async findMaasModelIds(modelIds: string[]): Promise<string[]> {
+    if (!modelIds || modelIds.length === 0) return [];
+    return this.maasKeys.findMaasModelIds(modelIds);
+  }
+
+  /** Shorten the expiration of a MaaS key (maas-api keys cannot be extended) */
+  async updateMaasExpiration(
+    keyId: string,
+    userId: string,
+    expiresAt: Date | null,
+  ): Promise<EnhancedApiKey> {
+    const row = await this.maasKeys.updateExpiration(keyId, userId, expiresAt);
+    return this.mapToEnhancedApiKey(row as unknown as ApiKeyDbRow);
   }
 
   async createApiKey(
@@ -271,6 +339,27 @@ export class ApiKeyService extends BaseService {
             modelIds,
             'Please select at least one model for the API key',
           );
+        }
+      }
+
+      // Backend routing: a key is bound to ONE backend. MaaS keys are handled entirely by
+      // MaasKeyService; the LiteLLM path below is unchanged (MaaS models are rejected there).
+      if (this.fastify.maasClients || request.backendType === 'maas') {
+        const backend = await this.resolveCreateBackend(modelIds, request.backendType);
+        if (backend === 'maas') {
+          if (isLegacyRequest) {
+            throw this.createValidationError(
+              'Legacy subscriptionId requests are not supported for MaaS models',
+              'subscriptionId',
+              (request as LegacyCreateApiKeyRequest).subscriptionId,
+              'Use modelIds instead',
+            );
+          }
+          const created = await this.maasKeys.createApiKey(userId, {
+            ...(request as unknown as MaasCreateRequest),
+            modelIds,
+          });
+          return { ...created, baseUrl: this.maasBaseUrl };
         }
       }
 
@@ -633,7 +722,8 @@ export class ApiKeyService extends BaseService {
       // Verify ownership and get the API key
       const apiKey = await this.fastify.dbUtils.queryOne(
         `SELECT ak.id, ak.user_id, ak.name, ak.lite_llm_key_value, ak.is_active,
-                ak.created_at, ak.expires_at, ak.last_used_at
+                ak.created_at, ak.expires_at, ak.last_used_at,
+                ak.backend_type, ak.encrypted_key
          FROM api_keys ak
          WHERE ak.id = $1 AND ak.user_id = $2`,
         [keyId, userId],
@@ -666,7 +756,13 @@ export class ApiKeyService extends BaseService {
         );
       }
 
-      if (!apiKey.lite_llm_key_value) {
+      const isMaasKey = apiKey.backend_type === 'maas';
+      // MaaS keys keep their plaintext encrypted in api_keys.encrypted_key
+      const maasKeyValue = isMaasKey
+        ? this.maasKeys.decryptStoredKey(apiKey.encrypted_key as string | null, keyId)
+        : undefined;
+
+      if (!isMaasKey && !apiKey.lite_llm_key_value) {
         throw this.createNotFoundError(
           'LiteLLM key',
           keyId,
@@ -715,7 +811,7 @@ export class ApiKeyService extends BaseService {
         'API key full value retrieved securely',
       );
 
-      return String(apiKey.lite_llm_key_value);
+      return maasKeyValue ?? String(apiKey.lite_llm_key_value);
     } catch (error) {
       this.fastify.log.error(
         {
@@ -1123,6 +1219,12 @@ export class ApiKeyService extends BaseService {
         );
       }
 
+      if (apiKey.backendType === 'maas') {
+        // MaaS keys: TPM only (anything else is a 400); patches the MaaSSubscription
+        const row = await this.maasKeys.updateLimits(keyId, userId, updates);
+        return this.mapToEnhancedApiKey(row as unknown as ApiKeyDbRow);
+      }
+
       if (!apiKey.isActive) {
         throw this.createValidationError(
           'Cannot update inactive API key',
@@ -1243,6 +1345,15 @@ export class ApiKeyService extends BaseService {
         );
       }
 
+      if (apiKey.backendType === 'maas') {
+        throw this.createValidationError(
+          'Spend reset is not supported for MaaS API keys',
+          'backendType',
+          'maas',
+          'MaaS keys are limited by tokens per minute and have no spend budget',
+        );
+      }
+
       if (!apiKey.isActive) {
         throw this.createValidationError(
           'Cannot reset spend for inactive API key',
@@ -1287,6 +1398,21 @@ export class ApiKeyService extends BaseService {
         );
       }
 
+      if (apiKey.backendType === 'maas') {
+        let row;
+        if (updates.modelIds) {
+          row = await this.maasKeys.updateModels(keyId, userId, updates.modelIds);
+        }
+        if (updates.name !== undefined || updates.metadata !== undefined) {
+          row = await this.maasKeys.updateMetadata(keyId, userId, {
+            name: updates.name,
+            metadata: updates.metadata as Record<string, unknown> | undefined,
+          });
+        }
+        row = row ?? (await this.maasKeys.getKeyRow(keyId, userId));
+        return this.mapToEnhancedApiKey(row as unknown as ApiKeyDbRow);
+      }
+
       if (!apiKey.isActive) {
         throw this.createValidationError(
           'Cannot update inactive API key',
@@ -1298,6 +1424,10 @@ export class ApiKeyService extends BaseService {
 
       // Validate models have active subscriptions if modelIds are being updated
       if (updates.modelIds) {
+        if (this.fastify.maasClients) {
+          // A LiteLLM key cannot take MaaS models (keys are bound to one backend)
+          await this.resolveCreateBackend(updates.modelIds, 'litellm');
+        }
         await this.validateModelsHaveActiveSubscriptions(userId, updates.modelIds);
       }
 
@@ -1547,6 +1677,12 @@ export class ApiKeyService extends BaseService {
         );
       }
 
+      if (apiKey.backendType === 'maas') {
+        // Subscription deleted + best-effort maas-api revoke; the reconciler retries failures
+        await this.maasKeys.revokeApiKey(keyId, userId, reason);
+        return;
+      }
+
       if (!apiKey.isActive) {
         throw this.createValidationError(
           'API key is already inactive',
@@ -1618,6 +1754,11 @@ export class ApiKeyService extends BaseService {
         );
       }
 
+      if (apiKey.backendType === 'maas') {
+        await this.maasKeys.deleteApiKey(keyId, userId);
+        return;
+      }
+
       // Delete from LiteLLM if integrated
       if (apiKey.liteLLMKeyId && !this.shouldUseMockData()) {
         try {
@@ -1673,6 +1814,10 @@ export class ApiKeyService extends BaseService {
       const existingKey = await this.getApiKey(keyId, userId);
       if (!existingKey) {
         throw this.fastify.createNotFoundError('API key');
+      }
+
+      if (existingKey.backendType === 'maas') {
+        return await this.maasKeys.rotateApiKey(keyId, userId);
       }
 
       // Use transaction wrapper
@@ -1870,8 +2015,19 @@ export class ApiKeyService extends BaseService {
 
   async cleanupExpiredKeys(): Promise<number> {
     try {
+      // MaaS keys first (cluster access removed, row deactivated) so the generic pass below,
+      // which only sees still-active keys, never deactivates a MaaS key without revoking it
+      let maasCleaned = 0;
+      if (this.fastify.maasClients) {
+        try {
+          maasCleaned = await this.maasKeys.cleanupExpiredKeys();
+        } catch (error) {
+          this.fastify.log.error(error, 'Failed to cleanup expired MaaS API keys');
+        }
+      }
+
       // Use transaction wrapper
-      return await this.fastify.dbUtils.withTransaction(async (client) => {
+      const liteLLMCleaned = await this.fastify.dbUtils.withTransaction(async (client) => {
         // Get expired keys with their LiteLLM IDs
         const expiredKeysResult = await client.query(
           `SELECT id, lite_llm_key_value, user_id, name, key_prefix
@@ -1946,6 +2102,7 @@ export class ApiKeyService extends BaseService {
 
         return expiredKeys.length;
       });
+      return liteLLMCleaned + maasCleaned;
     } catch (error) {
       this.fastify.log.error(error, 'Failed to cleanup expired API keys');
       throw error;
@@ -2074,6 +2231,13 @@ export class ApiKeyService extends BaseService {
       modelRpmLimit: apiKey.model_rpm_limit,
       modelTpmLimit: apiKey.model_tpm_limit,
       metadata: apiKey.metadata,
+      ...(apiKey.backend_type === 'maas' && {
+        backendType: 'maas' as const,
+        maasKeyId: apiKey.maas_key_id,
+        maasSubscriptionName: apiKey.maas_subscription_name,
+        maasSyncState: apiKey.maas_sync_state,
+        maasLastError: apiKey.maas_last_error,
+      }),
       // Include model details if available
       modelDetails: apiKey.model_details as
         | Array<{
@@ -2150,8 +2314,12 @@ export class ApiKeyService extends BaseService {
     const apiKeys = await this.fastify.dbUtils.queryMany<{
       id: string;
       lite_llm_key_value: string;
+      backend_type?: string;
+      maas_key_id?: string | null;
+      maas_subscription_name?: string | null;
     }>(
-      `SELECT DISTINCT ak.id, ak.lite_llm_key_value
+      `SELECT DISTINCT ak.id, ak.lite_llm_key_value, ak.backend_type, ak.maas_key_id,
+              ak.maas_subscription_name
        FROM api_keys ak
        JOIN api_key_models akm ON ak.id = akm.api_key_id
        WHERE ak.user_id = $1
@@ -2168,7 +2336,28 @@ export class ApiKeyService extends BaseService {
     const liteLLMUpdates: { keyId: string; success: boolean; error?: Error }[] = [];
 
     for (const apiKey of apiKeys) {
-      if (apiKey.lite_llm_key_value && !this.shouldUseMockData()) {
+      if (apiKey.backend_type === 'maas') {
+        // MaaS key: re-apply the remaining models to its MaaSSubscription, or revoke the whole
+        // key when none remain. A cluster failure leaves the database unchanged for this key.
+        try {
+          await this.maasKeys.removeModelFromKey(
+            {
+              id: apiKey.id,
+              user_id: userId,
+              maas_key_id: apiKey.maas_key_id ?? null,
+              maas_subscription_name: apiKey.maas_subscription_name ?? null,
+            },
+            modelId,
+          );
+          liteLLMUpdates.push({ keyId: apiKey.id, success: true });
+        } catch (error) {
+          this.fastify.log.error(
+            { error, keyId: apiKey.id, modelId },
+            'Failed to update MaaS subscription - aborting database update for this key',
+          );
+          liteLLMUpdates.push({ keyId: apiKey.id, success: false, error: error as Error });
+        }
+      } else if (apiKey.lite_llm_key_value && !this.shouldUseMockData()) {
         try {
           // Get remaining models for this key (excluding the one being removed)
           const remainingModels = await this.fastify.dbUtils.queryMany<{ model_id: string }>(
@@ -2268,8 +2457,13 @@ export class ApiKeyService extends BaseService {
       archived_at: Date | null;
       lite_llm_key_value: string | null;
       is_active: boolean;
+      backend_type?: string;
+      maas_key_id?: string | null;
+      maas_subscription_name?: string | null;
     }>(
-      `SELECT id, archived_at, lite_llm_key_value, is_active FROM api_keys ${ownershipFilter}`,
+      `SELECT id, archived_at, lite_llm_key_value, is_active, backend_type, maas_key_id,
+              maas_subscription_name
+       FROM api_keys ${ownershipFilter}`,
       params,
     );
 
@@ -2287,7 +2481,16 @@ export class ApiKeyService extends BaseService {
 
     // Deactivate in LiteLLM first if active — let errors propagate so the key
     // stays visible rather than being archived while still active remotely
-    if (key.is_active && key.lite_llm_key_value && !this.shouldUseMockData()) {
+    if (key.backend_type === 'maas') {
+      if (key.is_active) {
+        await this.maasKeys.revokeForArchive({
+          id: key.id,
+          user_id: userId,
+          maas_key_id: key.maas_key_id ?? null,
+          maas_subscription_name: key.maas_subscription_name ?? null,
+        });
+      }
+    } else if (key.is_active && key.lite_llm_key_value && !this.shouldUseMockData()) {
       await this.liteLLMService.deleteKey(key.lite_llm_key_value);
     }
 

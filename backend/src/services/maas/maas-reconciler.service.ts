@@ -3,7 +3,7 @@ import { BaseService } from '../base.service.js';
 import { withAdvisoryLock } from '../../utils/advisory-lock.utils.js';
 import { upsertK8sObject, type K8sObject } from '../k8s/k8s-client.js';
 import type { MaasClients } from './maas-clients.js';
-import { UserTokenService } from './user-token.service.js';
+import { revokeInMaasApi } from './maas-key.service.js';
 import {
   LABEL_API_KEY_ID,
   MANAGED_SELECTOR,
@@ -32,6 +32,10 @@ export interface ReconcileResult {
   subscriptionsDeleted: number;
   keysMarkedSynced: number;
   keysFailed: number;
+  /** Active keys past their expiration that were deactivated on this pass */
+  keysExpired: number;
+  /** Revoked / expired keys whose maas-api key could not be revoked yet (retried next pass) */
+  maasApiRevokePending: number;
   errors: string[];
   durationMs: number;
 }
@@ -74,6 +78,8 @@ function emptyResult(): ReconcileResult {
     subscriptionsDeleted: 0,
     keysMarkedSynced: 0,
     keysFailed: 0,
+    keysExpired: 0,
+    maasApiRevokePending: 0,
     errors: [],
     durationMs: 0,
   };
@@ -268,6 +274,25 @@ export class MaasReconcilerService extends BaseService {
       for (const key of keys) {
         const name = key.maas_subscription_name || subscriptionName(key.id);
         const models = modelsByKey.get(key.id) ?? [];
+
+        // Expired but still flagged active (cleanup job did not run): deactivate, then fall
+        // through as a not-live key so the subscription and the maas-api key are removed
+        if (key.is_active && key.expires_at && new Date(key.expires_at).getTime() <= now) {
+          try {
+            await this.fastify.dbUtils.query(
+              `UPDATE api_keys
+                  SET is_active = false, updated_at = CURRENT_TIMESTAMP,
+                      maas_sync_state = CASE WHEN maas_key_id IS NOT NULL THEN 'pending' ELSE maas_sync_state END
+                WHERE id = $1 AND is_active = true`,
+              [key.id],
+            );
+            key.is_active = false;
+            if (key.maas_key_id) key.maas_sync_state = 'pending';
+            result.keysExpired++;
+          } catch (error) {
+            result.errors.push(`key ${key.id} expiry: ${errMsg(error)}`);
+          }
+        }
         const live =
           key.is_active &&
           !key.revoked_at &&
@@ -307,7 +332,17 @@ export class MaasReconcilerService extends BaseService {
             key.maas_key_id &&
             (key.maas_sync_state === 'pending' || key.maas_sync_state === 'error')
           ) {
-            if (!live) await this.bestEffortRevokeInMaasApi(key);
+            if (!live && !(await this.revokeInMaasApi(key))) {
+              // Subscription is gone (the key cannot authorize requests); keep retrying the
+              // maas-api revoke on later passes, e.g. after the owner logs in again
+              result.maasApiRevokePending++;
+              await this.fastify.dbUtils.query(
+                `UPDATE api_keys SET maas_sync_state = 'pending', maas_last_error = $2,
+                        updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+                [key.id, 'maas-api key not revoked yet (no usable token)'],
+              );
+              continue;
+            }
             await this.fastify.dbUtils.query(
               `UPDATE api_keys SET maas_sync_state = 'synced', maas_last_error = NULL,
                       updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
@@ -351,20 +386,11 @@ export class MaasReconcilerService extends BaseService {
   }
 
   /**
-   * Revoke the maas-api key for a no-longer-live key. maas-api authenticates the caller, so
-   * this only works while the owner's stored token is still valid; otherwise it is skipped
-   * (deleting the MaaSSubscription already stops the key from authorizing requests).
+   * Revoke the maas-api key of a no-longer-live key: the owner's stored token first, then the
+   * service account token. Returns false when neither worked (retried on the next pass).
    */
-  private async bestEffortRevokeInMaasApi(key: KeyRow): Promise<void> {
-    if (!key.maas_key_id) return;
-    try {
-      const token = await new UserTokenService(this.fastify).getValidToken(key.user_id);
-      await this.clients.maasApi.revokeKey(token, key.maas_key_id);
-    } catch (error) {
-      this.fastify.log.debug(
-        { keyId: key.id, error: errMsg(error) },
-        'MaaS reconcile: maas-api revoke skipped',
-      );
-    }
+  private async revokeInMaasApi(key: KeyRow): Promise<boolean> {
+    if (!key.maas_key_id) return true;
+    return revokeInMaasApi(this.fastify, this.clients, key.user_id, key.maas_key_id);
   }
 }

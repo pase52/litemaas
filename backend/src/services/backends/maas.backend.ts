@@ -1,6 +1,8 @@
+import type { FastifyInstance } from 'fastify';
 import { ApplicationError } from '../../utils/errors.js';
 import type { MaasClients } from '../maas/maas-clients.js';
 import { MAAS_MODEL_REF, parseModelRef } from '../maas/maas-resources.js';
+import { MaasKeyService } from '../maas/maas-key.service.js';
 import type {
   BackendHealth,
   BackendKeyResult,
@@ -69,6 +71,7 @@ export class MaasModelBackend implements ModelBackendProvider {
   }
 }
 
+/** Placeholder key provider used when no Fastify instance is available */
 export class MaasKeyBackend implements KeyBackendProvider {
   readonly type = 'maas' as const;
   constructor(protected readonly clients: MaasClients) {}
@@ -91,11 +94,18 @@ export class MaasUsageBackend implements UsageSource {
   }
 }
 
-export function createMaasBackend(clients: MaasClients): BackendProvider {
+/**
+ * @param fastify when given, key lifecycle is backed by MaasKeyService (production wiring);
+ *                without it the key provider is the not-implemented stub (registry-only tests)
+ */
+export function createMaasBackend(
+  clients: MaasClients,
+  fastify?: FastifyInstance,
+): BackendProvider {
   return {
     type: 'maas',
     models: new MaasModelBackend(clients),
-    keys: new MaasKeyBackend(clients),
+    keys: fastify ? new MaasKeyService(fastify, clients) : new MaasKeyBackend(clients),
     usage: new MaasUsageBackend(clients),
   };
 }

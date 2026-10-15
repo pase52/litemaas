@@ -43,6 +43,8 @@ export interface ApiKeyPermissions {
  */
 export interface CreateApiKeyRequest {
   modelIds: string[]; // Array of model IDs
+  /** Backend that issues the key. Omitted = inferred from the models' backend */
+  backendType?: 'litellm' | 'maas';
   name?: string;
   expiresAt?: Date;
   maxBudget?: number;
@@ -94,6 +96,12 @@ export interface ApiKey {
   lastUsedAt?: Date;
   revokedAt?: Date;
   archivedAt?: Date;
+  // MaaS integration fields (only set for backend_type = 'maas' keys)
+  backendType?: 'litellm' | 'maas';
+  maasKeyId?: string;
+  maasSubscriptionName?: string;
+  maasSyncState?: 'synced' | 'pending' | 'error';
+  maasLastError?: string;
   // LiteLLM integration fields
   liteLLMKeyId?: string;
   lastSyncAt?: Date;
